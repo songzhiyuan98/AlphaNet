@@ -1,0 +1,38 @@
+{
+  "name": "@alphanet/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "clean": "rm -rf dist coverage",
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js",
+    "test": "vitest run src",
+    "test:coverage": "vitest run src --coverage",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@alphanet/config": "workspace:*",
+    "@alphanet/contracts": "workspace:*",
+    "@alphanet/database": "workspace:*",
+    "@alphanet/observability": "workspace:*",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "express": "5.2.1",
+    "pino": "10.3.1",
+    "zod": "4.1.12"
+  },
+  "devDependencies": {
+    "@types/express": "5.0.6",
+    "@types/node": "22.20.1",
+    "@types/supertest": "6.0.3",
+    "@vitest/coverage-v8": "4.1.0",
+    "supertest": "7.2.2",
+    "tsx": "4.21.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.0"
+  }
+}

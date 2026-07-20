@@ -1,0 +1,125 @@
+name: Invoke deployment hook
+description: Deploy one digest-pinned AlphaNet release through an authenticated HTTPS hook.
+
+inputs:
+  deploy-sha:
+    description: Full Git commit SHA to deploy.
+    required: true
+  environment:
+    description: Target deployment environment.
+    required: true
+  hook-token:
+    description: Bearer token for the deployment hook.
+    required: true
+  hook-url:
+    description: HTTPS deployment hook URL.
+    required: true
+  manifest-path:
+    description: Validated release manifest containing five digest references.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Validate deployment request
+      shell: bash
+      env:
+        DEPLOY_HOOK_TOKEN: ${{ inputs.hook-token }}
+        DEPLOY_HOOK_URL: ${{ inputs.hook-url }}
+        DEPLOY_SHA: ${{ inputs.deploy-sha }}
+        RELEASE_MANIFEST_PATH: ${{ inputs.manifest-path }}
+        TARGET_ENVIRONMENT: ${{ inputs.environment }}
+      run: |
+        if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "::error::deploy-sha must be a full lowercase 40-character Git commit SHA."
+          exit 1
+        fi
+
+        if [[ "$TARGET_ENVIRONMENT" != "staging" &&
+              "$TARGET_ENVIRONMENT" != "production" ]]; then
+          echo "::error::environment must be staging or production."
+          exit 1
+        fi
+
+        if [[ -z "$DEPLOY_HOOK_URL" ]]; then
+          echo "::error::The ${TARGET_ENVIRONMENT} deployment hook is not configured."
+          exit 1
+        fi
+
+        if [[ ! "$DEPLOY_HOOK_URL" =~ ^https:// ]]; then
+          echo "::error::The deployment hook must use HTTPS."
+          exit 1
+        fi
+
+        if [[ -z "$DEPLOY_HOOK_TOKEN" ]]; then
+          echo "::error::The ${TARGET_ENVIRONMENT} deployment hook token is not configured."
+          exit 1
+        fi
+
+        bash "$GITHUB_WORKSPACE/.github/scripts/validate-release-manifest.sh" \
+          "$RELEASE_MANIFEST_PATH" "$DEPLOY_SHA" "$GITHUB_REPOSITORY"
+
+    - name: Invoke digest-pinned deployment
+      shell: bash
+      env:
+        DEPLOY_HOOK_TOKEN: ${{ inputs.hook-token }}
+        DEPLOY_HOOK_URL: ${{ inputs.hook-url }}
+        DEPLOY_SHA: ${{ inputs.deploy-sha }}
+        RELEASE_MANIFEST_PATH: ${{ inputs.manifest-path }}
+        TARGET_ENVIRONMENT: ${{ inputs.environment }}
+      run: |
+        payload_file="$(mktemp)"
+        response_file="$(mktemp)"
+        trap 'rm -f "$payload_file" "$response_file"' EXIT
+
+        manifest_checksum="$(sha256sum "$RELEASE_MANIFEST_PATH" | awk '{print $1}')"
+        jq \
+          --arg environment "$TARGET_ENVIRONMENT" \
+          --arg manifest_checksum "$manifest_checksum" \
+          '{
+            schemaVersion: 1,
+            repository: .repository,
+            environment: $environment,
+            sha: .sha,
+            releaseManifestSha256: $manifest_checksum,
+            workflowRunId: .workflowRunId,
+            images: (.images | with_entries(.value = .value.reference))
+          }' "$RELEASE_MANIFEST_PATH" > "$payload_file"
+
+        curl_args=(
+          --silent
+          --show-error
+          --fail-with-body
+          --connect-timeout 10
+          --max-time 900
+          --retry 2
+          --retry-all-errors
+          --retry-delay 5
+          --output "$response_file"
+          --request POST
+          --header "Content-Type: application/json"
+          --header "Accept: application/json"
+          --header "Idempotency-Key: deploy:${GITHUB_REPOSITORY}:${TARGET_ENVIRONMENT}:${DEPLOY_SHA}"
+          --header "Authorization: Bearer ${DEPLOY_HOOK_TOKEN}"
+          --data-binary "@${payload_file}"
+        )
+
+        if ! curl "${curl_args[@]}" "$DEPLOY_HOOK_URL"; then
+          echo "::error::The deployment hook request failed."
+          exit 1
+        fi
+
+        if ! jq -e \
+          --arg environment "$TARGET_ENVIRONMENT" \
+          --arg sha "$DEPLOY_SHA" \
+          '
+            .status == "succeeded" and
+            .environment == $environment and
+            .sha == $sha and
+            (.deploymentId | type == "string" and length > 0)
+          ' "$response_file" >/dev/null; then
+          echo "::error::The deployment hook did not return terminal success."
+          exit 1
+        fi
+
+        echo "Deployment completed successfully."

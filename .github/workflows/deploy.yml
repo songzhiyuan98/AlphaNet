@@ -1,0 +1,203 @@
+name: Manual Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_sha:
+        description: Full SHA of a successful main CI release manifest.
+        required: true
+        type: string
+      target:
+        description: Environment to deploy.
+        required: true
+        default: staging
+        type: choice
+        options:
+          - staging
+          - production
+      confirm_production:
+        description: Confirm an intentional production promotion or rollback.
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  resolve:
+    name: Validate release manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      deploy_sha: ${{ steps.resolve.outputs.deploy_sha }}
+      manifest_artifact: ${{ steps.resolve.outputs.manifest_artifact }}
+      source_run_id: ${{ steps.resolve.outputs.source_run_id }}
+      target: ${{ steps.resolve.outputs.target }}
+    steps:
+      - name: Check out trusted deployment tooling
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Locate successful CI release
+        id: resolve
+        env:
+          CONFIRM_PRODUCTION: ${{ inputs.confirm_production }}
+          DEPLOY_SHA: ${{ inputs.deploy_sha }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_ENVIRONMENT: ${{ inputs.target }}
+        run: |
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::Manual Deploy must be dispatched from the main branch."
+            exit 1
+          fi
+
+          if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::deploy_sha must be a full lowercase 40-character Git commit SHA."
+            exit 1
+          fi
+
+          if [[ "$TARGET_ENVIRONMENT" == "production" &&
+                "$CONFIRM_PRODUCTION" != "true" ]]; then
+            echo "::error::Production deployment requires confirm_production."
+            exit 1
+          fi
+
+          if ! git merge-base --is-ancestor "$DEPLOY_SHA" HEAD; then
+            echo "::error::deploy_sha is not reachable from main."
+            exit 1
+          fi
+
+          api_headers=(
+            --header "Accept: application/vnd.github+json"
+            --header "Authorization: Bearer ${GH_TOKEN}"
+            --header "X-GitHub-Api-Version: 2022-11-28"
+          )
+
+          runs_url="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&event=push&status=completed&head_sha=${DEPLOY_SHA}&per_page=100"
+          runs_response="$(curl --silent --show-error --fail-with-body \
+            "${api_headers[@]}" "$runs_url")"
+          source_run_id="$(jq -r '
+            [.workflow_runs[] | select(.conclusion == "success")]
+            | sort_by(.run_number)
+            | last
+            | .id // empty
+          ' <<<"$runs_response")"
+
+          if [[ -z "$source_run_id" ]]; then
+            echo "::error::No successful main CI run exists for deploy_sha."
+            exit 1
+          fi
+
+          manifest_name="release-manifest-${DEPLOY_SHA}"
+          artifacts_url="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${source_run_id}/artifacts?name=${manifest_name}&per_page=100"
+          artifacts_response="$(curl --silent --show-error --fail-with-body \
+            "${api_headers[@]}" "$artifacts_url")"
+          artifact_url="$(jq -r --arg name "$manifest_name" '
+            [.artifacts[] | select(.name == $name and .expired == false)]
+            | first
+            | .archive_download_url // empty
+          ' <<<"$artifacts_response")"
+
+          if [[ -z "$artifact_url" ]]; then
+            echo "::error::The successful CI run has no unexpired release manifest artifact."
+            exit 1
+          fi
+
+          mkdir -p release
+          curl --silent --show-error --fail-with-body --location \
+            "${api_headers[@]}" --output release-manifest.zip "$artifact_url"
+          unzip -q release-manifest.zip -d release
+
+          (
+            cd release
+            sha256sum --check release-manifest.sha256
+          )
+          bash .github/scripts/validate-release-manifest.sh \
+            release/release-manifest.json "$DEPLOY_SHA" "$GITHUB_REPOSITORY"
+
+          validated_artifact="validated-release-manifest-${DEPLOY_SHA}-${GITHUB_RUN_ID}"
+          {
+            echo "deploy_sha=$DEPLOY_SHA"
+            echo "manifest_artifact=$validated_artifact"
+            echo "source_run_id=$source_run_id"
+            echo "target=$TARGET_ENVIRONMENT"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Preserve validated release manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.resolve.outputs.manifest_artifact }}
+          path: |
+            release/release-manifest.json
+            release/release-manifest.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  staging:
+    name: Deploy staging
+    if: needs.resolve.outputs.target == 'staging'
+    needs:
+      - resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    concurrency:
+      group: deploy-staging
+      cancel-in-progress: false
+    steps:
+      - name: Check out trusted deployment tooling
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Download validated manifest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.resolve.outputs.manifest_artifact }}
+          path: release
+
+      - name: Deploy exact staging digests
+        uses: ./.github/actions/invoke-deploy-hook
+        with:
+          deploy-sha: ${{ needs.resolve.outputs.deploy_sha }}
+          environment: staging
+          hook-token: ${{ secrets.STAGING_DEPLOY_HOOK_TOKEN }}
+          hook-url: ${{ secrets.STAGING_DEPLOY_HOOK_URL }}
+          manifest-path: release/release-manifest.json
+
+  production:
+    name: Deploy production
+    if: >-
+      always() &&
+      needs.resolve.result == 'success' &&
+      needs.resolve.outputs.target == 'production'
+    needs:
+      - resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      - name: Check out trusted deployment tooling
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Download validated manifest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.resolve.outputs.manifest_artifact }}
+          path: release
+
+      - name: Deploy exact production digests
+        uses: ./.github/actions/invoke-deploy-hook
+        with:
+          deploy-sha: ${{ needs.resolve.outputs.deploy_sha }}
+          environment: production
+          hook-token: ${{ secrets.PRODUCTION_DEPLOY_HOOK_TOKEN }}
+          hook-url: ${{ secrets.PRODUCTION_DEPLOY_HOOK_URL }}
+          manifest-path: release/release-manifest.json

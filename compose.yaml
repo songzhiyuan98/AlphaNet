@@ -1,0 +1,223 @@
+name: ${COMPOSE_PROJECT_NAME:-alphanet}
+
+x-postgres-image: &postgres-image ${POSTGRES_IMAGE:-pgvector/pgvector:0.8.1-pg17-bookworm@sha256:3e8b3adfd27b5707128f60956f62a793c3c9326ea8cfaf0eab7adccb5d700b21}
+x-redis-image: &redis-image ${REDIS_IMAGE:-redis:7.4.2-alpine@sha256:02419de7eddf55aa5bcf49efb74e88fa8d931b4d77c07eff8a6b2144472b6952}
+
+x-runtime-environment: &runtime-environment
+  NODE_ENV: production
+  TZ: UTC
+  LOG_LEVEL: ${LOG_LEVEL:-debug}
+
+x-data-service-environment: &data-service-environment
+  <<: *runtime-environment
+  DATABASE_URL: postgresql://${POSTGRES_USER:-alphanet}:${POSTGRES_PASSWORD:-alphanet_local_only}@postgres:5432/${POSTGRES_DB:-alphanet}
+  REDIS_URL: redis://:${REDIS_PASSWORD:-alphanet_local_only}@redis:6379/0
+
+x-app-base: &app-base
+  restart: unless-stopped
+  init: true
+  networks:
+    - alphanet
+
+services:
+  postgres:
+    image: *postgres-image
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-alphanet}
+      POSTGRES_USER: ${POSTGRES_USER:-alphanet}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-alphanet_local_only}
+      POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C
+      ALPHANET_LOAD_SEED: ${ALPHANET_LOAD_SEED:-true}
+    command:
+      - postgres
+      - -c
+      - timezone=UTC
+      - -c
+      - idle_in_transaction_session_timeout=60000
+      - -c
+      - log_min_duration_statement=${POSTGRES_LOG_MIN_DURATION_MS:-500}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./db:/opt/alphanet/db:ro
+      - ./infra/local/postgres-init.sh:/opt/alphanet/infra/postgres-init.sh:ro
+      - ./infra/local/postgres-init.sql:/docker-entrypoint-initdb.d/010-alphanet-bootstrap.sql:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready --quiet --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    stop_grace_period: 30s
+    shm_size: 256mb
+    networks:
+      - alphanet
+
+  redis:
+    image: *redis-image
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-alphanet_local_only}
+    command:
+      - redis-server
+      - /usr/local/etc/redis/redis.conf
+      - --requirepass
+      - ${REDIS_PASSWORD:-alphanet_local_only}
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+      - ./infra/local/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - redis-cli --no-auth-warning -a "$$REDIS_PASSWORD" ping | grep -q PONG
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    stop_grace_period: 10s
+    networks:
+      - alphanet
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: migrate
+      args:
+        POSTGRES_IMAGE: *postgres-image
+    profiles:
+      - tools
+      - app
+      - api
+      - web
+      - worker
+      - mcp
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB:-alphanet}
+      PGUSER: ${POSTGRES_USER:-alphanet}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-alphanet_local_only}
+      PGCONNECT_TIMEOUT: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - alphanet
+
+  seed:
+    image: *postgres-image
+    profiles:
+      - tools
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB:-alphanet}
+      PGUSER: ${POSTGRES_USER:-alphanet}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-alphanet_local_only}
+      PGCONNECT_TIMEOUT: 5
+    entrypoint:
+      - /bin/bash
+      - /opt/alphanet/db/scripts/seed.sh
+    volumes:
+      - ./db:/opt/alphanet/db:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+    networks:
+      - alphanet
+
+  api:
+    <<: *app-base
+    profiles:
+      - app
+      - api
+      - web
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *data-service-environment
+      PORT: 4000
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+    ports:
+      - "127.0.0.1:${API_PORT:-4000}:4000"
+
+  web:
+    <<: *app-base
+    profiles:
+      - app
+      - web
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: web
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      <<: *runtime-environment
+      PORT: 3000
+      API_INTERNAL_URL: http://api:4000
+    ports:
+      - "127.0.0.1:${WEB_PORT:-3000}:3000"
+
+  worker:
+    <<: *app-base
+    profiles:
+      - app
+      - worker
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *runtime-environment
+      DATABASE_URL: postgresql://${POSTGRES_USER:-alphanet}:${POSTGRES_PASSWORD:-alphanet_local_only}@postgres:5432/${POSTGRES_DB:-alphanet}
+      OUTBOX_CONSUMER_NAME: ${OUTBOX_CONSUMER_NAME:-alphanet-worker:v1}
+      OUTBOX_REPLAY_FROM: ${OUTBOX_REPLAY_FROM:-2026-07-20T00:00:00.000Z}
+      WORKER_POLL_INTERVAL_MS: ${WORKER_POLL_INTERVAL_MS:-1000}
+      WORKER_BATCH_SIZE: ${WORKER_BATCH_SIZE:-20}
+      RUN_ONCE: ${RUN_ONCE:-false}
+
+  mcp:
+    <<: *app-base
+    profiles:
+      - app
+      - mcp
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: mcp
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *data-service-environment
+      PORT: 4100
+      MCP_ALLOWED_HOSTS: localhost,127.0.0.1,mcp
+    ports:
+      - "127.0.0.1:${MCP_PORT:-4100}:4100"
+
+volumes:
+  postgres-data:
+  redis-data:
+
+networks:
+  alphanet:
+    driver: bridge

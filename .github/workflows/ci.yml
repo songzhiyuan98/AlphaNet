@@ -1,0 +1,381 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CI: "true"
+  NODE_VERSION: "22.22.0"
+
+jobs:
+  quality:
+    name: Quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up workspace
+        uses: ./.github/actions/setup-pnpm
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Audit production dependencies
+        run: pnpm audit --prod --audit-level high
+
+      - name: Check formatting
+        run: pnpm format:check
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Type-check
+        run: pnpm typecheck
+
+      - name: Run unit tests
+        run: pnpm test
+
+  integration:
+    name: Integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/alphanet_test
+      REDIS_URL: redis://127.0.0.1:6379/0
+      REQUIRE_INTEGRATION_SERVICES: "true"
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGDATABASE: alphanet_test
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      MIGRATIONS_DIR: ${{ github.workspace }}/db/migrations
+      SEEDS_DIR: ${{ github.workspace }}/db/seeds
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.1-pg17-bookworm@sha256:3e8b3adfd27b5707128f60956f62a793c3c9326ea8cfaf0eab7adccb5d700b21
+        env:
+          POSTGRES_DB: alphanet_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d alphanet_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7.4.2-alpine@sha256:02419de7eddf55aa5bcf49efb74e88fa8d931b4d77c07eff8a6b2144472b6952
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up workspace
+        uses: ./.github/actions/setup-pnpm
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Apply migrations and seed data
+        run: |
+          bash db/scripts/migrate.sh
+          bash db/scripts/seed.sh
+
+      - name: Run integration tests
+        run: pnpm test:integration
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up workspace
+        uses: ./.github/actions/setup-pnpm
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Build all workspace applications
+        run: pnpm build
+
+  container-check:
+    name: Container check (${{ matrix.target }})
+    if: github.event_name == 'pull_request'
+    needs:
+      - quality
+      - integration
+      - build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - web
+          - api
+          - mcp
+          - worker
+          - migrate
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Build image without registry credentials
+        id: image
+        uses: ./.github/actions/build-container
+        with:
+          target: ${{ matrix.target }}
+          publish: "false"
+
+      - name: Scan image for fixable high-severity vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.image.outputs.tag }}
+          exit-code: "1"
+          ignore-unfixed: "true"
+          severity: CRITICAL,HIGH
+          vuln-type: os,library
+
+  publish:
+    name: Publish (${{ matrix.target }})
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      - quality
+      - integration
+      - build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - web
+          - api
+          - mcp
+          - worker
+          - migrate
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Build and publish image
+        id: image
+        uses: ./.github/actions/build-container
+        with:
+          target: ${{ matrix.target }}
+          publish: "true"
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Scan published digest for fixable high-severity vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.image.outputs.repository }}@${{ steps.image.outputs.digest }}
+          exit-code: "1"
+          ignore-unfixed: "true"
+          severity: CRITICAL,HIGH
+          vuln-type: os,library
+
+      - name: Record published digest
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          IMAGE_REPOSITORY: ${{ steps.image.outputs.repository }}
+          IMAGE_TAG: ${{ steps.image.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Build did not return an immutable image digest."
+            exit 1
+          fi
+
+          mkdir -p release-metadata
+          jq -n \
+            --arg target "$TARGET" \
+            --arg repository "$IMAGE_REPOSITORY" \
+            --arg tag "$IMAGE_TAG" \
+            --arg digest "$IMAGE_DIGEST" \
+            '{
+              target: $target,
+              repository: $repository,
+              tag: $tag,
+              digest: $digest,
+              reference: ($repository + "@" + $digest)
+            }' > "release-metadata/${TARGET}.json"
+
+      - name: Upload image digest metadata
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: image-metadata-${{ matrix.target }}-${{ github.sha }}
+          path: release-metadata/${{ matrix.target }}.json
+          if-no-files-found: error
+          retention-days: 30
+
+  required:
+    name: Required
+    if: always()
+    needs:
+      - quality
+      - integration
+      - build
+      - container-check
+      - publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify required CI jobs
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          CONTAINER_CHECK_RESULT: ${{ needs.container-check.result }}
+          EVENT_NAME: ${{ github.event_name }}
+          INTEGRATION_RESULT: ${{ needs.integration.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            container_result="$CONTAINER_CHECK_RESULT"
+            inactive_result="$PUBLISH_RESULT"
+          else
+            container_result="$PUBLISH_RESULT"
+            inactive_result="$CONTAINER_CHECK_RESULT"
+          fi
+
+          if [[ "$QUALITY_RESULT" != "success" ||
+                "$INTEGRATION_RESULT" != "success" ||
+                "$BUILD_RESULT" != "success" ||
+                "$container_result" != "success" ||
+                "$inactive_result" != "skipped" ]]; then
+            echo "::error::One or more required CI jobs failed or were cancelled."
+            exit 1
+          fi
+
+  release-manifest:
+    name: Release manifest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      - publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out release validation
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Download image digest metadata
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: image-metadata-*-${{ github.sha }}
+          path: release-metadata
+          merge-multiple: true
+
+      - name: Assemble immutable release manifest
+        run: |
+          metadata_files=(release-metadata/*.json)
+          if [[ "${#metadata_files[@]}" -ne 5 ]]; then
+            echo "::error::Expected metadata for exactly five images."
+            exit 1
+          fi
+
+          created_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          jq -s \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg sha "$GITHUB_SHA" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg created_at "$created_at" \
+            '{
+              schemaVersion: 1,
+              repository: $repository,
+              sha: $sha,
+              workflowRunId: $run_id,
+              createdAt: $created_at,
+              images: (
+                reduce .[] as $image ({};
+                  .[$image.target] = {
+                    repository: $image.repository,
+                    tag: $image.tag,
+                    digest: $image.digest,
+                    reference: $image.reference
+                  }
+                )
+              )
+            }' "${metadata_files[@]}" > release-manifest.json
+
+          bash .github/scripts/validate-release-manifest.sh \
+            release-manifest.json "$GITHUB_SHA" "$GITHUB_REPOSITORY"
+          sha256sum release-manifest.json > release-manifest.sha256
+
+      - name: Upload release manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-manifest-${{ github.sha }}
+          path: |
+            release-manifest.json
+            release-manifest.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+  deploy-staging:
+    name: Deploy staging
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      vars.ENABLE_STAGING_DEPLOY == 'true'
+    needs:
+      - required
+      - release-manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    concurrency:
+      group: deploy-staging
+      cancel-in-progress: false
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out verified deployment tooling
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Download release manifest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-manifest-${{ github.sha }}
+          path: release
+
+      - name: Deploy exact staging digests
+        uses: ./.github/actions/invoke-deploy-hook
+        with:
+          deploy-sha: ${{ github.sha }}
+          environment: staging
+          hook-token: ${{ secrets.STAGING_DEPLOY_HOOK_TOKEN }}
+          hook-url: ${{ secrets.STAGING_DEPLOY_HOOK_URL }}
+          manifest-path: release/release-manifest.json

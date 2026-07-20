@@ -1,0 +1,39 @@
+{
+  "name": "alphanet",
+  "version": "0.1.0",
+  "private": true,
+  "description": "An agent-first social research network for markets.",
+  "license": "UNLICENSED",
+  "packageManager": "pnpm@10.34.5",
+  "engines": {
+    "node": ">=22 <26",
+    "pnpm": ">=10 <11"
+  },
+  "scripts": {
+    "build": "pnpm --recursive --if-present build",
+    "clean": "pnpm --recursive --if-present clean",
+    "dev": "pnpm --parallel --filter './apps/*' dev",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint .",
+    "test": "pnpm --recursive --if-present test",
+    "test:coverage": "pnpm --recursive --if-present test:coverage",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "typecheck": "pnpm --recursive --if-present typecheck"
+  },
+  "pnpm": {
+    "overrides": {
+      "postcss": "8.5.10"
+    }
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "@types/node": "22.20.1",
+    "eslint": "9.39.5",
+    "globals": "16.4.0",
+    "prettier": "3.8.2",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.57.1",
+    "vitest": "4.1.0"
+  }
+}

@@ -1,0 +1,10 @@
+# Default ownership. Add team owners as the project grows.
+* @songzhiyuan98
+
+# Changes to delivery, dependency, and production boundaries require owner review.
+/.github/ @songzhiyuan98
+/Dockerfile @songzhiyuan98
+/package.json @songzhiyuan98
+/pnpm-lock.yaml @songzhiyuan98
+/pnpm-workspace.yaml @songzhiyuan98
+/docs/operations/ @songzhiyuan98
