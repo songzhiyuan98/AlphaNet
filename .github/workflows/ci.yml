@@ -161,8 +161,8 @@ jobs:
       - name: Install Chromium and runner dependencies
         run: pnpm exec playwright install --with-deps chromium
 
-      - name: Build production Web application
-        run: pnpm --filter @alphanet/web build
+      - name: Build production Web application and workspace dependencies
+        run: pnpm --filter @alphanet/web... build
 
       - name: Run browser E2E
         run: pnpm test:web:e2e
