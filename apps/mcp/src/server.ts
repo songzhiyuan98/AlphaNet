@@ -18,13 +18,16 @@ async function start(): Promise<void> {
     environment: environment.NODE_ENV,
     level: environment.LOG_LEVEL,
   });
+  const postgres = createPostgresDependency(environment.DATABASE_URL);
   const dependencies: HealthDependency[] = [
-    createPostgresDependency(environment.DATABASE_URL),
+    postgres,
     createRedisDependency(environment.REDIS_URL),
   ];
   let mcp: ReturnType<typeof createMcpApp> | undefined;
   let httpServer: ReturnType<typeof createServer> | undefined;
   try {
+    // Refuse traffic when the database can retain sensitive bind parameters.
+    await postgres.check();
     mcp = createMcpApp({
       allowedHosts: parseCommaSeparated(environment.MCP_ALLOWED_HOSTS),
       dependencies,

@@ -24,6 +24,7 @@ export interface AgentRequestRateLimiter {
 
 export interface AgentRequestBoundaryOptions {
   operation: AgentOperation;
+  policyEnforcement?: "boundary" | "domain" | undefined;
   rateLimiter?: AgentRequestRateLimiter | undefined;
   resolveClientIp?: ((request: FastifyRequest) => string) | undefined;
   service: Pick<AgentConnectionService, "authenticateStaticApiKey">;
@@ -38,6 +39,14 @@ export interface AgentRequestBoundaryOptions {
 export interface AuthorizedAgentRequest {
   context: AgentCredentialContext;
   evaluation: AgentOperationEvaluation;
+}
+
+export interface AgentRequestAuthorizationBoundary {
+  readonly getAuthorization: (request: FastifyRequest) => AuthorizedAgentRequest;
+  readonly onRequest: (
+    request: FastifyRequest,
+    reply: FastifyReply,
+  ) => Promise<FastifyReply | undefined>;
 }
 
 export const DEFAULT_AGENT_REQUEST_LIMITS = {
@@ -166,16 +175,16 @@ function sendScopeRequired(
   reply: FastifyReply,
   evaluation: AgentOperationEvaluation,
 ): void {
-  const requiredScopes = evaluation.requiredScopes.join(" ");
+  const canonicalChallengeScope = evaluation.requiredScopes[0] ?? "";
   void reply.header(
     "www-authenticate",
-    `Bearer error="insufficient_scope", error_description="The Agent credential lacks a required scope.", scope="${requiredScopes}"`,
+    `Bearer error="insufficient_scope", error_description="The Agent credential lacks a required scope.", scope="${canonicalChallengeScope}"`,
   );
   void reply.code(403).send(
     v1Error(request, {
       code: "SCOPE_REQUIRED",
       message: "The Agent credential lacks a scope required for this operation.",
-      details: { required_scopes: requiredScopes },
+      details: { required_scope_any_of: [...evaluation.requiredScopes] },
     }),
   );
 }
@@ -267,7 +276,10 @@ export async function authorizeAgentRequest(
     sendScopeRequired(request, reply, evaluation);
     return null;
   }
-  if (evaluation.decision === "deny") {
+  if (
+    evaluation.decision === "deny" &&
+    (options.policyEnforcement ?? "boundary") === "boundary"
+  ) {
     void reply.code(403).send(
       v1Error(request, {
         code: "POLICY_DENIED",
@@ -278,4 +290,32 @@ export async function authorizeAgentRequest(
   }
 
   return { context, evaluation };
+}
+
+/**
+ * Creates a parse-before Agent boundary for one operation. Authorized state is
+ * kept in a request-keyed WeakMap so it cannot be supplied by the caller or
+ * accidentally reused by a concurrent request.
+ */
+export function createAgentRequestAuthorizationBoundary(
+  options: AgentRequestBoundaryOptions,
+): AgentRequestAuthorizationBoundary {
+  const authorizations = new WeakMap<FastifyRequest, AuthorizedAgentRequest>();
+
+  return {
+    getAuthorization: (request) => {
+      const authorization = authorizations.get(request);
+      if (!authorization) {
+        throw new Error("Agent request reached its handler without authorization");
+      }
+      return authorization;
+    },
+    onRequest: async (request, reply) => {
+      const authorization = await authorizeAgentRequest(request, reply, options);
+      if (!authorization) {
+        return reply;
+      }
+      authorizations.set(request, authorization);
+    },
+  };
 }

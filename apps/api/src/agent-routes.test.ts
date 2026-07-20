@@ -218,6 +218,7 @@ async function createApp(options?: {
   internalSsrRequestSecret?: string;
   ownerSession?: OwnerSession | null;
   rateLimiter?: NonNullable<ApiAppOptions["agentRateLimiter"]>;
+  researchWriteService?: NonNullable<ApiAppOptions["researchWriteService"]>;
   service?: ReturnType<typeof createService>;
   trustedProxyCidrs?: readonly string[];
 }) {
@@ -234,6 +235,9 @@ async function createApp(options?: {
       ? { internalSsrRequestSecret: options.internalSsrRequestSecret }
       : {}),
     ...(options?.rateLimiter ? { agentRateLimiter: options.rateLimiter } : {}),
+    ...(options?.researchWriteService
+      ? { researchWriteService: options.researchWriteService }
+      : {}),
     ...(options?.trustedProxyCidrs
       ? { trustedProxyCidrs: options.trustedProxyCidrs }
       : {}),
@@ -757,9 +761,6 @@ describe("Agent Bearer and public routes", () => {
     });
     const body = response.json<AgentContextResponse>();
     const serverTime = String(body.server_time);
-    const windowEndsAt = new Date(
-      new Date(serverTime).valueOf() + 3_600_000,
-    ).toISOString();
 
     expect(response.statusCode).toBe(200);
     expect(body).toEqual({
@@ -809,8 +810,9 @@ describe("Agent Bearer and public routes", () => {
         set_follow: { available: false, default_decision: "allow" },
       },
       quota: {
-        window_ends_at: windowEndsAt,
-        writes_remaining: 0,
+        status: "not_projected",
+        window_ends_at: null,
+        writes_remaining: null,
       },
       server_time: serverTime,
       request_id: "req-agent-context",
@@ -859,6 +861,32 @@ describe("Agent Bearer and public routes", () => {
       set_follow: { available: false, default_decision: "deny" },
       set_reaction: { available: false, default_decision: "deny" },
     });
+  });
+
+  it("advertises post and reply capabilities only when the write service is wired", async () => {
+    const researchWriteService = {
+      checkReady: vi.fn(() => Promise.resolve()),
+      createPost: vi.fn(() => Promise.reject(new Error("not invoked"))),
+      replyToContent: vi.fn(() => Promise.reject(new Error("not invoked"))),
+    } satisfies NonNullable<ApiAppOptions["researchWriteService"]>;
+    const { app } = await createApp({ researchWriteService });
+
+    const response = await app.inject({
+      headers: { authorization: `Bearer ${apiKey}` },
+      method: "GET",
+      url: "/v1/agent/context",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json<AgentContextResponse>().effective_capabilities).toMatchObject({
+      create_post: { available: true, default_decision: "require_approval" },
+      reply_to_content: {
+        available: true,
+        default_decision: "require_approval",
+      },
+    });
+    expect(researchWriteService.createPost).not.toHaveBeenCalled();
+    expect(researchWriteService.replyToContent).not.toHaveBeenCalled();
   });
 
   it("fails closed when custom policy rules are not projected into context", async () => {

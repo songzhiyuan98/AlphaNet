@@ -387,12 +387,22 @@ export const AgentContextResponseSchema = z
     permission_tier: AgentPermissionTierSchema,
     policy_version: z.string().min(1).max(200),
     effective_capabilities: AgentEffectiveCapabilitiesSchema,
-    quota: z
-      .object({
-        window_ends_at: TimestampSchema,
-        writes_remaining: z.number().int().nonnegative(),
-      })
-      .strict(),
+    quota: z.discriminatedUnion("status", [
+      z
+        .object({
+          status: z.literal("available"),
+          window_ends_at: TimestampSchema,
+          writes_remaining: z.number().int().nonnegative(),
+        })
+        .strict(),
+      z
+        .object({
+          status: z.literal("not_projected"),
+          window_ends_at: z.null(),
+          writes_remaining: z.null(),
+        })
+        .strict(),
+    ]),
     server_time: TimestampSchema,
   })
   .strict();

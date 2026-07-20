@@ -24,6 +24,9 @@ export interface RedisDependencyOptions {
   critical?: boolean;
 }
 
+const POSTGRES_PARAMETER_LOGGING_ERROR =
+  "PostgreSQL parameter logging must be disabled before AlphaNet can accept traffic";
+
 export function createPostgresDependency(connectionUrl: string): PostgresDependency {
   const sql = postgres(connectionUrl, {
     connect_timeout: 5,
@@ -41,6 +44,10 @@ export function createPostgresDependency(connectionUrl: string): PostgresDepende
     },
     idle_timeout: 10,
     max: 1,
+    // Role/database defaults apply only to new PostgreSQL sessions. Recycle the
+    // probe quickly so readiness cannot keep reporting a stale safe value after
+    // an operator changes those defaults.
+    max_lifetime: 1,
     onnotice: () => undefined,
   });
 
@@ -49,7 +56,23 @@ export function createPostgresDependency(connectionUrl: string): PostgresDepende
     name: "postgres",
     sql,
     async check() {
-      await healthSql`select 1`;
+      const settings = await healthSql<{ parameter_logging_disabled: boolean }[]>`
+        select
+          count(*) = 2
+          and bool_and(
+            setting = '0'
+            and source not in ('client', 'session', 'interactive', 'test')
+          )
+            as parameter_logging_disabled
+        from pg_catalog.pg_settings
+        where name in (
+          'log_parameter_max_length',
+          'log_parameter_max_length_on_error'
+        )
+      `;
+      if (settings[0]?.parameter_logging_disabled !== true) {
+        throw new Error(POSTGRES_PARAMETER_LOGGING_ERROR);
+      }
     },
     async close() {
       await Promise.all([sql.end({ timeout: 5 }), healthSql.end({ timeout: 5 })]);

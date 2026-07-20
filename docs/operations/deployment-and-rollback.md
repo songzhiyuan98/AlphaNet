@@ -111,6 +111,31 @@ deploying readers with the old key in
 version; remove an old key only after every action encrypted with it is
 terminal and beyond its retention window.
 
+Set `COMMUNITY_CURSOR_SIGNING_KEY` from the deployment secret manager as well.
+It signs the short-lived directory cursor and never carries raw proposed
+research text. Rotating it intentionally invalidates cursors issued by the
+previous release; clients restart the directory query.
+
+Set PostgreSQL `log_parameter_max_length=0` and
+`log_parameter_max_length_on_error=0` in every environment, including managed
+production. Slow-query logging may retain statement templates and duration, but
+must never retain bind values because Community searches can contain unpublished
+research and authentication or write statements can contain secrets. Apply the
+equivalent managed-database parameter group before traffic cutover and verify
+both values with `SHOW`. API and MCP reject startup and readiness while either
+setting is unsafe; Worker rejects startup before claiming work. Configure the
+values at the server, database, or role level before starting AlphaNet. The
+runtime identity needs permission to read the settings, not superuser permission
+to change them. In particular, do not solve this by granting the application
+role the superuser-only ability to set `log_parameter_max_length` in each
+connection. AlphaNet also rejects client/session overrides of these settings:
+an override could make its probe connection appear safe while an independent
+pool, such as the Owner authentication pool, remained unsafe. Probe connections
+are recycled within one second so database/role-default changes cannot remain
+hidden in a long-lived session. API and MCP surface the next fresh failure
+through readiness; Worker revalidates immediately before every outbox claim and
+stops claiming when the invariant fails.
+
 ## SSR client identity and rate-limit boundary
 
 Next.js server rendering reaches the API over the private service network, so

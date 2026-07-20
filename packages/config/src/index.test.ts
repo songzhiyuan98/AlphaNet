@@ -96,6 +96,7 @@ describe("environment parsing", () => {
     expect(result.PENDING_ACTION_ENCRYPTION_KEY_VERSION).toBe(1);
     expect(result.PENDING_ACTION_ENCRYPTION_KEY).toMatch(/^[0-9a-f]{64}$/);
     expect(result.PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS).toEqual({});
+    expect(result.COMMUNITY_CURSOR_SIGNING_KEY).toHaveLength(40);
   });
 
   it("loads a bounded previous Agent API key pepper ring", () => {
@@ -307,6 +308,26 @@ describe("Owner authentication environment parsing", () => {
       }),
     ).toThrow(EnvironmentValidationError);
 
+    expect(() =>
+      loadApiEnvironment({
+        ...baseEnvironment,
+        AGENT_API_KEY_PEPPER: "Production-Agent-Key-Pepper-Rotated-Q7v9N2x5Lm8Kp3Rt",
+        API_TRUSTED_PROXY_CIDRS: "10.20.0.0/16",
+        AUTH_EMAIL_FROM: "AlphaNet <auth@example.com>",
+        AUTH_EMAIL_MODE: "resend",
+        AUTH_SECURE_COOKIES: "true",
+        AUTH_TRUSTED_ORIGINS: "https://api.alphanet.example",
+        BETTER_AUTH_SECRET: "QJv7w8ScgVN4Xs1TBP-Wuz2HaK6e3d9Rm5Afy0LcoEi",
+        BETTER_AUTH_URL: "https://api.alphanet.example",
+        CORS_ORIGINS: "https://api.alphanet.example",
+        NODE_ENV: "production",
+        PENDING_ACTION_ENCRYPTION_KEY:
+          "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+        RESEND_API_KEY: "re_live_key",
+        SSR_INTERNAL_REQUEST_SECRET: "Production-SSR-Request-Secret-J8m4V2s7X5n9K3p6T1w0",
+      }),
+    ).toThrow(EnvironmentValidationError);
+
     const result = loadApiEnvironment({
       ...baseEnvironment,
       AGENT_API_KEY_PEPPER: "Production-Agent-Key-Pepper-Rotated-Q7v9N2x5Lm8Kp3Rt",
@@ -318,6 +339,7 @@ describe("Owner authentication environment parsing", () => {
       BETTER_AUTH_SECRET: "QJv7w8ScgVN4Xs1TBP-Wuz2HaK6e3d9Rm5Afy0LcoEi",
       BETTER_AUTH_URL: "https://api.alphanet.example",
       CORS_ORIGINS: "https://api.alphanet.example",
+      COMMUNITY_CURSOR_SIGNING_KEY: "Production-Community-Cursor-Key-Q4v8M2x7Lp5Rt9W3n6",
       NODE_ENV: "production",
       PENDING_ACTION_ENCRYPTION_KEY:
         "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",

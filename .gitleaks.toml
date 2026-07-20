@@ -16,6 +16,8 @@ paths = [
 description = "Public deterministic test/development fixtures that are never runtime secrets."
 regexTarget = "secret"
 regexes = [
+  '''^8f7d9c1e0b2a4d6f91c3e5a7b9d1f20436587a9cbed0f123456789abcdef0123$''',
+  '''^C4p8Vw2nR7xL9mQ3sT6yH1kD5fJ0aB8uE2zN7gS4$''',
   '''^h9mP6Lrz3dF5cQ8K7Vw2uX4aN1sJ0tYbEoGkUiZp$''',
   '''^L8wq2Uox9sV7Gm1Xc4Kd6aJ0Ph5Rt3NyE1bZfQ7i$''',
   '''^Production-SSR-Request-Secret-J8m4V2s7X5n9K3p6T1w0$''',
@@ -30,4 +32,5 @@ regexes = [
   '''^an_live_abcd1234$''',
   '''^follow-symbol-amd-v1$''',
   '''^reply-amd-margin-20260719-v1$''',
+  '''^reply-amd-margin-20260720-v1$''',
 ]

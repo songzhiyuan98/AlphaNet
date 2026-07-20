@@ -73,6 +73,7 @@ export type ResearchCommandValidationErrorCode =
   | "SOURCE_LINK_CONFLICT"
   | "SOURCE_URL_INVALID"
   | "SYMBOL_INVALID"
+  | "TEXT_INVALID"
   | "TOPIC_INVALID";
 
 export class ResearchCommandValidationError extends Error {
@@ -86,7 +87,17 @@ export class ResearchCommandValidationError extends Error {
 }
 
 function normalizeText(value: string): string {
-  return value.normalize("NFC").replaceAll("\r\n", "\n").replaceAll("\r", "\n");
+  const normalized = value
+    .normalize("NFC")
+    .replaceAll("\r\n", "\n")
+    .replaceAll("\r", "\n");
+  if (normalized.includes("\u0000")) {
+    throw new ResearchCommandValidationError(
+      "TEXT_INVALID",
+      "Research command text cannot contain the NUL character.",
+    );
+  }
+  return normalized;
 }
 
 function normalizeLabel(value: string): string {
@@ -101,7 +112,11 @@ function normalizeIdentifier(value: string): string {
       "Research command identifiers cannot be blank.",
     );
   }
-  return normalized;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    normalized,
+  )
+    ? normalized.toLowerCase()
+    : normalized;
 }
 
 function normalizeSymbols(values: readonly string[] | undefined): string[] {

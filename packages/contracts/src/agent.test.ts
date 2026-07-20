@@ -331,6 +331,7 @@ describe("Agent response envelopes", () => {
       policy_version: `${ids.policy}:1`,
       effective_capabilities: capabilities,
       quota: {
+        status: "available",
         window_ends_at: "2026-07-20T13:00:00.000Z",
         writes_remaining: 48,
       },

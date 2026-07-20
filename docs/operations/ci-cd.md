@@ -37,8 +37,11 @@ matrix; a skipped or failed required gate cannot be hidden by the aggregator.
   and an ActionLog value accepted by the shipped audit rule. The last path
   proves those rows remain readable and editable where appropriate, then
   verifies `000005` rejects equivalent new writes and backfills
-  `pepper_version=1`. The suite includes a real-auth API Credential lifecycle
-  E2E and bounded, independent-pool concurrency consistency load.
+  `pepper_version=1`. Every path then reaches `000006`, where CI verifies the
+  canonical Community/Content/Revision, principal-scoped idempotency, encrypted
+  PendingAction, catalog-only symbol candidate, audit, and Outbox schema shape.
+  The suite includes a real-auth API Credential lifecycle E2E and bounded,
+  independent-pool concurrency consistency load.
 - Build compiles the workspace.
 - Web E2E builds the production Next.js application and runs two Chromium
   journeys with Playwright 1.61.1. The matching browser cache is version-keyed;

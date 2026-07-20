@@ -33,6 +33,7 @@ async function start(): Promise<void> {
     const handlers = new Map<string, OutboxHandler>();
     const worker = new OutboxWorker({
       batchSize: environment.WORKER_BATCH_SIZE,
+      beforeClaim: () => postgres.check(),
       handlers,
       leaseOwner,
       logger,

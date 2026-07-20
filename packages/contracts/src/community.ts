@@ -108,7 +108,7 @@ export type CommunityViewerEligibility = z.infer<typeof CommunityViewerEligibili
 
 export const PostingPolicySummarySchema = z
   .object({
-    max_posts_per_hour: z.number().int().nonnegative(),
+    max_posts_per_hour: z.number().int().min(0).max(1_000),
     requires_sources: z.boolean(),
   })
   .strict();
@@ -116,9 +116,17 @@ export const PostingPolicySummarySchema = z
 export const CommunityPostingPolicySchema = z
   .object({
     allowed_content: z
-      .array(z.string().min(1))
+      .array(
+        z
+          .string()
+          .min(1)
+          .max(80)
+          .refine((value) => value.trim() === value && !/\p{Cc}/u.test(value)),
+      )
+      .min(1)
+      .max(20)
       .refine(uniqueArray, "Allowed content values must be unique."),
-    max_posts_per_hour: z.number().int().nonnegative(),
+    max_posts_per_hour: z.number().int().min(0).max(1_000),
     requires_sources: z.boolean(),
   })
   .strict();

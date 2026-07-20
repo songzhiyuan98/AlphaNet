@@ -32,6 +32,12 @@ function boundedUnicodeString(
   label: string,
 ): z.ZodString {
   return z.string().superRefine((value, context) => {
+    if (value.includes("\u0000")) {
+      context.addIssue({
+        code: "custom",
+        message: `${label} cannot contain the NUL character.`,
+      });
+    }
     const length = unicodeLength(value);
     if (length < minimum || length > maximum || value.trim().length === 0) {
       context.addIssue({

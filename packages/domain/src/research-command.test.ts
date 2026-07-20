@@ -88,6 +88,58 @@ describe("research command normalization", () => {
     );
   });
 
+  it("canonicalizes UUID casing before routing and digest comparisons", () => {
+    const lowerCommunityId = "abcdefab-cdef-4abc-8def-abcdefabcdef";
+    const upperCommunityId = lowerCommunityId.toUpperCase();
+
+    expect(() =>
+      normalizeCreatePostCommand({
+        title: "A valid research title",
+        bodyMarkdown: "Research body",
+        primaryCommunityId: lowerCommunityId,
+        additionalCommunityIds: [upperCommunityId],
+      }),
+    ).toThrowError(
+      expect.objectContaining<Partial<ResearchCommandValidationError>>({
+        code: "DUPLICATE_COMMUNITY_TARGET",
+      }),
+    );
+
+    const lower = normalizeReplyCommand({
+      parentContentId: lowerCommunityId,
+      bodyMarkdown: "Research body",
+      references: [{ targetContentId: lowerCommunityId, relationType: "reference" }],
+    });
+    const upper = normalizeReplyCommand({
+      parentContentId: upperCommunityId,
+      bodyMarkdown: "Research body",
+      references: [{ targetContentId: upperCommunityId, relationType: "reference" }],
+    });
+
+    expect(upper).toEqual(lower);
+    expect(digestResearchCommand(upper)).toBe(digestResearchCommand(lower));
+  });
+
+  it("rejects PostgreSQL-incompatible NUL without rejecting normal layout controls", () => {
+    expect(() =>
+      normalizeReplyCommand({
+        parentContentId,
+        bodyMarkdown: "Research\u0000body",
+      }),
+    ).toThrowError(
+      expect.objectContaining<Partial<ResearchCommandValidationError>>({
+        code: "TEXT_INVALID",
+      }),
+    );
+
+    expect(
+      normalizeReplyCommand({
+        parentContentId,
+        bodyMarkdown: "Line one\n\tLine two",
+      }).bodyMarkdown,
+    ).toBe("Line one\n\tLine two");
+  });
+
   it("rejects conflicting metadata for the same normalized source URL", () => {
     expect(() =>
       normalizeReplyCommand({

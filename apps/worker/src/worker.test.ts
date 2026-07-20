@@ -108,6 +108,30 @@ describe("OutboxWorker", () => {
     expect(repository.markFailed).not.toHaveBeenCalled();
   });
 
+  it("revalidates database privacy before claiming a batch", async () => {
+    const repository = makeRepository();
+    const beforeClaim = vi.fn(() =>
+      Promise.reject(new Error("PostgreSQL parameter logging must be disabled")),
+    );
+    const handler = vi.fn(() => Promise.resolve({}));
+    const worker = new OutboxWorker({
+      batchSize: 20,
+      beforeClaim,
+      handlers: new Map([["community.created", handler]]),
+      leaseOwner: "worker-1",
+      logger,
+      replayFrom,
+      repository,
+    });
+
+    await expect(worker.runOnce()).rejects.toThrow(
+      "PostgreSQL parameter logging must be disabled",
+    );
+    expect(beforeClaim).toHaveBeenCalledOnce();
+    expect(repository.claim).not.toHaveBeenCalled();
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it("releases a failed event for bounded retry without storing its message", async () => {
     const repository = makeRepository();
     const worker = new OutboxWorker({

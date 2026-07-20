@@ -16,7 +16,6 @@ import {
   ReplyToContentResultSchema,
   WriteStatusSchema,
 } from "./content-write.js";
-import { V1ErrorDetailSchema } from "./v1-error.js";
 
 export const GetActionStatusRequestSchema = z
   .object({
@@ -40,6 +39,36 @@ export const PendingActionApprovalMethodSchema = z.literal("owner_approval");
 export type PendingActionApprovalMethod = z.infer<
   typeof PendingActionApprovalMethodSchema
 >;
+
+function terminalActionError<const Code extends string, const Message extends string>(
+  code: Code,
+  message: Message,
+) {
+  return z
+    .object({
+      code: z.literal(code),
+      message: z.literal(message),
+      retryable: z.literal(false),
+      details: z.null(),
+      retry_after_ms: z.null(),
+    })
+    .strict();
+}
+
+export const PendingActionPublicErrorSchema = z.union([
+  terminalActionError("ACTION_REJECTED", "The Owner rejected this action."),
+  terminalActionError(
+    "ACTION_EXPIRED",
+    "The action expired before it could be completed.",
+  ),
+  terminalActionError("ACTION_CANCELLED", "The action was cancelled."),
+  terminalActionError(
+    "ACTION_EXECUTION_FAILED",
+    "The approved action could not be completed.",
+  ),
+  terminalActionError("ACTION_INVALIDATED", "The frozen action is no longer valid."),
+]);
+export type PendingActionPublicError = z.infer<typeof PendingActionPublicErrorSchema>;
 
 export const UpdateContentActionResultSchema = z
   .object({
@@ -87,17 +116,21 @@ const PendingActionProjectionCommonShape = {
   decision_id: OpaqueIdSchema,
   policy_version: z.string().min(1),
   requested_at: TimestampSchema,
-  expires_at: TimestampSchema.optional(),
+  expires_at: TimestampSchema,
   decided_at: TimestampSchema.nullable(),
-  executing_at: TimestampSchema.nullable().optional(),
+  executing_at: TimestampSchema.nullable(),
   completed_at: TimestampSchema.nullable(),
   terminal_at: TimestampSchema.nullable(),
-  input_digest: z.string().startsWith("sha256:"),
-  approval_summary: z.string().min(1),
+  input_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/u),
+  approval_summary: z
+    .string()
+    .min(1)
+    .max(2_000)
+    .refine((value) => value.trim() === value && !/\p{Cc}/u.test(value)),
   approval_outcome: PendingActionApprovalOutcomeSchema.nullable(),
   approval_method: PendingActionApprovalMethodSchema.nullable(),
   decided_by_owner_id: OpaqueIdSchema.nullable(),
-  error: V1ErrorDetailSchema.nullable(),
+  error: PendingActionPublicErrorSchema.nullable(),
 } as const;
 
 const PendingActionProjectionBaseSchema = z.discriminatedUnion("operation", [
@@ -182,6 +215,16 @@ const approvalOutcomesByState = {
   invalidated: new Set<ApprovalOutcome | null>(["invalidated", "approved"]),
 } as const satisfies Record<PendingActionState, ReadonlySet<ApprovalOutcome | null>>;
 
+const publicErrorCodeByState: Partial<
+  Record<PendingActionState, PendingActionPublicError["code"]>
+> = {
+  rejected: "ACTION_REJECTED",
+  expired: "ACTION_EXPIRED",
+  cancelled: "ACTION_CANCELLED",
+  failed: "ACTION_EXECUTION_FAILED",
+  invalidated: "ACTION_INVALIDATED",
+};
+
 function milliseconds(timestamp: string): number {
   return Date.parse(timestamp);
 }
@@ -225,11 +268,7 @@ export const PendingActionProjectionSchema =
       });
     }
 
-    if (
-      action.state === "executing" &&
-      action.executing_at !== undefined &&
-      action.executing_at === null
-    ) {
+    if (action.state === "executing" && action.executing_at === null) {
       context.addIssue({
         code: "custom",
         path: ["executing_at"],
@@ -240,7 +279,6 @@ export const PendingActionProjectionSchema =
       action.state !== "executing" &&
       action.state !== "succeeded" &&
       action.state !== "failed" &&
-      action.executing_at !== undefined &&
       action.executing_at !== null
     ) {
       context.addIssue({
@@ -326,9 +364,28 @@ export const PendingActionProjectionSchema =
         message: "Nonterminal actions cannot expose a terminal error.",
       });
     }
+    const expectedErrorCode = publicErrorCodeByState[action.state];
+    if (
+      expectedErrorCode !== undefined &&
+      action.error !== null &&
+      action.error.code !== expectedErrorCode
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["error", "code"],
+        message: "The public error must match the terminal PendingAction state.",
+      });
+    }
+
+    if (milliseconds(action.expires_at) <= milliseconds(action.requested_at)) {
+      context.addIssue({
+        code: "custom",
+        path: ["expires_at"],
+        message: "expires_at must be later than requested_at.",
+      });
+    }
 
     const lifecycleTimes = [
-      ["expires_at", action.expires_at],
       ["decided_at", action.decided_at],
       ["executing_at", action.executing_at],
       ["completed_at", action.completed_at],

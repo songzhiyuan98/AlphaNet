@@ -2,6 +2,7 @@ import { inspect } from "node:util";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AlphaNetAuthRuntime, OwnerSession } from "@alphanet/auth";
+import { V1ErrorResponseSchema } from "@alphanet/contracts";
 import type { FastifyBaseLogger } from "fastify";
 
 import { createApiApp } from "./app.js";
@@ -228,6 +229,38 @@ describe("API service", () => {
         message: "The requested route does not exist.",
         requestId: "req-test-request-id",
       },
+    });
+  });
+
+  it("returns the versioned Agent envelope for unexpected V1 failures", async () => {
+    const app = await createApiApp({
+      allowedOrigins: ["http://localhost:3000"],
+      environment: "test",
+      version: "test-version",
+    });
+    app.get("/v1/test-internal-error", () => {
+      throw new Error("private infrastructure marker");
+    });
+    apps.push(app);
+
+    const response = await app.inject({
+      headers: { "x-request-id": "req-v1-internal" },
+      method: "GET",
+      url: "/v1/test-internal-error",
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(response.body).not.toContain("private infrastructure marker");
+    expect(V1ErrorResponseSchema.parse(response.json())).toEqual({
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "The request could not be completed.",
+        retryable: true,
+        details: null,
+        retry_after_ms: null,
+      },
+      request_id: "req-v1-internal",
+      schema_version: "1",
     });
   });
 

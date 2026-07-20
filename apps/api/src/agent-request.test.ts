@@ -12,6 +12,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   authorizeAgentRequest,
+  createAgentRequestAuthorizationBoundary,
   type AgentRequestBoundaryOptions,
   type AgentRequestRateLimiter,
 } from "./agent-request.js";
@@ -152,6 +153,7 @@ async function runBoundary(options: {
   authorization?: string | undefined;
   context?: AgentCredentialContext;
   operation?: AgentOperation;
+  policyEnforcement?: AgentRequestBoundaryOptions["policyEnforcement"];
   rateLimiter?: AgentRequestRateLimiter;
   service?: Pick<AgentConnectionService, "authenticateStaticApiKey">;
   url?: string | undefined;
@@ -166,6 +168,9 @@ async function runBoundary(options: {
     options.service ?? serviceFor(vi.fn(() => Promise.resolve(authenticatedContext)));
   const boundaryOptions: AgentRequestBoundaryOptions = {
     operation: options.operation ?? "create_post",
+    ...(options.policyEnforcement
+      ? { policyEnforcement: options.policyEnforcement }
+      : {}),
     service,
   };
   if (options.rateLimiter) {
@@ -188,6 +193,43 @@ function expectV1Error(payload: unknown, code: string) {
 }
 
 describe("authorizeAgentRequest", () => {
+  it("keeps authorized context request-scoped and ignores caller-shaped properties", async () => {
+    const firstContext = context();
+    const secondContext = context({ tier: "autonomous" });
+    const secondApiKey = `${apiKey}Z`;
+    const limiter = allowAllLimiter();
+    const boundary = createAgentRequestAuthorizationBoundary({
+      operation: "create_post",
+      policyEnforcement: "domain",
+      rateLimiter: limiter,
+      service: serviceFor(
+        vi.fn((token: string) =>
+          Promise.resolve(token === apiKey ? firstContext : secondContext),
+        ),
+      ),
+    });
+    const first = requestHarness({ authorization: `Bearer ${apiKey}` });
+    const second = requestHarness({ authorization: `Bearer ${secondApiKey}` });
+    const forged = requestHarness();
+    Object.assign(forged.request, {
+      agentAuthorization: { context: secondContext },
+    });
+    const firstReply = replyHarness();
+    const secondReply = replyHarness();
+
+    await Promise.all([
+      boundary.onRequest(first.request, firstReply.reply),
+      boundary.onRequest(second.request, secondReply.reply),
+    ]);
+
+    expect(boundary.getAuthorization(first.request).context).toBe(firstContext);
+    expect(boundary.getAuthorization(second.request).context).toBe(secondContext);
+    expect(limiter.consume).toHaveBeenCalledTimes(4);
+    expect(() => boundary.getAuthorization(forged.request)).toThrow(
+      "Agent request reached its handler without authorization",
+    );
+  });
+
   it("runs IP limit, authentication, credential limit, and policy evaluation in order", async () => {
     const order: string[] = [];
     const authenticatedContext = context();
@@ -317,7 +359,25 @@ describe("authorizeAgentRequest", () => {
       'Bearer error="insufficient_scope", error_description="The Agent credential lacks a required scope.", scope="content:write"',
     );
     const error = expectV1Error(reply.payload(), "SCOPE_REQUIRED");
-    expect(error.error.details).toEqual({ required_scopes: "content:write" });
+    expect(error.error.details).toEqual({
+      required_scope_any_of: ["content:write"],
+    });
+  });
+
+  it("returns one canonical challenge scope and lists alternative scopes explicitly", async () => {
+    const { result, reply } = await runBoundary({
+      authorization: `Bearer ${apiKey}`,
+      context: context({ scopes: ["actions:read"] }),
+      operation: "find_communities",
+      rateLimiter: allowAllLimiter(),
+    });
+
+    expect(result).toBeNull();
+    expect(reply.statusCode()).toBe(403);
+    expect(reply.headers["www-authenticate"]).toContain('scope="research:read"');
+    expect(expectV1Error(reply.payload(), "SCOPE_REQUIRED").error.details).toEqual({
+      required_scope_any_of: ["research:read", "community:read"],
+    });
   });
 
   it.each([
@@ -342,6 +402,24 @@ describe("authorizeAgentRequest", () => {
     expect(result).toBeNull();
     expect(reply.statusCode()).toBe(403);
     expectV1Error(reply.payload(), "POLICY_DENIED");
+  });
+
+  it("defers a write policy denial to the transactional domain boundary", async () => {
+    const deniedContext = context({ tier: "read_only" });
+    const { result, reply } = await runBoundary({
+      authorization: `Bearer ${apiKey}`,
+      context: deniedContext,
+      operation: "create_post",
+      policyEnforcement: "domain",
+      rateLimiter: allowAllLimiter(),
+    });
+
+    expect(reply.statusCode()).toBe(200);
+    expect(result?.context).toBe(deniedContext);
+    expect(result?.evaluation).toMatchObject({
+      decision: "deny",
+      scopeSatisfied: true,
+    });
   });
 
   it("preserves AgentConnectionError as a stable V1 credential error", async () => {

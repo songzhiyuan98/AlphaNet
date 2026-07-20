@@ -37,6 +37,10 @@ services:
       - idle_in_transaction_session_timeout=60000
       - -c
       - log_min_duration_statement=${POSTGRES_LOG_MIN_DURATION_MS:-500}
+      - -c
+      - log_parameter_max_length=0
+      - -c
+      - log_parameter_max_length_on_error=0
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
@@ -171,6 +175,7 @@ services:
       PENDING_ACTION_ENCRYPTION_KEY: ${PENDING_ACTION_ENCRYPTION_KEY:-8f7d9c1e0b2a4d6f91c3e5a7b9d1f20436587a9cbed0f123456789abcdef0123}
       PENDING_ACTION_ENCRYPTION_KEY_VERSION: ${PENDING_ACTION_ENCRYPTION_KEY_VERSION:-1}
       PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS: ${PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS:-{}}
+      COMMUNITY_CURSOR_SIGNING_KEY: ${COMMUNITY_CURSOR_SIGNING_KEY:-C4p8Vw2nR7xL9mQ3sT6yH1kD5fJ0aB8uE2zN7gS4}
       AUTH_TRUSTED_ORIGINS: ${AUTH_TRUSTED_ORIGINS:-http://localhost:3000}
       AUTH_SECURE_COOKIES: ${AUTH_SECURE_COOKIES:-false}
       API_TRUSTED_PROXY_CIDRS: ${API_TRUSTED_PROXY_CIDRS:-}

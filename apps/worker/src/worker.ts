@@ -28,6 +28,7 @@ export type OutboxHandler = (
 
 export interface OutboxWorkerOptions {
   batchSize: number;
+  beforeClaim?: (() => Promise<void>) | undefined;
   heartbeatIntervalMilliseconds?: number;
   handlers: ReadonlyMap<string, OutboxHandler>;
   leaseSeconds?: number;
@@ -45,6 +46,7 @@ export class OutboxWorker {
     if (eventTypes.length === 0) {
       return 0;
     }
+    await this.options.beforeClaim?.();
     const leaseSeconds = this.options.leaseSeconds ?? 30;
     const events = await this.options.repository.claim({
       batchSize: this.options.batchSize,

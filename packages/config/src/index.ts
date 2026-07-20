@@ -7,6 +7,8 @@ const LocalDevelopmentAuthSecret = "yKt8Jue5W_Q24xh6bP9FdM3Rav7CzsNe0GLi1TXUcAo"
 const LocalDevelopmentAgentApiKeyPepper = "h9mP6Lrz3dF5cQ8K7Vw2uX4aN1sJ0tYbEoGkUiZp";
 const LocalDevelopmentPendingActionEncryptionKey =
   "8f7d9c1e0b2a4d6f91c3e5a7b9d1f20436587a9cbed0f123456789abcdef0123";
+const LocalDevelopmentCommunityCursorSigningKey =
+  "C4p8Vw2nR7xL9mQ3sT6yH1kD5fJ0aB8uE2zN7gS4";
 const LocalDevelopmentSsrInternalRequestSecret =
   "L8wq2Uox9sV7Gm1Xc4Kd6aJ0Ph5Rt3NyE1bZfQ7i";
 
@@ -445,6 +447,9 @@ export const ApiEnvironmentSchema = CommonServiceEnvironmentSchema.extend({
   ...AgentCredentialEnvironmentFields,
   ...PendingActionCryptoEnvironmentFields,
   API_TRUSTED_PROXY_CIDRS: TrustedProxyListSchema,
+  COMMUNITY_CURSOR_SIGNING_KEY: AuthSecretSchema.default(
+    LocalDevelopmentCommunityCursorSigningKey,
+  ),
   SSR_INTERNAL_REQUEST_SECRET: AuthSecretSchema.default(
     LocalDevelopmentSsrInternalRequestSecret,
   ),
@@ -494,6 +499,18 @@ export const ApiEnvironmentSchema = CommonServiceEnvironmentSchema.extend({
       message:
         "must not use the repository local-development SSR request secret in production",
       path: ["SSR_INTERNAL_REQUEST_SECRET"],
+    });
+  }
+
+  if (
+    value.NODE_ENV === "production" &&
+    value.COMMUNITY_CURSOR_SIGNING_KEY === LocalDevelopmentCommunityCursorSigningKey
+  ) {
+    context.addIssue({
+      code: "custom",
+      message:
+        "must not use the repository local-development Community cursor secret in production",
+      path: ["COMMUNITY_CURSOR_SIGNING_KEY"],
     });
   }
 

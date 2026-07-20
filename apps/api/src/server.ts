@@ -11,7 +11,12 @@ import {
   createRedisDependency,
   type HealthDependency,
 } from "@alphanet/database";
-import { PostgresAgentConnectionService } from "@alphanet/domain";
+import {
+  PostgresAgentConnectionService,
+  PostgresCommunityDirectoryService,
+  PostgresPendingActionStatusService,
+  PostgresResearchWriteService,
+} from "@alphanet/domain";
 import { createLogger } from "@alphanet/observability";
 
 import { createApiApp } from "./app.js";
@@ -41,6 +46,25 @@ async function start(): Promise<void> {
     credentialMutationCooldownSeconds:
       environment.AGENT_CREDENTIAL_MUTATION_COOLDOWN_SECONDS,
   });
+  const communityDirectoryService = new PostgresCommunityDirectoryService(postgres.sql, {
+    cursorSigningKey: Buffer.from(environment.COMMUNITY_CURSOR_SIGNING_KEY, "utf8"),
+  });
+  const pendingActionStatusService = new PostgresPendingActionStatusService(postgres.sql);
+  const pendingActionKeys: Record<number, Uint8Array> = Object.fromEntries([
+    ...Object.entries(environment.PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS).map(
+      ([version, key]) => [Number(version), Buffer.from(key, "hex")] as const,
+    ),
+    [
+      environment.PENDING_ACTION_ENCRYPTION_KEY_VERSION,
+      Buffer.from(environment.PENDING_ACTION_ENCRYPTION_KEY, "hex"),
+    ],
+  ]);
+  const researchWriteService = new PostgresResearchWriteService(postgres.sql, {
+    pendingActionKeyRing: {
+      currentVersion: environment.PENDING_ACTION_ENCRYPTION_KEY_VERSION,
+      keys: pendingActionKeys,
+    },
+  });
   const agentRateLimiter = new RedisRateLimitStorage(
     redis.client,
     "alphanet:agent-api:rate-limit:",
@@ -59,6 +83,9 @@ async function start(): Promise<void> {
   let authRuntime: AlphaNetAuthRuntime | undefined;
   let app: Awaited<ReturnType<typeof createApiApp>> | undefined;
   try {
+    // This also verifies the database will not log bind parameters containing
+    // unpublished research or authentication material.
+    await postgres.check();
     authRuntime = createAlphaNetAuthRuntime(
       {
         baseUrl: environment.BETTER_AUTH_URL,
@@ -95,10 +122,13 @@ async function start(): Promise<void> {
       agentConnectionService,
       agentRateLimiter,
       authRuntime,
+      communityDirectoryService,
       dependencies,
       environment: environment.NODE_ENV,
       internalSsrRequestSecret: environment.SSR_INTERNAL_REQUEST_SECRET,
       logger,
+      pendingActionStatusService,
+      researchWriteService,
       trustedProxyCidrs: environment.API_TRUSTED_PROXY_CIDRS,
       version: environment.APP_VERSION,
     });

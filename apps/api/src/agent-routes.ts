@@ -8,6 +8,7 @@ import {
   type AgentContextResponse,
   type AgentCredentialSummary,
   type AgentEffectiveCapabilities,
+  type V1ErrorDetail,
   type OwnerAgentSummary,
   type PublicAgentProfileResponse,
   type V1ErrorResponse,
@@ -17,6 +18,7 @@ import {
   type AgentActivationReason,
   type AgentConnectionService,
   type AgentCredentialContext,
+  type AgentOperation,
   type CredentialView,
   evaluateAgentOperation,
   type OwnerAgentView,
@@ -26,6 +28,7 @@ import { z } from "zod";
 
 export interface AgentConnectionRouteOptions {
   allowedOrigins: readonly string[];
+  availableOperations?: readonly AgentOperation[] | undefined;
   authRuntime: AlphaNetAuthRuntime;
   rateLimiter?: {
     consume(
@@ -70,7 +73,7 @@ export function v1Error(
     message: string;
     retryable?: boolean | undefined;
     retryAt?: Date | undefined;
-    details?: Record<string, string | number | boolean | null> | null | undefined;
+    details?: V1ErrorDetail["details"] | undefined;
   },
 ): V1ErrorResponse {
   const retryAfterMilliseconds = options.retryAt
@@ -326,7 +329,9 @@ function capability(available: boolean, decision: "allow" | "require_approval" |
 
 function effectiveCapabilities(
   context: AgentCredentialContext,
+  availableOperations: readonly AgentOperation[] = ["get_agent_context"],
 ): AgentEffectiveCapabilities {
+  const available = new Set<AgentOperation>(availableOperations);
   const decision = (
     operation: Parameters<typeof evaluateAgentOperation>[0]["operation"],
   ) =>
@@ -337,25 +342,49 @@ function effectiveCapabilities(
       scopes: context.credential.scopes,
     }).decision;
 
-  // Phase 1 publishes only get_agent_context. The remaining capability entries
-  // already describe scope and policy decisions, while `available=false`
-  // prevents clients from assuming an unimplemented route or MCP tool exists.
   return {
-    get_agent_context: capability(true, "allow"),
-    find_communities: capability(false, decision("find_communities")),
-    get_community: capability(false, decision("get_community")),
-    browse_content: capability(false, decision("browse_content")),
-    search_content: capability(false, decision("search_content")),
-    get_content: capability(false, decision("get_content")),
-    get_discussion: capability(false, decision("get_discussion")),
-    list_notifications: capability(false, decision("list_notifications")),
-    get_action_status: capability(false, decision("get_action_status")),
-    create_post: capability(false, decision("create_post")),
-    reply_to_content: capability(false, decision("reply_to_content")),
-    update_content: capability(false, decision("update_content")),
-    delete_content: capability(false, decision("delete_content")),
-    set_reaction: capability(false, decision("set_reaction")),
-    set_follow: capability(false, decision("set_follow")),
+    get_agent_context: capability(available.has("get_agent_context"), "allow"),
+    find_communities: capability(
+      available.has("find_communities"),
+      decision("find_communities"),
+    ),
+    get_community: capability(available.has("get_community"), decision("get_community")),
+    browse_content: capability(
+      available.has("browse_content"),
+      decision("browse_content"),
+    ),
+    search_content: capability(
+      available.has("search_content"),
+      decision("search_content"),
+    ),
+    get_content: capability(available.has("get_content"), decision("get_content")),
+    get_discussion: capability(
+      available.has("get_discussion"),
+      decision("get_discussion"),
+    ),
+    list_notifications: capability(
+      available.has("list_notifications"),
+      decision("list_notifications"),
+    ),
+    get_action_status: capability(
+      available.has("get_action_status"),
+      decision("get_action_status"),
+    ),
+    create_post: capability(available.has("create_post"), decision("create_post")),
+    reply_to_content: capability(
+      available.has("reply_to_content"),
+      decision("reply_to_content"),
+    ),
+    update_content: capability(
+      available.has("update_content"),
+      decision("update_content"),
+    ),
+    delete_content: capability(
+      available.has("delete_content"),
+      decision("delete_content"),
+    ),
+    set_reaction: capability(available.has("set_reaction"), decision("set_reaction")),
+    set_follow: capability(available.has("set_follow"), decision("set_follow")),
   };
 }
 
@@ -681,10 +710,14 @@ export function registerAgentConnectionRoutes(
         },
         permission_tier: context.agent.policy.tier,
         policy_version: `${context.agent.policy.id}:${context.agent.policy.version}`,
-        effective_capabilities: effectiveCapabilities(context),
+        effective_capabilities: effectiveCapabilities(
+          context,
+          options.availableOperations,
+        ),
         quota: {
-          window_ends_at: new Date(now.valueOf() + 3_600_000).toISOString(),
-          writes_remaining: 0,
+          status: "not_projected",
+          window_ends_at: null,
+          writes_remaining: null,
         },
         server_time: now.toISOString(),
       };

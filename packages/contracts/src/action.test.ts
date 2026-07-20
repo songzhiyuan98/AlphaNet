@@ -7,6 +7,7 @@ import {
 } from "./action.js";
 
 const requestedAt = "2026-07-19T19:15:00Z";
+const expiresAt = "2026-07-20T19:15:00Z";
 const decidedAt = "2026-07-19T19:16:12Z";
 const completedAt = "2026-07-19T19:16:13Z";
 
@@ -27,10 +28,12 @@ const commonAction = {
   decision_id: "dec_01K0POST",
   policy_version: "pol_01ASSISTED:4",
   requested_at: requestedAt,
+  expires_at: expiresAt,
   decided_at: decidedAt,
+  executing_at: decidedAt,
   completed_at: completedAt,
   terminal_at: completedAt,
-  input_digest: "sha256:45891d",
+  input_digest: `sha256:${"a".repeat(64)}`,
   approval_summary: "Create one post in the Semiconductors community.",
   approval_outcome: "approved",
   approval_method: "owner_approval",
@@ -49,6 +52,7 @@ function pendingAction(overrides: Record<string, unknown>): Record<string, unkno
     status: "pending_approval",
     state: "pending_approval",
     decided_at: null,
+    executing_at: null,
     completed_at: null,
     terminal_at: null,
     approval_outcome: null,
@@ -161,7 +165,7 @@ describe("PendingAction state-machine projection", () => {
         error: {
           ...actionError,
           code: "ACTION_EXPIRED",
-          message: "The action expired.",
+          message: "The action expired before it could be completed.",
         },
       }),
     ],
@@ -178,7 +182,7 @@ describe("PendingAction state-machine projection", () => {
         error: {
           ...actionError,
           code: "ACTION_CANCELLED",
-          message: "The action was cancelled before execution.",
+          message: "The action was cancelled.",
         },
       }),
     ],
@@ -196,9 +200,8 @@ describe("PendingAction state-machine projection", () => {
         decided_by_owner_id: "own_01Z",
         error: {
           ...actionError,
-          code: "DEPENDENCY_UNAVAILABLE",
-          message: "Execution failed.",
-          retryable: true,
+          code: "ACTION_EXECUTION_FAILED",
+          message: "The approved action could not be completed.",
         },
       }),
     ],
@@ -212,7 +215,7 @@ describe("PendingAction state-machine projection", () => {
         error: {
           ...actionError,
           code: "ACTION_INVALIDATED",
-          message: "The frozen command can no longer execute.",
+          message: "The frozen action is no longer valid.",
         },
       }),
     ],
@@ -298,6 +301,26 @@ describe("PendingAction state-machine projection", () => {
         ...commonAction,
         terminal_at: "2026-07-19T19:14:59Z",
       }).success,
+    ).toBe(false);
+    expect(
+      PendingActionProjectionSchema.safeParse({
+        ...commonAction,
+        expires_at: requestedAt,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("binds each terminal state to its server-owned public error", () => {
+    expect(
+      PendingActionProjectionSchema.safeParse(
+        pendingAction({
+          state: "expired",
+          status: "denied",
+          terminal_at: completedAt,
+          approval_outcome: "expired",
+          error: actionError,
+        }),
+      ).success,
     ).toBe(false);
   });
 });

@@ -107,6 +107,86 @@ describeInfrastructure("local infrastructure", () => {
     await expect(postgres.check()).resolves.toBeUndefined();
   });
 
+  it("rejects a client override that could mask unsafe server logging", async () => {
+    const maskedUrl = new URL(databaseUrl ?? "");
+    maskedUrl.searchParams.set("log_parameter_max_length_on_error", "0");
+    const maskedPostgres = createPostgresDependency(maskedUrl.toString());
+
+    try {
+      await expect(maskedPostgres.check()).rejects.toThrow(
+        "PostgreSQL parameter logging must be disabled",
+      );
+    } finally {
+      await maskedPostgres.close();
+    }
+  });
+
+  it("reads the parameter-logging assertion from pg_catalog", async () => {
+    const maskingSchema = `probe_mask_${randomUUID().replaceAll("-", "")}`;
+    await postgres.sql`create schema ${postgres.sql(maskingSchema)}`;
+    await postgres.sql`
+      create table ${postgres.sql(`${maskingSchema}.pg_settings`)} (
+        name text not null,
+        setting text not null,
+        source text not null
+      )
+    `;
+    await postgres.sql`
+      insert into ${postgres.sql(`${maskingSchema}.pg_settings`)} (
+        name,
+        setting,
+        source
+      )
+      values
+        ('log_parameter_max_length', '0', 'configuration file'),
+        ('log_parameter_max_length_on_error', '0', 'configuration file')
+    `;
+
+    const spoofedUrl = new URL(databaseUrl ?? "");
+    spoofedUrl.searchParams.set("search_path", `${maskingSchema},pg_catalog`);
+    spoofedUrl.searchParams.set("log_parameter_max_length_on_error", "-1");
+    const spoofedPostgres = createPostgresDependency(spoofedUrl.toString());
+
+    try {
+      await expect(spoofedPostgres.check()).rejects.toThrow(
+        "PostgreSQL parameter logging must be disabled",
+      );
+    } finally {
+      await spoofedPostgres.close();
+      await postgres.sql`drop schema ${postgres.sql(maskingSchema)} cascade`;
+    }
+  });
+
+  it("detects an unsafe database-default change on a fresh probe session", async () => {
+    const databaseName = `probe_db_${randomUUID().replaceAll("-", "")}`;
+    await postgres.sql`create database ${postgres.sql(databaseName)}`;
+    await postgres.sql`
+      alter database ${postgres.sql(databaseName)}
+      set log_parameter_max_length_on_error = '0'
+    `;
+
+    const databaseDefaultUrl = new URL(databaseUrl ?? "");
+    databaseDefaultUrl.pathname = `/${databaseName}`;
+    const databaseDefaultPostgres = createPostgresDependency(
+      databaseDefaultUrl.toString(),
+    );
+
+    try {
+      await expect(databaseDefaultPostgres.check()).resolves.toBeUndefined();
+      await postgres.sql`
+        alter database ${postgres.sql(databaseName)}
+        set log_parameter_max_length_on_error = '-1'
+      `;
+      await delay(1_100);
+      await expect(databaseDefaultPostgres.check()).rejects.toThrow(
+        "PostgreSQL parameter logging must be disabled",
+      );
+    } finally {
+      await databaseDefaultPostgres.close();
+      await postgres.sql`drop database ${postgres.sql(databaseName)}`;
+    }
+  });
+
   it("accepts Redis commands", async () => {
     await expect(redis.check()).resolves.toBeUndefined();
   });

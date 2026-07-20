@@ -159,6 +159,40 @@ describe("content write request contracts", () => {
     ).toBe(false);
   });
 
+  it("rejects PostgreSQL-incompatible NUL while preserving Markdown layout", () => {
+    for (const payload of [
+      { ...createPost, title: "AMD\u0000 research title" },
+      { ...createPost, body_markdown: "Research\u0000body" },
+      {
+        ...createPost,
+        source_links: [
+          {
+            url: "https://example.test/source",
+            title: "Source\u0000title",
+          },
+        ],
+      },
+      {
+        ...createPost,
+        source_links: [
+          {
+            url: "https://example.test/source",
+            description: "Source\u0000description",
+          },
+        ],
+      },
+    ]) {
+      expect(CreatePostRequestSchema.safeParse(payload).success).toBe(false);
+    }
+
+    expect(
+      CreatePostRequestSchema.safeParse({
+        ...createPost,
+        body_markdown: "Line one\n\tLine two",
+      }).success,
+    ).toBe(true);
+  });
+
   it("requires canonical unique symbols/topics and bounded safe idempotency keys", () => {
     expect(
       CreatePostRequestSchema.safeParse({
@@ -362,6 +396,35 @@ describe("unified write and PendingAction contracts", () => {
       CreatePostWriteResultSchema.safeParse({
         ...denied,
         debug_policy_trace: true,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("accepts a transient RATE_LIMITED admission denial only with retry evidence", () => {
+    const rateLimited = {
+      decision: "deny",
+      status: "denied",
+      result: null,
+      pending_action: null,
+      error: {
+        code: "RATE_LIMITED",
+        message: "The Community post rate limit has been reached.",
+        retryable: true,
+        details: { limit_dimension: "community_post" },
+        retry_after_ms: 75_000,
+      },
+      request_id: "req-rate-limited",
+      schema_version: "1",
+    } as const;
+
+    expect(CreatePostWriteResultSchema.parse(rateLimited)).toEqual(rateLimited);
+    expect(
+      CreatePostWriteResultSchema.safeParse({
+        ...rateLimited,
+        error: {
+          ...rateLimited.error,
+          retry_after_ms: null,
+        },
       }).success,
     ).toBe(false);
   });

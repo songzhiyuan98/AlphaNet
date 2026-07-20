@@ -14,7 +14,12 @@ import {
   type SystemStatusResponse,
 } from "@alphanet/contracts";
 import { closeDependencies, type HealthDependency } from "@alphanet/database";
-import type { AgentConnectionService } from "@alphanet/domain";
+import type {
+  AgentConnectionService,
+  CommunityDirectoryService,
+  PendingActionStatusService,
+  ResearchWriteService,
+} from "@alphanet/domain";
 import Fastify, {
   type FastifyInstance,
   type FastifyBaseLogger,
@@ -24,6 +29,9 @@ import Fastify, {
 } from "fastify";
 
 import { registerAgentConnectionRoutes, v1Error } from "./agent-routes.js";
+import { registerCommunityRoutes } from "./community-routes.js";
+import { registerPendingActionRoutes } from "./pending-action-routes.js";
+import { registerResearchWriteRoutes } from "./research-write-routes.js";
 import { createRequestClientIpResolver, ssrClientIpHeaders } from "./ssr-client-ip.js";
 
 export interface ApiAppOptions {
@@ -31,10 +39,13 @@ export interface ApiAppOptions {
   agentConnectionService?: AgentConnectionService;
   agentRateLimiter?: Pick<RedisRateLimitStorage, "consume">;
   authRuntime?: AlphaNetAuthRuntime;
+  communityDirectoryService?: CommunityDirectoryService;
   dependencies?: readonly HealthDependency[];
   environment: "development" | "test" | "production";
   internalSsrRequestSecret?: string;
   logger?: FastifyBaseLogger;
+  pendingActionStatusService?: PendingActionStatusService;
+  researchWriteService?: ResearchWriteService;
   trustedProxyCidrs?: readonly string[];
   version: string;
 }
@@ -267,11 +278,15 @@ function sanitizeAuthResponseBody(
 export async function createApiApp(options: ApiAppOptions): Promise<FastifyInstance> {
   if (
     options.environment === "production" &&
-    options.authRuntime &&
+    (options.authRuntime ||
+      options.agentConnectionService ||
+      options.communityDirectoryService ||
+      options.pendingActionStatusService ||
+      options.researchWriteService) &&
     !options.agentRateLimiter
   ) {
     throw new Error(
-      "A Redis-backed API rate limiter is required with Owner authentication in production.",
+      "A Redis-backed API rate limiter is required for authenticated API routes in production.",
     );
   }
   const dependencies = options.dependencies ?? [];
@@ -293,6 +308,33 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
             critical: true,
             name: "agent-schema",
             check: () => options.agentConnectionService!.checkReady(),
+          },
+        ]
+      : []),
+    ...(options.communityDirectoryService
+      ? [
+          {
+            critical: true,
+            name: "community-directory-schema",
+            check: () => options.communityDirectoryService!.checkReady(),
+          },
+        ]
+      : []),
+    ...(options.pendingActionStatusService
+      ? [
+          {
+            critical: true,
+            name: "pending-action-schema",
+            check: () => options.pendingActionStatusService!.checkReady(),
+          },
+        ]
+      : []),
+    ...(options.researchWriteService
+      ? [
+          {
+            critical: true,
+            name: "research-write-schema",
+            check: () => options.researchWriteService!.checkReady(),
           },
         ]
       : []),
@@ -529,12 +571,49 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
     if (options.agentConnectionService) {
       registerAgentConnectionRoutes(app, {
         allowedOrigins: options.allowedOrigins,
+        availableOperations: [
+          "get_agent_context",
+          ...(options.communityDirectoryService
+            ? (["find_communities", "get_community"] as const)
+            : []),
+          ...(options.pendingActionStatusService ? (["get_action_status"] as const) : []),
+          ...(options.researchWriteService
+            ? (["create_post", "reply_to_content"] as const)
+            : []),
+        ],
         authRuntime,
         ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
         resolveClientIp,
         service: options.agentConnectionService,
       });
     }
+  }
+
+  if (options.agentConnectionService && options.communityDirectoryService) {
+    registerCommunityRoutes(app, {
+      agentConnectionService: options.agentConnectionService,
+      ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
+      resolveClientIp,
+      service: options.communityDirectoryService,
+    });
+  }
+
+  if (options.agentConnectionService && options.pendingActionStatusService) {
+    registerPendingActionRoutes(app, {
+      agentConnectionService: options.agentConnectionService,
+      ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
+      resolveClientIp,
+      service: options.pendingActionStatusService,
+    });
+  }
+
+  if (options.agentConnectionService && options.researchWriteService) {
+    registerResearchWriteRoutes(app, {
+      agentConnectionService: options.agentConnectionService,
+      ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
+      resolveClientIp,
+      service: options.researchWriteService,
+    });
   }
 
   app.setNotFoundHandler(async (request, reply) => {
@@ -596,6 +675,15 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
       },
       "request failed",
     );
+    if (usesAgentV1ErrorEnvelope(request)) {
+      return reply.code(500).send(
+        v1Error(request, {
+          code: "INTERNAL_ERROR",
+          message: "The request could not be completed.",
+          retryable: true,
+        }),
+      );
+    }
     const response: ApiError = {
       error: {
         code: "internal_error",
