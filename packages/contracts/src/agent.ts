@@ -87,10 +87,10 @@ export type AgentPermissionTier = z.infer<typeof AgentPermissionTierSchema>;
 export const PolicyDecisionSchema = z.enum(["allow", "require_approval", "deny"]);
 export type PolicyDecision = z.infer<typeof PolicyDecisionSchema>;
 
-const UuidSchema = z.uuid();
-const TimestampSchema = z.iso.datetime({ offset: true });
-const NullableTimestampSchema = TimestampSchema.nullable();
-const V1EnvelopeShape = {
+export const UuidSchema = z.uuid();
+export const TimestampSchema = z.iso.datetime({ offset: true });
+export const NullableTimestampSchema = TimestampSchema.nullable();
+export const V1EnvelopeShape = {
   request_id: z.string().min(1).max(200),
   schema_version: z.literal(V1_SCHEMA_VERSION),
 } as const;

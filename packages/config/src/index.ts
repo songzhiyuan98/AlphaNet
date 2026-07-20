@@ -5,6 +5,8 @@ import { z } from "zod";
 const NodeEnvironmentSchema = z.enum(["development", "test", "production"]);
 const LocalDevelopmentAuthSecret = "yKt8Jue5W_Q24xh6bP9FdM3Rav7CzsNe0GLi1TXUcAo";
 const LocalDevelopmentAgentApiKeyPepper = "h9mP6Lrz3dF5cQ8K7Vw2uX4aN1sJ0tYbEoGkUiZp";
+const LocalDevelopmentPendingActionEncryptionKey =
+  "8f7d9c1e0b2a4d6f91c3e5a7b9d1f20436587a9cbed0f123456789abcdef0123";
 const LocalDevelopmentSsrInternalRequestSecret =
   "L8wq2Uox9sV7Gm1Xc4Kd6aJ0Ph5Rt3NyE1bZfQ7i";
 
@@ -141,6 +143,36 @@ const AgentPreviousPepperRingSchema = z.preprocess(
   ),
 );
 
+const PendingActionEncryptionKeySchema = z
+  .string()
+  .regex(
+    /^[0-9a-f]{64}$/,
+    "must be a lower-case hexadecimal encoding of exactly 32 random bytes",
+  );
+
+const PendingActionPreviousKeyRingSchema = z.preprocess(
+  (value) => {
+    if (value === undefined || value === "") {
+      return {};
+    }
+    if (typeof value !== "string") {
+      return value;
+    }
+    try {
+      return JSON.parse(value) as unknown;
+    } catch {
+      return value;
+    }
+  },
+  z.record(
+    z
+      .string()
+      .regex(/^[1-9][0-9]{0,4}$/, "key versions must be positive integers")
+      .refine((value) => Number(value) <= 32_767, "key versions must not exceed 32767"),
+    PendingActionEncryptionKeySchema,
+  ),
+);
+
 const EmailFromSchema = z
   .string()
   .min(3)
@@ -204,6 +236,79 @@ const AgentCredentialEnvironmentFields = {
     .max(86_400)
     .default(30),
 } satisfies z.ZodRawShape;
+
+const PendingActionCryptoEnvironmentFields = {
+  PENDING_ACTION_ENCRYPTION_KEY: PendingActionEncryptionKeySchema.default(
+    LocalDevelopmentPendingActionEncryptionKey,
+  ),
+  PENDING_ACTION_ENCRYPTION_KEY_VERSION: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(32_767)
+    .default(1),
+  PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS: PendingActionPreviousKeyRingSchema.default({}),
+} satisfies z.ZodRawShape;
+
+type PendingActionCryptoValidationTarget = {
+  NODE_ENV: z.infer<typeof NodeEnvironmentSchema>;
+  PENDING_ACTION_ENCRYPTION_KEY: string;
+  PENDING_ACTION_ENCRYPTION_KEY_VERSION: number;
+  PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS: Record<string, string>;
+};
+
+function validatePendingActionCryptoEnvironment(
+  value: PendingActionCryptoValidationTarget,
+  context: z.RefinementCtx,
+): void {
+  if (
+    value.NODE_ENV === "production" &&
+    (value.PENDING_ACTION_ENCRYPTION_KEY === LocalDevelopmentPendingActionEncryptionKey ||
+      Object.values(value.PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS).includes(
+        LocalDevelopmentPendingActionEncryptionKey,
+      ))
+  ) {
+    context.addIssue({
+      code: "custom",
+      message:
+        "must not use the repository local-development PendingAction key in production",
+      path: ["PENDING_ACTION_ENCRYPTION_KEY"],
+    });
+  }
+  if (
+    Object.hasOwn(
+      value.PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS,
+      String(value.PENDING_ACTION_ENCRYPTION_KEY_VERSION),
+    )
+  ) {
+    context.addIssue({
+      code: "custom",
+      message:
+        "must not duplicate PENDING_ACTION_ENCRYPTION_KEY_VERSION in the previous key ring",
+      path: ["PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS"],
+    });
+  }
+  if (Object.keys(value.PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS).length > 5) {
+    context.addIssue({
+      code: "custom",
+      message: "must contain at most five previous encryption-key versions",
+      path: ["PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS"],
+    });
+  }
+  if (
+    new Set([
+      value.PENDING_ACTION_ENCRYPTION_KEY,
+      ...Object.values(value.PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS),
+    ]).size !==
+    1 + Object.keys(value.PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS).length
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "must not reuse PendingAction key material across versions",
+      path: ["PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS"],
+    });
+  }
+}
 
 type AuthEnvironmentValidationTarget = {
   AUTH_EMAIL_FROM?: string | undefined;
@@ -338,6 +443,7 @@ export type AuthEnvironment = z.infer<typeof AuthEnvironmentSchema>;
 export const ApiEnvironmentSchema = CommonServiceEnvironmentSchema.extend({
   ...AuthEnvironmentFields,
   ...AgentCredentialEnvironmentFields,
+  ...PendingActionCryptoEnvironmentFields,
   API_TRUSTED_PROXY_CIDRS: TrustedProxyListSchema,
   SSR_INTERNAL_REQUEST_SECRET: AuthSecretSchema.default(
     LocalDevelopmentSsrInternalRequestSecret,
@@ -348,6 +454,7 @@ export const ApiEnvironmentSchema = CommonServiceEnvironmentSchema.extend({
   CORS_ORIGINS: z.string().default("http://localhost:3000"),
 }).superRefine((value, context) => {
   validateAuthEnvironment(value, context);
+  validatePendingActionCryptoEnvironment(value, context);
 
   const corsOrigins = parseCommaSeparated(value.CORS_ORIGINS);
   const invalidCorsOrigin = corsOrigins.find((origin) => !isStaticHttpOrigin(origin));
@@ -467,6 +574,7 @@ export const McpEnvironmentSchema = CommonServiceEnvironmentSchema.extend({
 export type McpEnvironment = z.infer<typeof McpEnvironmentSchema>;
 
 export const WorkerEnvironmentSchema = CommonServiceEnvironmentSchema.extend({
+  ...PendingActionCryptoEnvironmentFields,
   DATABASE_URL: UrlSchema,
   OUTBOX_CONSUMER_NAME: z
     .string()
@@ -485,7 +593,7 @@ export const WorkerEnvironmentSchema = CommonServiceEnvironmentSchema.extend({
     .enum(["true", "false"])
     .default("false")
     .transform((value) => value === "true"),
-});
+}).superRefine(validatePendingActionCryptoEnvironment);
 export type WorkerEnvironment = z.infer<typeof WorkerEnvironmentSchema>;
 
 export class EnvironmentValidationError extends Error {

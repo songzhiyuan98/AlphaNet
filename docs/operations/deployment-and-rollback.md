@@ -101,6 +101,16 @@ The `migrate` image contains only the migration runner and migrations from the
 same release commit. Never substitute migrations from a checkout, shared
 volume, or moving branch.
 
+PendingAction commands contain unpublished research and are encrypted at rest
+with application-layer AES-256-GCM. Supply the same
+`PENDING_ACTION_ENCRYPTION_KEY`, version, and bounded previous-key ring to API
+and Worker replicas. Keep these values in the deployment secret manager, never
+in an image, build argument, browser variable, log, or database. Rotate by
+deploying readers with the old key in
+`PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS` before switching writers to the new
+version; remove an old key only after every action encrypted with it is
+terminal and beyond its retention window.
+
 ## SSR client identity and rate-limit boundary
 
 Next.js server rendering reaches the API over the private service network, so

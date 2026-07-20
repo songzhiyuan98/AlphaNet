@@ -381,16 +381,26 @@ for database in \
       --set=ON_ERROR_STOP=1 \
       --set=published_agent_database="${published_agent_database}" <<'SQL'
 SELECT
-  (SELECT count(*) FROM system.schema_migrations) = 5
+  (SELECT count(*) FROM system.schema_migrations) = 6
   AND EXISTS (
     SELECT 1
     FROM system.schema_migrations
     WHERE version = '000005'
       AND name = 'agent_identity_hardening'
   )
+  AND EXISTS (
+    SELECT 1
+    FROM system.schema_migrations
+    WHERE version = '000006'
+      AND name = 'community_research_core'
+  )
   AND to_regclass('platform.owners') IS NOT NULL
   AND to_regclass('platform.agents') IS NOT NULL
   AND to_regclass('platform.credentials') IS NOT NULL
+  AND to_regclass('platform.content_items') IS NOT NULL
+  AND to_regclass('platform.content_revisions') IS NOT NULL
+  AND to_regclass('platform.idempotency_records') IS NOT NULL
+  AND to_regclass('platform.pending_actions') IS NOT NULL
   AND EXISTS (
     SELECT 1
     FROM information_schema.columns
@@ -398,6 +408,15 @@ SELECT
       AND table_name = 'credentials'
       AND column_name = 'pepper_version'
       AND data_type = 'smallint'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'platform'
+      AND table_name = 'symbols'
+      AND column_name = 'community_candidate_id'
+      AND data_type = 'uuid'
+      AND is_nullable = 'NO'
   )
   AND (
     SELECT count(*) = 4
@@ -460,4 +479,4 @@ SQL
   fi
 done
 
-echo "Empty, Owner-schema, and published Agent-v1 forward migration paths are valid."
+echo "Empty, Owner-schema, and published Agent-v1 paths all reach the research-core schema."

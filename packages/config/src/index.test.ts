@@ -93,6 +93,9 @@ describe("environment parsing", () => {
     expect(result.SSR_INTERNAL_REQUEST_SECRET).toBe(
       "L8wq2Uox9sV7Gm1Xc4Kd6aJ0Ph5Rt3NyE1bZfQ7i",
     );
+    expect(result.PENDING_ACTION_ENCRYPTION_KEY_VERSION).toBe(1);
+    expect(result.PENDING_ACTION_ENCRYPTION_KEY).toMatch(/^[0-9a-f]{64}$/);
+    expect(result.PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS).toEqual({});
   });
 
   it("loads a bounded previous Agent API key pepper ring", () => {
@@ -161,6 +164,50 @@ describe("environment parsing", () => {
         ...baseEnvironment,
         AGENT_CREDENTIAL_DEFAULT_TTL_DAYS: "366",
         AGENT_CREDENTIAL_MAX_TTL_DAYS: "365",
+      }),
+    ).toThrow(EnvironmentValidationError);
+  });
+
+  it("loads a rotation-safe PendingAction encryption key ring", () => {
+    const previousKey =
+      "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+    const result = loadApiEnvironment({
+      ...baseEnvironment,
+      PENDING_ACTION_ENCRYPTION_KEY_VERSION: "2",
+      PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS: JSON.stringify({
+        1: previousKey,
+      }),
+    });
+
+    expect(result.PENDING_ACTION_ENCRYPTION_KEY_VERSION).toBe(2);
+    expect(result.PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS).toEqual({
+      1: previousKey,
+    });
+  });
+
+  it("rejects malformed, duplicated, or reused PendingAction key versions", () => {
+    expect(() =>
+      loadApiEnvironment({
+        ...baseEnvironment,
+        PENDING_ACTION_ENCRYPTION_KEY: "not-a-32-byte-key",
+      }),
+    ).toThrow(EnvironmentValidationError);
+    expect(() =>
+      loadApiEnvironment({
+        ...baseEnvironment,
+        PENDING_ACTION_ENCRYPTION_KEY_VERSION: "2",
+        PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS: JSON.stringify({
+          2: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        }),
+      }),
+    ).toThrow(EnvironmentValidationError);
+    expect(() =>
+      loadApiEnvironment({
+        ...baseEnvironment,
+        PENDING_ACTION_ENCRYPTION_KEY_VERSION: "2",
+        PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS: JSON.stringify({
+          1: "8f7d9c1e0b2a4d6f91c3e5a7b9d1f20436587a9cbed0f123456789abcdef0123",
+        }),
       }),
     ).toThrow(EnvironmentValidationError);
   });
@@ -272,6 +319,8 @@ describe("Owner authentication environment parsing", () => {
       BETTER_AUTH_URL: "https://api.alphanet.example",
       CORS_ORIGINS: "https://api.alphanet.example",
       NODE_ENV: "production",
+      PENDING_ACTION_ENCRYPTION_KEY:
+        "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
       RESEND_API_KEY: "re_live_key",
       SSR_INTERNAL_REQUEST_SECRET: "Production-SSR-Request-Secret-J8m4V2s7X5n9K3p6T1w0",
     });
