@@ -63,7 +63,7 @@ function createCapturingLogger(entries: unknown[][]): FastifyBaseLogger {
     trace: record,
     warn: record,
   };
-  return logger as unknown as FastifyBaseLogger;
+  return logger;
 }
 
 describe("API service", () => {

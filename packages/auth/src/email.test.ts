@@ -84,8 +84,8 @@ describe("auth email delivery", () => {
   });
 
   it("sends bilingual transactional email without exposing provider failures", async () => {
-    const fetchImplementation = vi.fn(
-      (): Promise<Response> => Promise.resolve(new Response(null, { status: 202 })),
+    const fetchImplementation = vi.fn((): Promise<Response> =>
+      Promise.resolve(new Response(null, { status: 202 })),
     ) as unknown as typeof fetch;
     const sender = new ResendEmailSender({
       apiKey: "re_test_secret",
