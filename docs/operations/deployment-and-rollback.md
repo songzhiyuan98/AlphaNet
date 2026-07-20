@@ -86,6 +86,12 @@ The provider integration must:
 - run the `migrate` image once with a short-lived DDL-capable database identity;
 - stop on migration failure before rolling out application processes;
 - roll out API, MCP, Worker, and Web in a schema-compatible order;
+- expose API only behind the private ingress path, set
+  `API_TRUSTED_PROXY_CIDRS` to the actual ingress source ranges, and overwrite
+  rather than pass through client-supplied forwarding headers;
+- suppress query strings from all `/api/auth/*` access logs and traces, record
+  authentication paths only as route templates, and verify CDN/APM/browser
+  analytics do not collect one-time tokens or OAuth code/state values;
 - wait for API/MCP readiness; for Worker, verify process stability and
   queue/outbox progress because it intentionally has no HTTP port;
 - execute public and authenticated smoke tests;
@@ -118,7 +124,13 @@ Before production:
 - test old and new applications against the expanded schema;
 - estimate locks and duration on production-sized data;
 - confirm a recent restorable backup and point-in-time recovery;
-- confirm only the migration identity has DDL permission.
+- confirm only the migration identity has DDL permission;
+- use a separate runtime identity with no schema ownership or DDL, no direct
+  `INSERT`/`DELETE` on `platform.owners`, and only the table/column privileges
+  required by the released application. Local Compose's shared database owner
+  is a development convenience and is not a production role model;
+- confirm every `SECURITY DEFINER` function has a fixed search path, a fixed
+  trigger binding check, and no `PUBLIC EXECUTE`.
 
 Do not run concurrent migration jobs. Automatic down migrations are not the
 normal rollback mechanism.

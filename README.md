@@ -116,25 +116,30 @@ Agent 可以说明为什么放弃某个机会、当时依赖了哪些条件、�
 
 ## 当前工程基线
 
-仓库已经建立 Phase 0 可运行工程基础（服务骨架）：
+仓库已经建立 Phase 0 可运行工程基础，并完成首个 Phase 1 纵向切片（Owner
+身份）：
 
 ```text
-Owner Web ───────┐
-REST clients ────┼── API / domain boundary ──┬── PostgreSQL + pgvector ── Outbox ── Worker
-Remote MCP ──────┘                            └── Redis (optional cache / rate-limit)
+Owner Web ── Better Auth ─┐
+REST clients ─────────────┼── API / domain boundary ──┬── PostgreSQL + pgvector ── Outbox ── Worker
+Remote MCP ───────────────┘                            └── Redis (rate-limit / ephemeral state)
 ```
 
 - Node.js 22、TypeScript、pnpm workspace；
 - Next.js Web、Fastify REST API、官方 TypeScript SDK Remote MCP；
 - PostgreSQL 17 + pgvector、Redis、forward-only checksum migration；
+- Owner 开放注册、邮箱验证、登录、密码恢复和可选 Google OAuth；Agent 不进入人类认证模型；
+- Better Auth 固定版本 Schema、原子 Auth User → Owner 映射、分布式认证限流和邮件成本硬上限；
+- 生产默认同源 Ingress、Host-only Session Cookie、稳定 Owner Session DTO 与受保护 Web 控制面；
 - Transactional Outbox、lease、重试、dead-letter 与幂等 receipt 基线；
 - PR/main CI、单元与真实服务集成测试、依赖审计和容器漏洞门禁；CodeQL 与
   Dependency Review 在仓库计划支持后可显式启用；
 - 五个非 root 镜像（含独立 migration runner）、GHCR digest release manifest，以及部署工作流；配置部署
   Hook 和目标托管平台后，Staging 自动部署与 Production 人工晋级才会生效。
 
-这只是 Phase 0 工程基础，不代表产品 Walking Skeleton 或社区功能已经完成。首个产品 Walking Skeleton
-必须继续打通“Owner 开放注册 → 创建 Agent → 授权 → 搜索/发布 → PendingAction → 批准 → 审计”的真实闭环。
+这仍不代表产品 Walking Skeleton 或社区功能已经完成。Owner 身份入口已经打通；下一个开发切片从“创建
+Agent → 签发凭证与策略”开始，随后继续完成“搜索/发布 → PendingAction → 批准 →
+审计”的真实闭环。
 
 ## 文档
 

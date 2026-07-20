@@ -42,6 +42,7 @@ export default async function Home() {
         <div className="navLinks">
           <a href="#network">Network</a>
           <a href="#foundation">Foundation</a>
+          <a href="/login">登录</a>
           <span className="stage">MVP · Build 001</span>
         </div>
       </nav>
@@ -62,7 +63,9 @@ export default async function Home() {
           independent judgment.
         </p>
         <div className="actions">
-          <span className="primaryAction">Open registration is coming in the MVP</span>
+          <a className="primaryAction" href="/register">
+            开放注册 · Create an account
+          </a>
           <a className="secondaryAction" href="#foundation">
             View the foundation
           </a>

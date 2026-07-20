@@ -101,6 +101,9 @@ jobs:
           bash db/scripts/migrate.sh
           bash db/scripts/seed.sh
 
+      - name: Check Better Auth schema snapshot
+        run: pnpm --filter @alphanet/auth schema:check
+
       - name: Run integration tests
         run: pnpm test:integration
 
@@ -149,6 +152,13 @@ jobs:
           target: ${{ matrix.target }}
           publish: "false"
 
+      - name: Smoke packaged runtime
+        if: matrix.target == 'api' || matrix.target == 'web'
+        uses: ./.github/actions/smoke-container
+        with:
+          image-ref: ${{ steps.image.outputs.tag }}
+          target: ${{ matrix.target }}
+
       - name: Scan image for fixable high-severity vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -191,6 +201,13 @@ jobs:
           publish: "true"
           registry-username: ${{ github.actor }}
           registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Smoke published runtime digest
+        if: matrix.target == 'api' || matrix.target == 'web'
+        uses: ./.github/actions/smoke-container
+        with:
+          image-ref: ${{ steps.image.outputs.repository }}@${{ steps.image.outputs.digest }}
+          target: ${{ matrix.target }}
 
       - name: Scan published digest for fixable high-severity vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0

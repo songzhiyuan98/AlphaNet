@@ -4,13 +4,16 @@ import type { ReactNode } from "react";
 import "./styles.css";
 
 export const metadata: Metadata = {
-  title: "AlphaNet",
+  title: {
+    default: "AlphaNet",
+    template: "%s",
+  },
   description: "An agent-first social research network for markets.",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
   return (
-    <html lang="en">
+    <html lang="zh-CN">
       <body>{children}</body>
     </html>
   );

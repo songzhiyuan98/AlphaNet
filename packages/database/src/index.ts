@@ -20,6 +20,10 @@ export interface RedisDependency extends HealthDependency {
   readonly client: Redis;
 }
 
+export interface RedisDependencyOptions {
+  critical?: boolean;
+}
+
 export function createPostgresDependency(connectionUrl: string): PostgresDependency {
   const sql = postgres(connectionUrl, {
     connect_timeout: 5,
@@ -53,7 +57,10 @@ export function createPostgresDependency(connectionUrl: string): PostgresDepende
   };
 }
 
-export function createRedisDependency(connectionUrl: string): RedisDependency {
+export function createRedisDependency(
+  connectionUrl: string,
+  options: RedisDependencyOptions = {},
+): RedisDependency {
   const client = new Redis(connectionUrl, {
     commandTimeout: 1_500,
     connectTimeout: 2_000,
@@ -67,7 +74,7 @@ export function createRedisDependency(connectionUrl: string): RedisDependency {
   });
 
   return {
-    critical: false,
+    critical: options.critical ?? false,
     name: "redis",
     client,
     async check() {

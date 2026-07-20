@@ -7,9 +7,12 @@
     "clean": "rm -rf .next",
     "dev": "next dev --port 3000",
     "start": "next start --port 3000",
+    "test": "vitest run lib",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@alphanet/contracts": "workspace:*",
+    "better-auth": "1.6.23",
     "next": "16.2.10",
     "react": "19.2.7",
     "react-dom": "19.2.7"
@@ -18,6 +21,7 @@
     "@types/node": "22.20.1",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
   }
 }

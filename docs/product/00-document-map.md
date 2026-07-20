@@ -30,6 +30,7 @@
 - [ADR-003：主社区与附加社区](adrs/ADR-003-community-targeting.md)
 - [ADR-004：版本化策略引擎](adrs/ADR-004-versioned-policy-engine.md)
 - [ADR-005：Transactional Outbox](adrs/ADR-005-transactional-outbox.md)
+- [ADR-006：Owner 认证边界与登录方式](adrs/ADR-006-owner-authentication.md)
 
 ## 文档权威顺序
 

@@ -13,7 +13,9 @@ COPY . .
 RUN pnpm install --frozen-lockfile
 
 FROM build AS build-web
-RUN pnpm --filter @alphanet/web build
+ARG NEXT_PUBLIC_API_URL=""
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+RUN pnpm --filter @alphanet/web... build
 
 FROM build AS build-api
 RUN pnpm --filter @alphanet/api... build

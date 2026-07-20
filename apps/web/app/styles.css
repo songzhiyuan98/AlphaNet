@@ -39,6 +39,27 @@ a {
   text-decoration: none;
 }
 
+button,
+input {
+  font: inherit;
+}
+
+button {
+  color: inherit;
+}
+
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
 main {
   margin: 0 auto;
   max-width: 1240px;
@@ -153,6 +174,10 @@ h1 span {
   font-size: 13px;
   font-weight: 700;
   padding: 13px 17px;
+}
+
+.primaryAction:hover {
+  background: #c6fa5e;
 }
 
 .secondaryAction {
@@ -313,6 +338,749 @@ footer {
   padding: 24px 0 38px;
 }
 
+/* Owner authentication */
+
+.authPage {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  max-width: none;
+  min-height: 100svh;
+  overflow: hidden;
+  padding: 0 clamp(22px, 5vw, 72px);
+  position: relative;
+}
+
+.authPage::before {
+  background:
+    linear-gradient(rgba(183, 243, 67, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(183, 243, 67, 0.035) 1px, transparent 1px);
+  background-size: 48px 48px;
+  content: "";
+  inset: 0;
+  mask-image: linear-gradient(to bottom right, black, transparent 68%);
+  pointer-events: none;
+  position: absolute;
+  z-index: -1;
+}
+
+.authNav {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  flex: 0 0 auto;
+  height: 76px;
+  justify-content: space-between;
+}
+
+.authNavLabel {
+  color: #747d72;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.authLayout {
+  align-items: center;
+  display: grid;
+  flex: 1 0 auto;
+  gap: clamp(56px, 9vw, 150px);
+  grid-template-columns: minmax(0, 1fr) minmax(380px, 500px);
+  margin: 0 auto;
+  max-width: 1180px;
+  padding: 64px 0;
+  width: 100%;
+}
+
+.authContext {
+  max-width: 570px;
+}
+
+.authContext h1 {
+  font-size: clamp(44px, 5.5vw, 76px);
+  font-weight: 520;
+  letter-spacing: -0.055em;
+  line-height: 0.98;
+  margin: 22px 0 28px;
+}
+
+.authContext > p:not(.sectionLabel) {
+  color: #aab3a7;
+  font-size: 16px;
+  line-height: 1.75;
+  max-width: 540px;
+}
+
+.authPrinciples {
+  color: #c9d0c5;
+  display: grid;
+  font-size: 13px;
+  gap: 14px;
+  list-style: none;
+  margin: 36px 0 0;
+  padding: 0;
+}
+
+.authPrinciples li {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+}
+
+.authPrinciples li::before {
+  background: var(--accent);
+  border-radius: 100%;
+  box-shadow: 0 0 0 5px var(--accent-soft);
+  content: "";
+  flex: 0 0 auto;
+  height: 5px;
+  width: 5px;
+}
+
+.authCard {
+  background: rgba(16, 19, 16, 0.94);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.24);
+  padding: clamp(26px, 4vw, 42px);
+}
+
+.compactCard {
+  align-self: center;
+}
+
+.authCardHeader {
+  margin-bottom: 28px;
+}
+
+.authKicker {
+  color: var(--accent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  margin: 0 0 12px;
+  text-transform: uppercase;
+}
+
+.authTitle {
+  font-size: 30px;
+  font-weight: 570;
+  letter-spacing: -0.04em;
+  line-height: 1.12;
+  margin: 0 0 12px;
+}
+
+.authCardHeader > p:last-child {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.65;
+  margin: 0;
+}
+
+.googleButton,
+.submitButton,
+.secondaryButton,
+.ownerNavButton {
+  align-items: center;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 680;
+  justify-content: center;
+  min-height: 46px;
+  padding: 0 17px;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+
+.googleButton {
+  background: #f4f6f2;
+  color: #171a16;
+  gap: 10px;
+  width: 100%;
+}
+
+.googleButton:hover:not(:disabled) {
+  background: #fff;
+}
+
+.googleButton svg {
+  height: 18px;
+  width: 18px;
+}
+
+.submitButton {
+  background: var(--accent);
+  color: #11150b;
+  width: 100%;
+}
+
+.submitButton:hover:not(:disabled) {
+  background: #c6fa5e;
+}
+
+.secondaryButton {
+  background: transparent;
+  border: 1px solid #343a33;
+  color: #e4e9e0;
+  width: 100%;
+}
+
+.secondaryButton:hover:not(:disabled) {
+  background: #181c18;
+  border-color: #4c554a;
+}
+
+.googleButton:disabled,
+.submitButton:disabled,
+.secondaryButton:disabled,
+.ownerNavButton:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
+.buttonLink {
+  text-align: center;
+}
+
+.authDivider {
+  align-items: center;
+  color: #687066;
+  display: flex;
+  font-size: 10px;
+  gap: 14px;
+  margin: 24px 0;
+  text-transform: uppercase;
+}
+
+.authDivider::before,
+.authDivider::after {
+  background: var(--line);
+  content: "";
+  flex: 1;
+  height: 1px;
+}
+
+.authForm {
+  display: grid;
+  gap: 18px;
+}
+
+.authForm > label:not(.checkboxLabel) {
+  display: grid;
+  gap: 8px;
+}
+
+.authForm label > span,
+.labelRow {
+  color: #dce2d8;
+  font-size: 12px;
+  font-weight: 590;
+}
+
+.labelRow {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.labelRow a {
+  color: #9daa97;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.labelRow a:hover {
+  color: var(--accent);
+}
+
+.authForm input:not([type="checkbox"]) {
+  background: #0b0e0b;
+  border: 1px solid #30352f;
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 14px;
+  min-height: 48px;
+  padding: 0 14px;
+  width: 100%;
+}
+
+.authForm input:not([type="checkbox"])::placeholder {
+  color: #596157;
+}
+
+.authForm input:not([type="checkbox"]):hover {
+  border-color: #424a40;
+}
+
+.authForm input:not([type="checkbox"]):focus {
+  border-color: #789f30;
+  box-shadow: 0 0 0 3px rgba(183, 243, 67, 0.08);
+  outline: none;
+}
+
+.authForm label small {
+  color: #697168;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.checkboxLabel {
+  align-items: center;
+  color: #9da69a;
+  cursor: pointer;
+  display: flex;
+  font-size: 11px;
+  gap: 9px;
+  width: fit-content;
+}
+
+.checkboxLabel input {
+  accent-color: var(--accent);
+  height: 15px;
+  margin: 0;
+  width: 15px;
+}
+
+.checkboxLabel span {
+  color: inherit !important;
+  font-size: inherit !important;
+  font-weight: 450 !important;
+}
+
+.formMessage {
+  border: 1px solid;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 1.55;
+  margin: 0;
+  padding: 10px 12px;
+}
+
+.formMessage.error {
+  background: rgba(232, 105, 99, 0.08);
+  border-color: rgba(232, 105, 99, 0.26);
+  color: #f1aaa5;
+}
+
+.formMessage.success {
+  background: var(--accent-soft);
+  border-color: rgba(183, 243, 67, 0.24);
+  color: #c9ef83;
+}
+
+.authFinePrint {
+  color: #697168;
+  font-size: 10px;
+  line-height: 1.6;
+  margin: 20px 0 0;
+  text-align: center;
+}
+
+.authSwitch {
+  color: #858e82;
+  font-size: 12px;
+  margin: 24px 0 0;
+  text-align: center;
+}
+
+.authSwitch a {
+  color: #dfe6da;
+  font-weight: 620;
+}
+
+.authSwitch a:hover {
+  color: var(--accent);
+}
+
+.authTip {
+  background: #0c0f0c;
+  border: 1px solid #272c26;
+  border-radius: 8px;
+  color: #8f988c;
+  font-size: 11px;
+  line-height: 1.6;
+  margin: -4px 0 24px;
+  padding: 12px 14px;
+}
+
+.verificationError {
+  margin: -4px 0 20px;
+}
+
+.successMark,
+.mailMark,
+.errorMark {
+  align-items: center;
+  border-radius: 10px;
+  display: flex;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 20px;
+  font-weight: 760;
+  height: 42px;
+  justify-content: center;
+  margin-bottom: 22px;
+  width: 42px;
+}
+
+.successMark,
+.mailMark {
+  background: var(--accent-soft);
+  border: 1px solid rgba(183, 243, 67, 0.24);
+  color: var(--accent);
+}
+
+.errorMark {
+  background: rgba(232, 105, 99, 0.08);
+  border: 1px solid rgba(232, 105, 99, 0.26);
+  color: #f1aaa5;
+}
+
+.authButtonRow {
+  display: flex;
+  gap: 10px;
+}
+
+.authFooter {
+  border-top: 1px solid var(--line);
+  color: #687066;
+  display: flex;
+  flex: 0 0 auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  justify-content: space-between;
+  padding: 22px 0 28px;
+}
+
+.authFooter a:hover {
+  color: var(--text);
+}
+
+/* Owner home */
+
+.ownerPage {
+  margin: 0 auto;
+  max-width: 1240px;
+  min-height: 100svh;
+  padding: 0 40px 80px;
+}
+
+.ownerNav {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  height: 76px;
+  justify-content: space-between;
+}
+
+.ownerNavActions {
+  align-items: center;
+  display: flex;
+  gap: 14px;
+}
+
+.ownerStatus {
+  align-items: center;
+  border: 1px solid #30362f;
+  border-radius: 999px;
+  color: #b0b9ad;
+  display: flex;
+  font-size: 10px;
+  gap: 7px;
+  padding: 7px 10px;
+}
+
+.ownerStatus::before {
+  background: #879084;
+  border-radius: 100%;
+  content: "";
+  height: 6px;
+  width: 6px;
+}
+
+.ownerStatus.active {
+  color: #c9ef83;
+}
+
+.ownerStatus.active::before {
+  background: var(--accent);
+}
+
+.ownerStatus.restricted,
+.ownerStatus.pending_verification {
+  color: #e8bd63;
+}
+
+.ownerStatus.restricted::before,
+.ownerStatus.pending_verification::before {
+  background: #e8bd63;
+}
+
+.ownerStatus.suspended,
+.ownerStatus.closed {
+  color: #f1aaa5;
+}
+
+.ownerStatus.suspended::before,
+.ownerStatus.closed::before {
+  background: #e86963;
+}
+
+.ownerNavButton {
+  background: transparent;
+  border: 1px solid #30362f;
+  color: #aeb7ab;
+  min-height: 32px;
+  padding: 0 12px;
+}
+
+.ownerNavButton:hover:not(:disabled) {
+  background: #151915;
+  color: var(--text);
+}
+
+.ownerHero {
+  align-items: end;
+  display: flex;
+  gap: 60px;
+  justify-content: space-between;
+  padding: 90px 0 64px;
+}
+
+.ownerHero h1 {
+  font-size: clamp(46px, 7vw, 82px);
+  margin: 17px 0 20px;
+}
+
+.ownerHero > div:first-child > p:last-child {
+  color: var(--muted);
+  line-height: 1.7;
+  margin: 0;
+  max-width: 660px;
+}
+
+.ownerIdentity {
+  align-items: center;
+  background: #0e110e;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 13px;
+  max-width: 360px;
+  padding: 14px;
+}
+
+.ownerIdentity > span {
+  align-items: center;
+  background: var(--accent);
+  border-radius: 9px;
+  color: #11150b;
+  display: flex;
+  font-size: 16px;
+  font-weight: 760;
+  height: 38px;
+  justify-content: center;
+  width: 38px;
+}
+
+.ownerIdentity div {
+  display: grid;
+  min-width: 0;
+}
+
+.ownerIdentity strong {
+  font-size: 12px;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ownerIdentity small {
+  color: #7d867a;
+  font-size: 10px;
+  margin-top: 4px;
+}
+
+.ownerGrid {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: 1.35fr 0.85fr;
+}
+
+.ownerPanel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  min-width: 0;
+  padding: 28px;
+}
+
+.primaryPanel {
+  background:
+    linear-gradient(135deg, rgba(183, 243, 67, 0.05), transparent 55%), var(--panel);
+}
+
+.ownerPanelWide {
+  grid-column: 1 / -1;
+}
+
+.ownerPanelHeader {
+  align-items: start;
+  display: flex;
+  gap: 20px;
+  justify-content: space-between;
+}
+
+.ownerPanel h2 {
+  font-size: 24px;
+  margin: 0;
+}
+
+.ownerPanel > p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+  max-width: 670px;
+}
+
+.ownerCount {
+  color: #4f574d;
+  font-size: 40px;
+  font-weight: 520;
+  letter-spacing: -0.05em;
+}
+
+.comingAction {
+  background: #0b0e0b;
+  border: 1px dashed #343a33;
+  border-radius: 8px;
+  color: #8b9488;
+  font-size: 11px;
+  margin-top: 24px;
+  padding: 13px 14px;
+  width: fit-content;
+}
+
+.ownerDetails {
+  border-top: 1px solid #272c26;
+  margin-top: 22px;
+}
+
+.ownerDetails div {
+  align-items: start;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 112px minmax(0, 1fr);
+  padding: 14px 0;
+}
+
+.ownerDetails div + div {
+  border-top: 1px solid #222621;
+}
+
+.ownerDetails dt {
+  color: #7e877b;
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.ownerDetails dd {
+  color: #c8d0c5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.ownerSteps {
+  display: grid;
+  gap: 0;
+  grid-template-columns: repeat(4, 1fr);
+  margin-top: 28px;
+}
+
+.ownerSteps > div {
+  display: grid;
+  min-height: 112px;
+  padding: 0 22px;
+}
+
+.ownerSteps > div:first-child {
+  padding-left: 0;
+}
+
+.ownerSteps > div + div {
+  border-left: 1px solid #292e28;
+}
+
+.ownerSteps span {
+  color: #5e665c;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+}
+
+.ownerSteps strong {
+  align-self: end;
+  font-size: 13px;
+}
+
+.ownerSteps small {
+  color: #798277;
+  font-size: 10px;
+  line-height: 1.5;
+  margin-top: 6px;
+}
+
+.ownerCentered {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+}
+
+.serviceUnavailable {
+  max-width: 540px;
+  text-align: center;
+}
+
+.serviceUnavailableMark {
+  align-items: center;
+  background: var(--accent);
+  border-radius: 12px;
+  color: #11150b;
+  display: inline-flex;
+  font-family: Georgia, serif;
+  font-size: 28px;
+  height: 54px;
+  justify-content: center;
+  width: 54px;
+}
+
+.serviceUnavailable h1 {
+  font-size: 42px;
+  margin: 28px 0 16px;
+}
+
+.serviceUnavailable p {
+  color: var(--muted);
+  line-height: 1.7;
+  margin: 0 auto 28px;
+}
+
+.serviceUnavailable .authButtonRow {
+  justify-content: center;
+}
+
+.serviceUnavailable .buttonLink {
+  width: auto;
+}
+
 @media (max-width: 760px) {
   main {
     padding: 0 22px;
@@ -352,5 +1120,96 @@ footer {
   footer {
     flex-direction: column;
     gap: 10px;
+  }
+
+  .authPage {
+    padding: 0 20px;
+  }
+
+  .authLayout {
+    display: block;
+    padding: 44px 0 56px;
+  }
+
+  .authContext {
+    margin-bottom: 40px;
+  }
+
+  .authContext h1 {
+    font-size: clamp(40px, 12vw, 58px);
+  }
+
+  .authContext > p:not(.sectionLabel),
+  .authPrinciples {
+    display: none;
+  }
+
+  .authNavLabel {
+    display: none;
+  }
+
+  .authCard {
+    padding: 26px 22px;
+  }
+
+  .authButtonRow {
+    flex-direction: column;
+  }
+
+  .authFooter {
+    flex-direction: row;
+  }
+
+  .ownerPage {
+    padding: 0 20px 56px;
+  }
+
+  .ownerNavActions .ownerStatus {
+    display: none;
+  }
+
+  .ownerHero {
+    align-items: start;
+    display: grid;
+    gap: 30px;
+    padding: 62px 0 46px;
+  }
+
+  .ownerIdentity {
+    max-width: 100%;
+    width: 100%;
+  }
+
+  .ownerIdentity strong {
+    max-width: calc(100vw - 130px);
+  }
+
+  .ownerGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .ownerPanelWide {
+    grid-column: auto;
+  }
+
+  .ownerSteps {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .ownerSteps > div {
+    min-height: 120px;
+    padding: 18px;
+  }
+
+  .ownerSteps > div:first-child {
+    padding-left: 18px;
+  }
+
+  .ownerSteps > div:nth-child(3) {
+    border-left: 0;
+  }
+
+  .ownerSteps > div:nth-child(n + 3) {
+    border-top: 1px solid #292e28;
   }
 }

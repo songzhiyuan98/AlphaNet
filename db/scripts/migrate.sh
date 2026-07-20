@@ -86,14 +86,17 @@ for migration_file in "${migration_files[@]}"; do
     printf '%s\n' 'BEGIN;'
     printf "%s\n" "SELECT pg_advisory_xact_lock(hashtextextended('alphanet:schema-migrations', 0));"
     printf "%s\n" "SELECT EXISTS (SELECT 1 FROM system.schema_migrations WHERE version = '${migration_version}') AS migration_exists,"
-    printf "%s\n" "       COALESCE((SELECT checksum = '${migration_checksum}' FROM system.schema_migrations WHERE version = '${migration_version}'), false) AS checksum_matches"
+    printf "%s\n" "       COALESCE((SELECT name = '${migration_name}' AND checksum = '${migration_checksum}' FROM system.schema_migrations WHERE version = '${migration_version}'), false) AS metadata_matches"
     printf '%s\n' '\gset'
     printf '%s\n' '\if :migration_exists'
-    printf '%s\n' '  \if :checksum_matches'
+    printf '%s\n' '  \if :metadata_matches'
     printf "%s\n" "    \\echo 'Already applied ${migration_basename}'"
     printf '%s\n' '  \else'
-    printf "%s\n" "    \\echo 'Checksum mismatch for ${migration_basename}'"
-    printf '%s\n' '    \quit 3'
+    printf "%s\n" "    \\echo 'Name or checksum mismatch for ${migration_basename}'"
+    # psql 17's \quit does not accept an exit-code argument. An intentional SQL
+    # error under ON_ERROR_STOP reliably returns status 3 instead of allowing
+    # the runner to continue into later migrations after drift is detected.
+    printf '%s\n' '    SELECT 1 / 0 AS migration_metadata_mismatch;'
     printf '%s\n' '  \endif'
     printf '%s\n' '\else'
     printf "%s\n" "  \\echo 'Applying ${migration_basename}'"

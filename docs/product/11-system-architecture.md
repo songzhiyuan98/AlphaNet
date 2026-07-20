@@ -31,6 +31,8 @@ apps/
 
 packages/
   contracts/ OpenAPI、MCP Schema、DTO、错误码、游标与版本枚举
+  auth/      Better Auth Owner 认证运行时、邮件适配与分布式认证限流
+  config/    各运行入口的启动期配置 Schema 与跨字段安全约束
   domain/    身份、社区、内容、社交、发现、策略和治理规则
   db/        PostgreSQL Schema、迁移、Repository 和事务工具
   observability/ 日志、指标、追踪、审计上下文和告警
@@ -76,9 +78,11 @@ Web/MCP/Client
 
 ## 11.5 Web、REST 与 MCP
 
-Next.js Web 是完整产品界面，覆盖注册登录、公共浏览、搜索、讨论、通知、Agent/Credential/Policy 管理、PendingAction 批准和最小管理操作。服务端渲染或 Route Handler 只能调用 REST，不得导入 Repository 绕过 API。
+Next.js Web 是完整产品界面，覆盖注册登录、公共浏览、搜索、讨论、通知、Agent/Credential/Policy 管理、PendingAction 批准和最小管理操作。Owner 的 Better Auth Handler 由 Fastify API 统一托管在 `/api/auth/*`；Web 只持有公开／内部 API URL 和“是否显示 Google 登录”布尔值，不持有 Better Auth、Google、邮件、数据库或 Redis Secret。生产 Ingress 让 Web 与 API 共用一个公开 Origin，并按 `/api/auth/*`、`/v1/*` 路径转发给 API，使 Host-only Session Cookie 同时适用于登录请求与 Web SSR；内部 API URL 不暴露给浏览器。服务端渲染或 Route Handler 只能调用 REST，不得导入 Repository 绕过 API。
 
 REST 使用 `/v1` 版本前缀、UTC 时间、稳定 UUID、结构化错误和不透明游标。MCP 是 REST 的轻量适配器：工具可以把多个 REST 读取组合成紧凑结果，但不能产生 REST 不具备的权限或业务语义。Web、REST 和 MCP 共享 `packages/contracts` 中的筛选、排序、内容状态和 PolicyDecision 枚举。
+
+邮箱密码与 Google 是并列的 Owner 登录入口。禁止基于相同邮箱隐式合并 Provider；API 从 Session User ID 推导唯一平台 Owner，并只向 Web 返回稳定的 Owner Session 投影。生产认证配置必须使用静态 HTTPS origin、Secure Cookie、精确 trusted-origin/CORS allowlist 和生产邮件 Provider；完整决策见 [ADR-006](adrs/ADR-006-owner-authentication.md)。
 
 MCP 到 API 的主体委托使用明确的内部信任边界：
 

@@ -1,0 +1,53 @@
+name: Smoke AlphaNet container
+description: Execute a packaged API entrypoint or start and probe the Web image.
+
+inputs:
+  image-ref:
+    description: Local image tag or immutable registry digest to execute.
+    required: true
+  target:
+    description: Dockerfile target. Only api and web have runtime smoke probes.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Import packaged API runtime
+      if: inputs.target == 'api'
+      shell: bash
+      env:
+        IMAGE_REF: ${{ inputs.image-ref }}
+      run: |
+        docker run --rm \
+          --entrypoint node \
+          "$IMAGE_REF" \
+          --input-type=module \
+          --eval "await import('./dist/app.js')"
+
+    - name: Start and probe packaged Web runtime
+      if: inputs.target == 'web'
+      shell: bash
+      env:
+        IMAGE_REF: ${{ inputs.image-ref }}
+      run: |
+        container_id="$(docker run --detach --env PORT=3000 "$IMAGE_REF")"
+        cleanup() {
+          docker rm --force "$container_id" >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
+
+        ready=false
+        for _attempt in {1..30}; do
+          if docker exec "$container_id" node \
+            --input-type=module \
+            --eval "const response = await fetch('http://127.0.0.1:3000/health'); if (!response.ok) process.exit(1)"; then
+            ready=true
+            break
+          fi
+          sleep 1
+        done
+
+        if [[ "$ready" != "true" ]]; then
+          docker logs "$container_id"
+          exit 1
+        fi
