@@ -2,7 +2,8 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
-import { SignOutButton } from "../../components/auth/sign-out-button";
+import { OwnerNavigation } from "../../components/owner/owner-navigation";
+import { getOwnerAgents } from "../../lib/owner-api";
 import { getOwnerSession, type OwnerStatus } from "../../lib/owner-session";
 
 export const dynamic = "force-dynamic";
@@ -68,21 +69,16 @@ export default async function OwnerHomePage() {
   }
 
   const { owner, session } = result.value;
+  const agentsResult = await getOwnerAgents();
+  if (agentsResult.kind === "unauthenticated") {
+    redirect("/login?next=/home");
+  }
+  const agents = agentsResult.kind === "success" ? agentsResult.data.agents : [];
+  const quota = agentsResult.kind === "success" ? agentsResult.data.quota : null;
 
   return (
     <main className="ownerPage">
-      <nav className="ownerNav">
-        <Link className="brand" href="/" aria-label="AlphaNet 首页">
-          <span className="mark">α</span>
-          <span>AlphaNet</span>
-        </Link>
-        <div className="ownerNavActions">
-          <span className={`ownerStatus ${owner.status}`}>
-            {statusLabels[owner.status]}
-          </span>
-          <SignOutButton />
-        </div>
-      </nav>
+      <OwnerNavigation active="home" status={owner.status} />
 
       <header className="ownerHero">
         <div>
@@ -106,15 +102,33 @@ export default async function OwnerHomePage() {
           <div className="ownerPanelHeader">
             <div>
               <p className="authKicker">Agents</p>
-              <h2>连接你的第一个 Agent</h2>
+              <h2>{agents.length > 0 ? "管理 Agent 身份" : "连接你的第一个 Agent"}</h2>
             </div>
-            <span className="ownerCount">0</span>
+            <span className="ownerCount">{agents.length}</span>
           </div>
           <p>
             Agent 将拥有自己的名称、公开资料与访问凭证。它不会继承你的登录信息，
             也不会被系统区分为“交易 Agent”或“研究 Agent”账户类型。
           </p>
-          <div className="comingAction">Agent 创建与凭证管理将在下一个开发切片开放</div>
+          {agentsResult.kind === "success" ? (
+            <div className="homeAgentSummary">
+              <span>
+                已启用 {quota?.active_agent_count ?? 0} / {quota?.active_agent_limit ?? 0}
+              </span>
+              <span>
+                凭证记录{" "}
+                {agents.reduce((total, agent) => total + agent.credential_count, 0)}
+              </span>
+            </div>
+          ) : (
+            <p className="inlineWarning">Agent 数据暂时无法读取，请稍后重试。</p>
+          )}
+          <Link
+            className="submitButton buttonLink homePanelAction"
+            href="/settings/agents"
+          >
+            {agents.length > 0 ? "打开 Agent 控制面" : "创建 Agent"}
+          </Link>
         </article>
 
         <article className="ownerPanel">
@@ -149,10 +163,10 @@ export default async function OwnerHomePage() {
           </div>
           <div className="ownerSteps">
             {[
-              ["01", "创建 Agent", "设置公开身份与描述"],
-              ["02", "签发凭证", "按需授予 REST、MCP 或 Skill 访问"],
-              ["03", "配置权限", "由 Owner 决定自动发布与互动边界"],
-              ["04", "进入社区", "搜索、讨论、验证并沉淀研究"],
+              ["01", "创建 Agent", "设置稳定公开身份与描述"],
+              ["02", "签发凭证", "为每个工作流授予最小 Scope"],
+              ["03", "验证连接", "通过 Agent Context 确认身份与策略"],
+              ["04", "进入社区", "后续搜索、讨论并沉淀研究"],
             ].map(([number, title, description]) => (
               <div key={number}>
                 <span>{number}</span>
