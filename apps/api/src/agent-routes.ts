@@ -17,8 +17,8 @@ import {
   type AgentActivationReason,
   type AgentConnectionService,
   type AgentCredentialContext,
-  type AgentPolicyTier,
   type CredentialView,
+  evaluateAgentOperation,
   type OwnerAgentView,
 } from "@alphanet/domain";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -324,93 +324,38 @@ function capability(available: boolean, decision: "allow" | "require_approval" |
   return { available, default_decision: decision };
 }
 
-function effectivePolicyTier(
-  current: AgentPolicyTier,
-  credentialCeiling: AgentPolicyTier,
-): AgentPolicyTier {
-  if (current === "read_only" || credentialCeiling === "read_only") {
-    return "read_only";
-  }
-  if (current === "custom" || credentialCeiling === "custom") {
-    // Custom policies require their full rule documents. Phase 1 does not
-    // project those rules into ActorContext, so an unknown intersection must
-    // fail closed instead of expanding a credential.
-    return "read_only";
-  }
-  if (current === "assisted" || credentialCeiling === "assisted") {
-    return "assisted";
-  }
-  return "autonomous";
-}
-
 function effectiveCapabilities(
   context: AgentCredentialContext,
 ): AgentEffectiveCapabilities {
-  const scopes = new Set(context.credential.scopes);
-  const policyRulesUnavailable =
-    context.agent.policy.tier === "custom" ||
-    context.credential.policyCeiling === "custom";
-  const canReadCommunityDirectory =
-    !policyRulesUnavailable &&
-    (scopes.has("research:read") || scopes.has("community:read"));
-  const canReadResearch = !policyRulesUnavailable && scopes.has("research:read");
-  const tier = effectivePolicyTier(
-    context.agent.policy.tier,
-    context.credential.policyCeiling,
-  );
-  const writeDecision = (operation: "social" | "content") => {
-    if (policyRulesUnavailable || tier === "read_only") {
-      return "deny" as const;
-    }
-    if (operation === "content" && tier === "assisted") {
-      return "require_approval" as const;
-    }
-    return "allow" as const;
-  };
+  const decision = (
+    operation: Parameters<typeof evaluateAgentOperation>[0]["operation"],
+  ) =>
+    evaluateAgentOperation({
+      credentialPolicyCeiling: context.credential.policyCeiling,
+      operation,
+      policyTier: context.agent.policy.tier,
+      scopes: context.credential.scopes,
+    }).decision;
 
   // Phase 1 publishes only get_agent_context. The remaining capability entries
   // already describe scope and policy decisions, while `available=false`
   // prevents clients from assuming an unimplemented route or MCP tool exists.
   return {
     get_agent_context: capability(true, "allow"),
-    find_communities: capability(false, canReadCommunityDirectory ? "allow" : "deny"),
-    get_community: capability(false, canReadCommunityDirectory ? "allow" : "deny"),
-    browse_content: capability(false, canReadResearch ? "allow" : "deny"),
-    search_content: capability(false, canReadResearch ? "allow" : "deny"),
-    get_content: capability(false, canReadResearch ? "allow" : "deny"),
-    get_discussion: capability(false, canReadResearch ? "allow" : "deny"),
-    list_notifications: capability(
-      false,
-      !policyRulesUnavailable && scopes.has("notifications:read") ? "allow" : "deny",
-    ),
-    get_action_status: capability(
-      false,
-      !policyRulesUnavailable && scopes.has("actions:read") ? "allow" : "deny",
-    ),
-    create_post: capability(
-      false,
-      scopes.has("content:write") ? writeDecision("content") : "deny",
-    ),
-    reply_to_content: capability(
-      false,
-      scopes.has("content:write") ? writeDecision("content") : "deny",
-    ),
-    update_content: capability(
-      false,
-      scopes.has("content:write") ? writeDecision("content") : "deny",
-    ),
-    delete_content: capability(
-      false,
-      scopes.has("content:write") ? writeDecision("content") : "deny",
-    ),
-    set_reaction: capability(
-      false,
-      scopes.has("reaction:write") ? writeDecision("social") : "deny",
-    ),
-    set_follow: capability(
-      false,
-      scopes.has("follow:write") ? writeDecision("social") : "deny",
-    ),
+    find_communities: capability(false, decision("find_communities")),
+    get_community: capability(false, decision("get_community")),
+    browse_content: capability(false, decision("browse_content")),
+    search_content: capability(false, decision("search_content")),
+    get_content: capability(false, decision("get_content")),
+    get_discussion: capability(false, decision("get_discussion")),
+    list_notifications: capability(false, decision("list_notifications")),
+    get_action_status: capability(false, decision("get_action_status")),
+    create_post: capability(false, decision("create_post")),
+    reply_to_content: capability(false, decision("reply_to_content")),
+    update_content: capability(false, decision("update_content")),
+    delete_content: capability(false, decision("delete_content")),
+    set_reaction: capability(false, decision("set_reaction")),
+    set_follow: capability(false, decision("set_follow")),
   };
 }
 
