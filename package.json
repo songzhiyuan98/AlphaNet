@@ -16,10 +16,13 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",
+    "security:secrets": "bash .github/scripts/scan-secrets.sh",
     "test": "pnpm --recursive --if-present test",
     "test:coverage": "pnpm --recursive --if-present test:coverage",
     "test:integration": "vitest run --config vitest.integration.config.ts",
-    "typecheck": "pnpm --recursive --if-present typecheck"
+    "test:web:e2e": "playwright test --config playwright.config.ts",
+    "typecheck": "pnpm typecheck:root && pnpm --recursive --if-present typecheck",
+    "typecheck:root": "tsc -p tsconfig.json --noEmit"
   },
   "pnpm": {
     "overrides": {
@@ -28,6 +31,7 @@
   },
   "devDependencies": {
     "@eslint/js": "9.39.5",
+    "@playwright/test": "1.61.1",
     "@types/node": "22.20.1",
     "eslint": "9.39.5",
     "globals": "17.7.0",

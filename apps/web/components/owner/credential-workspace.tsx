@@ -26,6 +26,7 @@ function credentialStatusLabel(status: AgentCredentialSummary["status"]): string
   return {
     active: "有效",
     expired: "已过期",
+    inactive_principal: "主体不可用",
     revoked: "已撤销",
   }[status];
 }

@@ -14,11 +14,13 @@ afterEach(async () => {
 
 function createAuthRuntime(options?: {
   checkReady?: () => Promise<void>;
+  getOwnerSession?: () => Promise<OwnerSession | null>;
   googleEnabled?: boolean;
   handler?: (request: Request) => Promise<Response>;
   ownerSession?: OwnerSession | null;
 }): {
   close: ReturnType<typeof vi.fn>;
+  getOwnerSession: ReturnType<typeof vi.fn>;
   handler: ReturnType<typeof vi.fn>;
   runtime: AlphaNetAuthRuntime;
 } {
@@ -32,17 +34,20 @@ function createAuthRuntime(options?: {
         )),
   );
   const close = vi.fn(() => Promise.resolve());
+  const getOwnerSession = vi.fn(
+    options?.getOwnerSession ?? (() => Promise.resolve(options?.ownerSession ?? null)),
+  );
   const runtime = {
     auth: { handler },
     baseUrl: "https://api.alphanet.test",
     checkReady: vi.fn(options?.checkReady ?? (() => Promise.resolve())),
     close,
-    getOwnerSession: vi.fn(() => Promise.resolve(options?.ownerSession ?? null)),
+    getOwnerSession,
     googleEnabled: options?.googleEnabled ?? false,
     handle: handler,
   } as unknown as AlphaNetAuthRuntime;
 
-  return { close, handler, runtime };
+  return { close, getOwnerSession, handler, runtime };
 }
 
 function createCapturingLogger(entries: unknown[][]): FastifyBaseLogger {
@@ -211,19 +216,81 @@ describe("API service", () => {
       method: "GET",
       url: "/does-not-exist",
       headers: {
-        "x-request-id": "test-request-id",
+        "x-request-id": "req-test-request-id",
       },
     });
 
     expect(response.statusCode).toBe(404);
-    expect(response.headers["x-request-id"]).toBe("test-request-id");
+    expect(response.headers["x-request-id"]).toBe("req-test-request-id");
     expect(response.json()).toEqual({
       error: {
         code: "route_not_found",
         message: "The requested route does not exist.",
-        requestId: "test-request-id",
+        requestId: "req-test-request-id",
       },
     });
+  });
+
+  it("uses the versioned error envelope for an unknown v1 route", async () => {
+    const app = await createApiApp({
+      allowedOrigins: ["http://localhost:3000"],
+      environment: "test",
+      version: "test-version",
+    });
+    apps.push(app);
+
+    const response = await app.inject({
+      headers: {
+        "x-request-id": "req-unknown-v1-route",
+      },
+      method: "GET",
+      url: "/v1/does-not-exist",
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toEqual({
+      error: {
+        code: "ROUTE_NOT_FOUND",
+        details: null,
+        message: "The requested API route does not exist.",
+        retry_after_ms: null,
+        retryable: false,
+      },
+      request_id: "req-unknown-v1-route",
+      schema_version: "1",
+    });
+  });
+
+  it("replaces an Agent API key used as a request id before logging it", async () => {
+    const entries: unknown[][] = [];
+    const apiKey = "aln_v1_abcdefghijkl_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
+    expect(apiKey).toHaveLength(63);
+
+    const app = await createApiApp({
+      allowedOrigins: ["http://localhost:3000"],
+      environment: "test",
+      logger: createCapturingLogger(entries),
+      version: "test-version",
+    });
+    apps.push(app);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/does-not-exist",
+      headers: {
+        "x-request-id": apiKey,
+      },
+    });
+    const requestId = response.headers["x-request-id"];
+
+    expect(response.statusCode).toBe(404);
+    expect(requestId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(response.body).not.toContain(apiKey);
+    const capturedLogs = inspect(entries, { depth: 8 });
+    expect(capturedLogs).toContain(requestId);
+    expect(capturedLogs).not.toContain(apiKey);
   });
 
   it("bridges auth safely and removes internal ids and bearer tokens", async () => {
@@ -574,6 +641,85 @@ describe("API service", () => {
       error: {
         code: "unauthorized",
       },
+    });
+  });
+
+  it("protects the Owner session bridge before touching authentication storage", async () => {
+    const limitedAuth = createAuthRuntime();
+    const limitedConsume = vi.fn(() =>
+      Promise.resolve({ allowed: false, retryAfter: 17 }),
+    );
+    const limitedApp = await createApiApp({
+      agentRateLimiter: { consume: limitedConsume },
+      allowedOrigins: ["https://app.alphanet.test"],
+      authRuntime: limitedAuth.runtime,
+      environment: "test",
+      version: "test-version",
+    });
+    apps.push(limitedApp);
+
+    const limited = await limitedApp.inject({
+      headers: { cookie: "alphanet.session_token=random-invalid-session" },
+      method: "GET",
+      remoteAddress: "198.51.100.40",
+      url: "/v1/owner/session",
+    });
+
+    expect(limited.statusCode).toBe(429);
+    expect(limited.headers["retry-after"]).toBe("17");
+    expect(limitedConsume).toHaveBeenCalledExactlyOnceWith(
+      "ip:198.51.100.40:owner-session",
+      { max: 240, window: 60 },
+    );
+    expect(limitedAuth.getOwnerSession).not.toHaveBeenCalled();
+
+    const unavailableAuth = createAuthRuntime();
+    const unavailableApp = await createApiApp({
+      agentRateLimiter: {
+        consume: () => Promise.reject(new Error("redis unavailable")),
+      },
+      allowedOrigins: ["https://app.alphanet.test"],
+      authRuntime: unavailableAuth.runtime,
+      environment: "test",
+      version: "test-version",
+    });
+    apps.push(unavailableApp);
+    const unavailable = await unavailableApp.inject({
+      headers: { cookie: "alphanet.session_token=random-invalid-session" },
+      method: "GET",
+      remoteAddress: "198.51.100.41",
+      url: "/v1/owner/session",
+    });
+
+    expect(unavailable.statusCode).toBe(503);
+    expect(unavailable.json()).toMatchObject({
+      error: { code: "auth_unavailable" },
+    });
+    expect(unavailableAuth.getOwnerSession).not.toHaveBeenCalled();
+
+    const failedLookupAuth = createAuthRuntime({
+      getOwnerSession: () => Promise.reject(new Error("database unavailable")),
+    });
+    const failedLookupApp = await createApiApp({
+      agentRateLimiter: {
+        consume: () => Promise.resolve({ allowed: true, retryAfter: null }),
+      },
+      allowedOrigins: ["https://app.alphanet.test"],
+      authRuntime: failedLookupAuth.runtime,
+      environment: "test",
+      version: "test-version",
+    });
+    apps.push(failedLookupApp);
+    const failedLookup = await failedLookupApp.inject({
+      headers: { cookie: "alphanet.session_token=random-invalid-session" },
+      method: "GET",
+      remoteAddress: "198.51.100.42",
+      url: "/v1/owner/session",
+    });
+
+    expect(failedLookup.statusCode).toBe(503);
+    expect(failedLookup.json()).toMatchObject({
+      error: { code: "auth_unavailable" },
     });
   });
 });

@@ -4,6 +4,9 @@ import { z } from "zod";
 
 const NodeEnvironmentSchema = z.enum(["development", "test", "production"]);
 const LocalDevelopmentAuthSecret = "yKt8Jue5W_Q24xh6bP9FdM3Rav7CzsNe0GLi1TXUcAo";
+const LocalDevelopmentAgentApiKeyPepper = "h9mP6Lrz3dF5cQ8K7Vw2uX4aN1sJ0tYbEoGkUiZp";
+const LocalDevelopmentSsrInternalRequestSecret =
+  "L8wq2Uox9sV7Gm1Xc4Kd6aJ0Ph5Rt3NyE1bZfQ7i";
 
 const CommonServiceEnvironmentSchema = z.object({
   NODE_ENV: NodeEnvironmentSchema.default("development"),
@@ -112,6 +115,32 @@ const AuthSecretSchema = z
     "must not be a placeholder",
   );
 
+const AgentPreviousPepperRingSchema = z.preprocess(
+  (value) => {
+    if (value === undefined || value === "") {
+      return {};
+    }
+    if (typeof value !== "string") {
+      return value;
+    }
+    try {
+      return JSON.parse(value) as unknown;
+    } catch {
+      return value;
+    }
+  },
+  z.record(
+    z
+      .string()
+      .regex(/^[1-9][0-9]{0,4}$/, "pepper versions must be positive integers")
+      .refine(
+        (value) => Number(value) <= 32_767,
+        "pepper versions must not exceed 32767",
+      ),
+    AuthSecretSchema,
+  ),
+);
+
 const EmailFromSchema = z
   .string()
   .min(3)
@@ -146,6 +175,34 @@ const AuthEnvironmentFields = {
   BETTER_AUTH_SECRET: AuthSecretSchema,
   BETTER_AUTH_URL: StaticHttpOriginSchema,
   RESEND_API_KEY: OptionalNonEmptyStringSchema(2_048),
+} satisfies z.ZodRawShape;
+
+const AgentCredentialEnvironmentFields = {
+  AGENT_API_AUDIENCE: z.string().min(8).max(200).default("urn:alphanet:api:v1"),
+  AGENT_API_KEY_PEPPER: AuthSecretSchema,
+  AGENT_API_KEY_PEPPER_VERSION: z.coerce.number().int().min(1).max(32_767).default(1),
+  AGENT_API_KEY_PREVIOUS_PEPPERS: AgentPreviousPepperRingSchema,
+  AGENT_CREDENTIAL_ACTIVE_PER_AGENT: z.coerce.number().int().min(1).max(100).default(5),
+  AGENT_CREDENTIAL_ACTIVE_PER_OWNER: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(1_000)
+    .default(20),
+  AGENT_CREDENTIAL_DEFAULT_TTL_DAYS: z.coerce.number().int().min(1).max(365).default(90),
+  AGENT_CREDENTIAL_ISSUE_PER_OWNER_24H: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(10_000)
+    .default(10),
+  AGENT_CREDENTIAL_MAX_TTL_DAYS: z.coerce.number().int().min(1).max(365).default(365),
+  AGENT_CREDENTIAL_MUTATION_COOLDOWN_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(86_400)
+    .default(30),
 } satisfies z.ZodRawShape;
 
 type AuthEnvironmentValidationTarget = {
@@ -280,7 +337,11 @@ export type AuthEnvironment = z.infer<typeof AuthEnvironmentSchema>;
 
 export const ApiEnvironmentSchema = CommonServiceEnvironmentSchema.extend({
   ...AuthEnvironmentFields,
+  ...AgentCredentialEnvironmentFields,
   API_TRUSTED_PROXY_CIDRS: TrustedProxyListSchema,
+  SSR_INTERNAL_REQUEST_SECRET: AuthSecretSchema.default(
+    LocalDevelopmentSsrInternalRequestSecret,
+  ),
   PORT: PortSchema.default(4000),
   DATABASE_URL: UrlSchema,
   REDIS_URL: UrlSchema,
@@ -314,6 +375,84 @@ export const ApiEnvironmentSchema = CommonServiceEnvironmentSchema.extend({
       message:
         "must name at least one trusted ingress IP or CIDR in production so auth limits use the client address",
       path: ["API_TRUSTED_PROXY_CIDRS"],
+    });
+  }
+
+  if (
+    value.NODE_ENV === "production" &&
+    value.SSR_INTERNAL_REQUEST_SECRET === LocalDevelopmentSsrInternalRequestSecret
+  ) {
+    context.addIssue({
+      code: "custom",
+      message:
+        "must not use the repository local-development SSR request secret in production",
+      path: ["SSR_INTERNAL_REQUEST_SECRET"],
+    });
+  }
+
+  if (value.AGENT_CREDENTIAL_ACTIVE_PER_OWNER < value.AGENT_CREDENTIAL_ACTIVE_PER_AGENT) {
+    context.addIssue({
+      code: "custom",
+      message: "must be at least AGENT_CREDENTIAL_ACTIVE_PER_AGENT",
+      path: ["AGENT_CREDENTIAL_ACTIVE_PER_OWNER"],
+    });
+  }
+
+  if (value.AGENT_CREDENTIAL_DEFAULT_TTL_DAYS > value.AGENT_CREDENTIAL_MAX_TTL_DAYS) {
+    context.addIssue({
+      code: "custom",
+      message: "must not exceed AGENT_CREDENTIAL_MAX_TTL_DAYS",
+      path: ["AGENT_CREDENTIAL_DEFAULT_TTL_DAYS"],
+    });
+  }
+
+  if (
+    value.NODE_ENV === "production" &&
+    (value.AGENT_API_KEY_PEPPER === LocalDevelopmentAgentApiKeyPepper ||
+      Object.values(value.AGENT_API_KEY_PREVIOUS_PEPPERS).includes(
+        LocalDevelopmentAgentApiKeyPepper,
+      ))
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "must not use the repository local-development pepper in production",
+      path: ["AGENT_API_KEY_PEPPER"],
+    });
+  }
+
+  if (
+    Object.hasOwn(
+      value.AGENT_API_KEY_PREVIOUS_PEPPERS,
+      String(value.AGENT_API_KEY_PEPPER_VERSION),
+    )
+  ) {
+    context.addIssue({
+      code: "custom",
+      message:
+        "must not duplicate AGENT_API_KEY_PEPPER_VERSION in AGENT_API_KEY_PREVIOUS_PEPPERS",
+      path: ["AGENT_API_KEY_PREVIOUS_PEPPERS"],
+    });
+  }
+
+  if (Object.keys(value.AGENT_API_KEY_PREVIOUS_PEPPERS).length > 5) {
+    context.addIssue({
+      code: "custom",
+      message: "must contain at most five previous pepper versions",
+      path: ["AGENT_API_KEY_PREVIOUS_PEPPERS"],
+    });
+  }
+
+  if (
+    new Set([
+      value.AGENT_API_KEY_PEPPER,
+      ...Object.values(value.AGENT_API_KEY_PREVIOUS_PEPPERS),
+    ]).size !==
+    1 + Object.keys(value.AGENT_API_KEY_PREVIOUS_PEPPERS).length
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "must not reuse a pepper secret across versions",
+      path: ["AGENT_API_KEY_PREVIOUS_PEPPERS"],
     });
   }
 });

@@ -123,6 +123,7 @@ describeInfrastructure("local infrastructure", () => {
     try {
       const events = await repository.claim({
         batchSize: 100,
+        eventTypes: ["integration_test.created"],
         leaseOwner,
         replayFrom: replayFromBeginning,
       });
@@ -176,11 +177,13 @@ describeInfrastructure("local infrastructure", () => {
       const [firstEvents, secondEvents] = await Promise.all([
         first.claim({
           batchSize: 20,
+          eventTypes: ["integration_test.created"],
           leaseOwner: firstOwner,
           replayFrom: replayFromBeginning,
         }),
         second.claim({
           batchSize: 20,
+          eventTypes: ["integration_test.created"],
           leaseOwner: secondOwner,
           replayFrom: replayFromBeginning,
         }),
@@ -217,6 +220,7 @@ describeInfrastructure("local infrastructure", () => {
     try {
       const firstClaim = await repository.claim({
         batchSize: 20,
+        eventTypes: ["integration_test.created"],
         leaseOwner: firstOwner,
         replayFrom: replayFromBeginning,
       });
@@ -226,6 +230,7 @@ describeInfrastructure("local infrastructure", () => {
 
       const secondClaim = await repository.claim({
         batchSize: 20,
+        eventTypes: ["integration_test.created"],
         leaseOwner: secondOwner,
         replayFrom: replayFromBeginning,
       });
@@ -541,6 +546,7 @@ describeInfrastructure("local infrastructure", () => {
     try {
       const events = await repository.claim({
         batchSize: 20,
+        eventTypes: ["integration_test.created"],
         leaseOwner: `bigint:${randomUUID()}`,
         replayFrom: replayFromBeginning,
       });
@@ -566,11 +572,13 @@ describeInfrastructure("local infrastructure", () => {
       const claims = await Promise.all([
         repository.claim({
           batchSize: 20,
+          eventTypes: ["integration_test.created"],
           leaseOwner: `competitor-a:${randomUUID()}`,
           replayFrom: replayFromBeginning,
         }),
         repository.claim({
           batchSize: 20,
+          eventTypes: ["integration_test.created"],
           leaseOwner: `competitor-b:${randomUUID()}`,
           replayFrom: replayFromBeginning,
         }),
@@ -594,6 +602,7 @@ describeInfrastructure("local infrastructure", () => {
     try {
       const staleClaim = await repository.claim({
         batchSize: 20,
+        eventTypes: ["integration_test.created"],
         leaseOwner: staleOwner,
         leaseSeconds: 0,
         replayFrom: replayFromBeginning,
@@ -602,6 +611,7 @@ describeInfrastructure("local infrastructure", () => {
 
       const currentClaim = await repository.claim({
         batchSize: 20,
+        eventTypes: ["integration_test.created"],
         leaseOwner: currentOwner,
         replayFrom: replayFromBeginning,
       });
@@ -631,6 +641,7 @@ describeInfrastructure("local infrastructure", () => {
     try {
       const firstClaim = await repository.claim({
         batchSize: 20,
+        eventTypes: ["integration_test.created"],
         leaseOwner: `crashed:${randomUUID()}`,
         leaseSeconds: 0,
         replayFrom: replayFromBeginning,
@@ -642,6 +653,7 @@ describeInfrastructure("local infrastructure", () => {
 
       const recoveryClaim = await repository.claim({
         batchSize: 20,
+        eventTypes: ["integration_test.created"],
         leaseOwner: `recovery:${randomUUID()}`,
         replayFrom: replayFromBeginning,
       });

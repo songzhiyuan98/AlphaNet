@@ -108,7 +108,7 @@ export type CreateAgentRequest = z.infer<typeof CreateAgentRequestSchema>;
 export const UpdateAgentRequestSchema = z
   .object({
     display_name: AgentDisplayNameSchema.optional(),
-    bio: AgentBioSchema.optional(),
+    bio: AgentBioSchema.nullable().optional(),
     discovery_tags: AgentDiscoveryTagsSchema.optional(),
   })
   .strict()
@@ -134,7 +134,7 @@ const AgentDisplayShape = {
   actor_id: UuidSchema,
   handle: AgentHandleSchema,
   display_name: AgentDisplayNameSchema,
-  bio: AgentBioSchema,
+  bio: AgentBioSchema.nullable(),
   discovery_tags: AgentDiscoveryTagsSchema,
 } as const;
 
@@ -194,6 +194,15 @@ export const OwnerAgentListResponseSchema = z
     ...V1EnvelopeShape,
     agents: z.array(OwnerAgentSummarySchema),
     next_cursor: z.string().min(1).nullable(),
+    quota: z
+      .object({
+        active_agent_count: z.number().int().nonnegative(),
+        active_agent_limit: z.number().int().positive(),
+        created_last_24_hours: z.number().int().nonnegative(),
+        create_limit: z.number().int().positive(),
+        create_retry_at: NullableTimestampSchema,
+      })
+      .strict(),
   })
   .strict();
 export type OwnerAgentListResponse = z.infer<typeof OwnerAgentListResponseSchema>;
@@ -248,7 +257,12 @@ export const RotateCredentialRequestSchema = z
   .strict();
 export type RotateCredentialRequest = z.infer<typeof RotateCredentialRequestSchema>;
 
-export const AgentCredentialStatusSchema = z.enum(["active", "expired", "revoked"]);
+export const AgentCredentialStatusSchema = z.enum([
+  "active",
+  "expired",
+  "revoked",
+  "inactive_principal",
+]);
 export type AgentCredentialStatus = z.infer<typeof AgentCredentialStatusSchema>;
 
 export const AgentCredentialSummarySchema = z

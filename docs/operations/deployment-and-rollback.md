@@ -101,6 +101,37 @@ The `migrate` image contains only the migration runner and migrations from the
 same release commit. Never substitute migrations from a checkout, shared
 volume, or moving branch.
 
+## SSR client identity and rate-limit boundary
+
+Next.js server rendering reaches the API over the private service network, so
+the API socket sees a Web replica rather than the browser. AlphaNet preserves
+the browser's rate-limit identity with a signed, short-lived forwarding
+assertion. The following are production deployment invariants:
+
+- `SSR_INTERNAL_REQUEST_SECRET` is a server-only, environment-specific,
+  high-entropy secret. Every Web and API replica in one environment must receive
+  the same value; it must not use a `NEXT_PUBLIC_` name, enter an image build
+  argument, or be exposed to the browser. Rotate it as a coordinated rollout so
+  Web signers and API verifiers do not temporarily disagree.
+- Production Web replicas must be private behind an ingress that removes or
+  overwrites caller-supplied `X-Real-IP` and replaces or safely appends
+  `X-Forwarded-For`. Do not expose a Web pod or container directly to the public
+  network: Web signs the sanitized ingress chain for its internal API request.
+- `API_TRUSTED_PROXY_CIDRS` must enumerate the exact source IPs or bounded CIDRs
+  of every trusted ingress/proxy hop in the deployed chain, not only the final
+  load balancer. Never use a catch-all network. This list governs both direct
+  API requests and right-to-left resolution of signed SSR forwarding chains.
+- `SSR_ALLOW_MISSING_CLIENT_IP=true` is permitted only for the repository's
+  loopback-bound local Compose topology, where there is no ingress to add a
+  forwarding header. It must be absent or `false` in staging and production.
+
+Before opening traffic, issue public and authenticated SSR requests through
+each Web replica and confirm that requests from the same test client consume
+the same Redis IP bucket. Also verify that a forged, expired, or path-replayed
+SSR assertion falls back to the API-validated socket/proxy address. A production
+Web request without a trusted forwarding identity must fail closed; do not
+restore availability by enabling the local-only exception.
+
 ## Database migration policy
 
 The migration container uses PostgreSQL 17 client tooling and advisory locking.

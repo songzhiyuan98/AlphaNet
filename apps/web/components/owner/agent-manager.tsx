@@ -483,7 +483,7 @@ export function AgentManager({
                     <>
                       <Link
                         className="smallPrimaryLink"
-                        href={`/settings/credentials?agent=${encodeURIComponent(
+                        href={`/settings/credentials?agent_id=${encodeURIComponent(
                           agent.id,
                         )}`}
                       >

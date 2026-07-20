@@ -18,6 +18,7 @@ const localAuthEnvironment = {
 
 const baseEnvironment = {
   ...localAuthEnvironment,
+  AGENT_API_KEY_PEPPER: "h9mP6Lrz3dF5cQ8K7Vw2uX4aN1sJ0tYbEoGkUiZp",
   DATABASE_URL: "postgres://alphanet:alphanet@localhost:5432/alphanet",
   OUTBOX_CONSUMER_NAME: "alphanet-worker:v1",
   OUTBOX_REPLAY_FROM: "2026-07-20T00:00:00.000Z",
@@ -75,6 +76,93 @@ describe("environment parsing", () => {
     } catch (error) {
       expect(String(error)).not.toContain("secret-that-must-not-be-logged");
     }
+  });
+
+  it("loads bounded Agent credential defaults", () => {
+    const result = loadApiEnvironment(baseEnvironment);
+
+    expect(result.AGENT_API_AUDIENCE).toBe("urn:alphanet:api:v1");
+    expect(result.AGENT_API_KEY_PEPPER_VERSION).toBe(1);
+    expect(result.AGENT_API_KEY_PREVIOUS_PEPPERS).toEqual({});
+    expect(result.AGENT_CREDENTIAL_ACTIVE_PER_AGENT).toBe(5);
+    expect(result.AGENT_CREDENTIAL_ACTIVE_PER_OWNER).toBe(20);
+    expect(result.AGENT_CREDENTIAL_DEFAULT_TTL_DAYS).toBe(90);
+    expect(result.AGENT_CREDENTIAL_MAX_TTL_DAYS).toBe(365);
+    expect(result.AGENT_CREDENTIAL_ISSUE_PER_OWNER_24H).toBe(10);
+    expect(result.AGENT_CREDENTIAL_MUTATION_COOLDOWN_SECONDS).toBe(30);
+    expect(result.SSR_INTERNAL_REQUEST_SECRET).toBe(
+      "L8wq2Uox9sV7Gm1Xc4Kd6aJ0Ph5Rt3NyE1bZfQ7i",
+    );
+  });
+
+  it("loads a bounded previous Agent API key pepper ring", () => {
+    const previousPepper = "Previous-Agent-Key-Pepper-Q8m2V7s4X1n6K9p3T5w0";
+    const result = loadApiEnvironment({
+      ...baseEnvironment,
+      AGENT_API_KEY_PEPPER_VERSION: "2",
+      AGENT_API_KEY_PREVIOUS_PEPPERS: JSON.stringify({
+        1: previousPepper,
+      }),
+    });
+
+    expect(result.AGENT_API_KEY_PEPPER_VERSION).toBe(2);
+    expect(result.AGENT_API_KEY_PREVIOUS_PEPPERS).toEqual({
+      1: previousPepper,
+    });
+  });
+
+  it("rejects malformed or duplicate Agent API key pepper versions", () => {
+    expect(() =>
+      loadApiEnvironment({
+        ...baseEnvironment,
+        AGENT_API_KEY_PREVIOUS_PEPPERS: "not-json",
+      }),
+    ).toThrow(EnvironmentValidationError);
+
+    expect(() =>
+      loadApiEnvironment({
+        ...baseEnvironment,
+        AGENT_API_KEY_PEPPER_VERSION: "2",
+        AGENT_API_KEY_PREVIOUS_PEPPERS: JSON.stringify({
+          2: "Previous-Agent-Key-Pepper-Q8m2V7s4X1n6K9p3T5w0",
+        }),
+      }),
+    ).toThrow(EnvironmentValidationError);
+
+    expect(() =>
+      loadApiEnvironment({
+        ...baseEnvironment,
+        AGENT_API_KEY_PEPPER_VERSION: "2",
+        AGENT_API_KEY_PREVIOUS_PEPPERS: JSON.stringify({
+          1: baseEnvironment.AGENT_API_KEY_PEPPER,
+        }),
+      }),
+    ).toThrow(EnvironmentValidationError);
+
+    expect(() =>
+      loadApiEnvironment({
+        ...baseEnvironment,
+        AGENT_API_KEY_PEPPER_VERSION: "32768",
+      }),
+    ).toThrow(EnvironmentValidationError);
+  });
+
+  it("rejects inconsistent Agent credential limits", () => {
+    expect(() =>
+      loadApiEnvironment({
+        ...baseEnvironment,
+        AGENT_CREDENTIAL_ACTIVE_PER_AGENT: "10",
+        AGENT_CREDENTIAL_ACTIVE_PER_OWNER: "5",
+      }),
+    ).toThrow(EnvironmentValidationError);
+
+    expect(() =>
+      loadApiEnvironment({
+        ...baseEnvironment,
+        AGENT_CREDENTIAL_DEFAULT_TTL_DAYS: "366",
+        AGENT_CREDENTIAL_MAX_TTL_DAYS: "365",
+      }),
+    ).toThrow(EnvironmentValidationError);
   });
 });
 
@@ -159,6 +247,7 @@ describe("Owner authentication environment parsing", () => {
     expect(() =>
       loadApiEnvironment({
         ...baseEnvironment,
+        AGENT_API_KEY_PEPPER: "Production-Agent-Key-Pepper-Rotated-Q7v9N2x5Lm8Kp3Rt",
         AUTH_EMAIL_FROM: "AlphaNet <auth@example.com>",
         AUTH_EMAIL_MODE: "resend",
         AUTH_SECURE_COOKIES: "true",
@@ -173,6 +262,7 @@ describe("Owner authentication environment parsing", () => {
 
     const result = loadApiEnvironment({
       ...baseEnvironment,
+      AGENT_API_KEY_PEPPER: "Production-Agent-Key-Pepper-Rotated-Q7v9N2x5Lm8Kp3Rt",
       API_TRUSTED_PROXY_CIDRS: "10.20.0.0/16,fd00:1234::/48",
       AUTH_EMAIL_FROM: "AlphaNet <auth@example.com>",
       AUTH_EMAIL_MODE: "resend",
@@ -183,6 +273,7 @@ describe("Owner authentication environment parsing", () => {
       CORS_ORIGINS: "https://api.alphanet.example",
       NODE_ENV: "production",
       RESEND_API_KEY: "re_live_key",
+      SSR_INTERNAL_REQUEST_SECRET: "Production-SSR-Request-Secret-J8m4V2s7X5n9K3p6T1w0",
     });
     expect(result.API_TRUSTED_PROXY_CIDRS).toEqual(["10.20.0.0/16", "fd00:1234::/48"]);
   });

@@ -716,9 +716,8 @@ Owner API 从 Better Auth Session 推导 Owner，不接受请求体中的 `owner
 | Code                      | 常见 HTTP | 含义                         |
 | ------------------------- | --------: | ---------------------------- |
 | `AUTHENTICATION_REQUIRED` |       401 | 缺少有效认证                 |
-| `INVALID_TOKEN`           |       401 | Token 验证失败               |
+| `INVALID_CREDENTIAL`      |       401 | Credential 验证失败          |
 | `INVALID_AUDIENCE`        |       401 | resource/audience 不匹配     |
-| `CREDENTIAL_REVOKED`      |       401 | 当前凭据已撤销               |
 | `SCOPE_REQUIRED`          |       403 | 缺少所需 scope               |
 | `PENDING_APPROVAL`        |       202 | 成功创建 PendingAction       |
 | `RESOURCE_NOT_FOUND`      |       404 | 资源不存在或不可见           |

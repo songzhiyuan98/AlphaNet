@@ -1,0 +1,802 @@
+import type { AlphaNetAuthRuntime, OwnerSession } from "@alphanet/auth";
+import {
+  CreateAgentRequestSchema,
+  CreateCredentialRequestSchema,
+  AgentHandleSchema,
+  RotateCredentialRequestSchema,
+  UpdateAgentRequestSchema,
+  type AgentContextResponse,
+  type AgentCredentialSummary,
+  type AgentEffectiveCapabilities,
+  type OwnerAgentSummary,
+  type PublicAgentProfileResponse,
+  type V1ErrorResponse,
+} from "@alphanet/contracts";
+import {
+  AgentConnectionError,
+  type AgentActivationReason,
+  type AgentConnectionService,
+  type AgentCredentialContext,
+  type AgentPolicyTier,
+  type CredentialView,
+  type OwnerAgentView,
+} from "@alphanet/domain";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { z } from "zod";
+
+export interface AgentConnectionRouteOptions {
+  allowedOrigins: readonly string[];
+  authRuntime: AlphaNetAuthRuntime;
+  rateLimiter?: {
+    consume(
+      key: string,
+      rule: { max: number; window: number },
+    ): Promise<{ allowed: boolean; retryAfter: number | null }>;
+  };
+  resolveClientIp?: (request: FastifyRequest) => string;
+  service: AgentConnectionService;
+}
+
+const identifierParametersSchema = z
+  .object({
+    agentId: z.uuid().optional(),
+    credentialId: z.uuid().optional(),
+    handle: AgentHandleSchema.optional(),
+  })
+  .strict();
+const credentialListQuerySchema = z
+  .object({
+    agent_id: z.uuid().optional(),
+  })
+  .strict();
+
+function toSessionHeaders(request: FastifyRequest): Headers {
+  const headers = new Headers();
+  const cookie = request.headers.cookie;
+  if (cookie) {
+    headers.set("cookie", cookie);
+  }
+  const userAgent = request.headers["user-agent"];
+  if (userAgent) {
+    headers.set("user-agent", userAgent);
+  }
+  return headers;
+}
+
+export function v1Error(
+  request: FastifyRequest,
+  options: {
+    code: string;
+    message: string;
+    retryable?: boolean | undefined;
+    retryAt?: Date | undefined;
+    details?: Record<string, string | number | boolean | null> | null | undefined;
+  },
+): V1ErrorResponse {
+  const retryAfterMilliseconds = options.retryAt
+    ? Math.max(1, options.retryAt.valueOf() - Date.now())
+    : null;
+  return {
+    error: {
+      code: options.code,
+      message: options.message,
+      retryable: options.retryable ?? false,
+      details:
+        options.details ??
+        (options.retryAt ? { retry_at: options.retryAt.toISOString() } : null),
+      retry_after_ms: retryAfterMilliseconds,
+    },
+    request_id: request.id,
+    schema_version: "1",
+  };
+}
+
+function validationFailed(request: FastifyRequest, reply: FastifyReply): FastifyReply {
+  return reply.code(422).send(
+    v1Error(request, {
+      code: "VALIDATION_FAILED",
+      message: "The request does not match the Agent API contract.",
+    }),
+  );
+}
+
+function sendConnectionError(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  error: unknown,
+): FastifyReply {
+  if (error instanceof AgentConnectionError) {
+    if (error.retryAt) {
+      void reply.header(
+        "retry-after",
+        String(Math.max(1, Math.ceil((error.retryAt.valueOf() - Date.now()) / 1_000))),
+      );
+    }
+    return reply.code(error.statusCode).send(
+      v1Error(request, {
+        code: error.code,
+        message: error.message,
+        retryable: error.retryable,
+        retryAt: error.retryAt,
+      }),
+    );
+  }
+
+  request.log.error(
+    {
+      errorName: error instanceof Error ? error.name : "UnknownError",
+    },
+    "Agent connection request failed",
+  );
+  return reply.code(503).send(
+    v1Error(request, {
+      code: "TEMPORARILY_UNAVAILABLE",
+      message: "The Agent connection service is temporarily unavailable.",
+      retryable: true,
+    }),
+  );
+}
+
+async function ownerForRequest(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  options: AgentConnectionRouteOptions,
+  mutation: boolean,
+): Promise<OwnerSession["owner"] | null> {
+  const clientIp = options.resolveClientIp?.(request) ?? request.ip;
+  if (
+    !(await consumeLimit(request, reply, options, `ip:${clientIp}:owner-api`, {
+      max: 240,
+      window: 60,
+    }))
+  ) {
+    return null;
+  }
+
+  let session: OwnerSession | null;
+  try {
+    session = await options.authRuntime.getOwnerSession(toSessionHeaders(request));
+  } catch (error) {
+    request.log.error(
+      {
+        errorName: error instanceof Error ? error.name : "UnknownError",
+      },
+      "Owner session lookup failed",
+    );
+    void reply.code(503).send(
+      v1Error(request, {
+        code: "TEMPORARILY_UNAVAILABLE",
+        message: "Owner authentication is temporarily unavailable.",
+        retryable: true,
+      }),
+    );
+    return null;
+  }
+  if (!session) {
+    void reply.code(401).send(
+      v1Error(request, {
+        code: "AUTHENTICATION_REQUIRED",
+        message: "A valid Owner session is required.",
+      }),
+    );
+    return null;
+  }
+
+  if (mutation) {
+    const origin = request.headers.origin;
+    const fetchSite = request.headers["sec-fetch-site"];
+    if (
+      !origin ||
+      !options.allowedOrigins.includes(origin) ||
+      fetchSite === "cross-site"
+    ) {
+      void reply.code(403).send(
+        v1Error(request, {
+          code: "CSRF_VALIDATION_FAILED",
+          message: "The Owner mutation did not come from an allowed Web origin.",
+        }),
+      );
+      return null;
+    }
+  }
+  if (
+    !(await consumeLimit(
+      request,
+      reply,
+      options,
+      `owner:${session.owner.id}:${mutation ? "mutation" : "read"}`,
+      {
+        max: mutation ? 30 : 120,
+        window: 60,
+      },
+    ))
+  ) {
+    return null;
+  }
+  return session.owner;
+}
+
+async function consumeLimit(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  options: AgentConnectionRouteOptions,
+  key: string,
+  rule: { max: number; window: number },
+): Promise<boolean> {
+  if (!options.rateLimiter) {
+    return true;
+  }
+  try {
+    const result = await options.rateLimiter.consume(key, rule);
+    if (result.allowed) {
+      return true;
+    }
+    const retryAfterSeconds = result.retryAfter ?? rule.window;
+    void reply.header("retry-after", String(retryAfterSeconds));
+    void reply.code(429).send(
+      v1Error(request, {
+        code: "RATE_LIMITED",
+        message: "Too many requests were made in this time window.",
+        retryable: true,
+        retryAt: new Date(Date.now() + retryAfterSeconds * 1_000),
+      }),
+    );
+    return false;
+  } catch (error) {
+    request.log.error(
+      {
+        errorName: error instanceof Error ? error.name : "UnknownError",
+      },
+      "Agent API rate limiter failed",
+    );
+    void reply.code(503).send(
+      v1Error(request, {
+        code: "TEMPORARILY_UNAVAILABLE",
+        message: "Request protection is temporarily unavailable.",
+        retryable: true,
+      }),
+    );
+    return false;
+  }
+}
+
+function serializeAgent(agent: OwnerAgentView): OwnerAgentSummary {
+  return {
+    id: agent.id,
+    actor_id: agent.actorId,
+    owner_id: agent.ownerId,
+    handle: agent.handle,
+    display_name: agent.displayName,
+    bio: agent.bio,
+    discovery_tags: agent.discoveryTags,
+    status: agent.status,
+    restriction_reason_code: agent.restrictionReasonCode,
+    policy: {
+      id: agent.policy.id,
+      tier: agent.policy.tier,
+      defaults_version: agent.policy.defaultsVersion,
+      policy_schema_version: String(agent.policy.schemaVersion),
+      version: Number(agent.policy.version),
+      effective_from: agent.policy.effectiveFrom.toISOString(),
+    },
+    credential_count: agent.credentialCount,
+    created_at: agent.createdAt.toISOString(),
+    updated_at: agent.updatedAt.toISOString(),
+    activated_at: agent.activatedAt?.toISOString() ?? null,
+    archived_at: agent.archivedAt?.toISOString() ?? null,
+  };
+}
+
+function serializeCredential(credential: CredentialView): AgentCredentialSummary {
+  return {
+    id: credential.id,
+    agent_id: credential.agentId,
+    name: credential.name,
+    credential_type: credential.type,
+    token_prefix: credential.prefix,
+    scopes: credential.scopes,
+    audience: credential.audience,
+    status: credential.status,
+    issued_at: credential.issuedAt.toISOString(),
+    expires_at: credential.expiresAt?.toISOString() ?? null,
+    last_used_at: credential.lastUsedAt?.toISOString() ?? null,
+    rotated_at: credential.replacesCredentialId
+      ? credential.issuedAt.toISOString()
+      : null,
+    revoked_at: credential.revokedAt?.toISOString() ?? null,
+  };
+}
+
+function activationResult(reason: AgentActivationReason | null) {
+  if (!reason) {
+    return { status: "activated" as const, reason: null };
+  }
+  return {
+    status: "deferred" as const,
+    reason:
+      reason === "OWNER_ACTIVE_AGENT_QUOTA_EXCEEDED"
+        ? ("owner_active_agent_quota_exceeded" as const)
+        : ("global_active_agent_capacity_exceeded" as const),
+  };
+}
+
+function capability(available: boolean, decision: "allow" | "require_approval" | "deny") {
+  return { available, default_decision: decision };
+}
+
+function effectivePolicyTier(
+  current: AgentPolicyTier,
+  credentialCeiling: AgentPolicyTier,
+): AgentPolicyTier {
+  if (current === "read_only" || credentialCeiling === "read_only") {
+    return "read_only";
+  }
+  if (current === "custom" || credentialCeiling === "custom") {
+    // Custom policies require their full rule documents. Phase 1 does not
+    // project those rules into ActorContext, so an unknown intersection must
+    // fail closed instead of expanding a credential.
+    return "read_only";
+  }
+  if (current === "assisted" || credentialCeiling === "assisted") {
+    return "assisted";
+  }
+  return "autonomous";
+}
+
+function effectiveCapabilities(
+  context: AgentCredentialContext,
+): AgentEffectiveCapabilities {
+  const scopes = new Set(context.credential.scopes);
+  const policyRulesUnavailable =
+    context.agent.policy.tier === "custom" ||
+    context.credential.policyCeiling === "custom";
+  const canReadCommunityDirectory =
+    !policyRulesUnavailable &&
+    (scopes.has("research:read") || scopes.has("community:read"));
+  const canReadResearch = !policyRulesUnavailable && scopes.has("research:read");
+  const tier = effectivePolicyTier(
+    context.agent.policy.tier,
+    context.credential.policyCeiling,
+  );
+  const writeDecision = (operation: "social" | "content") => {
+    if (policyRulesUnavailable || tier === "read_only") {
+      return "deny" as const;
+    }
+    if (operation === "content" && tier === "assisted") {
+      return "require_approval" as const;
+    }
+    return "allow" as const;
+  };
+
+  // Phase 1 publishes only get_agent_context. The remaining capability entries
+  // already describe scope and policy decisions, while `available=false`
+  // prevents clients from assuming an unimplemented route or MCP tool exists.
+  return {
+    get_agent_context: capability(true, "allow"),
+    find_communities: capability(false, canReadCommunityDirectory ? "allow" : "deny"),
+    get_community: capability(false, canReadCommunityDirectory ? "allow" : "deny"),
+    browse_content: capability(false, canReadResearch ? "allow" : "deny"),
+    search_content: capability(false, canReadResearch ? "allow" : "deny"),
+    get_content: capability(false, canReadResearch ? "allow" : "deny"),
+    get_discussion: capability(false, canReadResearch ? "allow" : "deny"),
+    list_notifications: capability(
+      false,
+      !policyRulesUnavailable && scopes.has("notifications:read") ? "allow" : "deny",
+    ),
+    get_action_status: capability(
+      false,
+      !policyRulesUnavailable && scopes.has("actions:read") ? "allow" : "deny",
+    ),
+    create_post: capability(
+      false,
+      scopes.has("content:write") ? writeDecision("content") : "deny",
+    ),
+    reply_to_content: capability(
+      false,
+      scopes.has("content:write") ? writeDecision("content") : "deny",
+    ),
+    update_content: capability(
+      false,
+      scopes.has("content:write") ? writeDecision("content") : "deny",
+    ),
+    delete_content: capability(
+      false,
+      scopes.has("content:write") ? writeDecision("content") : "deny",
+    ),
+    set_reaction: capability(
+      false,
+      scopes.has("reaction:write") ? writeDecision("social") : "deny",
+    ),
+    set_follow: capability(
+      false,
+      scopes.has("follow:write") ? writeDecision("social") : "deny",
+    ),
+  };
+}
+
+function bearerToken(request: FastifyRequest): string | null {
+  const url = new URL(request.url, "http://alphanet.invalid");
+  if (["access_token", "api_key", "token"].some((name) => url.searchParams.has(name))) {
+    return null;
+  }
+  const authorization = request.headers.authorization;
+  if (!authorization) {
+    return null;
+  }
+  const match = /^Bearer ([^\s]+)$/.exec(authorization);
+  return match?.[1] ?? null;
+}
+
+export function registerAgentConnectionRoutes(
+  app: FastifyInstance,
+  options: AgentConnectionRouteOptions,
+): void {
+  app.get("/v1/owner/agents", async (request, reply) => {
+    const owner = await ownerForRequest(request, reply, options, false);
+    if (!owner) return reply;
+    try {
+      const result = await options.service.listOwnerAgents(owner.id);
+      return {
+        schema_version: "1",
+        request_id: request.id,
+        agents: result.agents.map(serializeAgent),
+        next_cursor: null,
+        quota: {
+          active_agent_count: result.quota.active,
+          active_agent_limit: result.quota.activeLimit,
+          created_last_24_hours: result.quota.createdLast24Hours,
+          create_limit: result.quota.createLimit,
+          create_retry_at: result.quota.createRetryAt?.toISOString() ?? null,
+        },
+      };
+    } catch (error) {
+      return sendConnectionError(request, reply, error);
+    }
+  });
+
+  app.post("/v1/owner/agents", async (request, reply) => {
+    const owner = await ownerForRequest(request, reply, options, true);
+    if (!owner) return reply;
+    const parsed = CreateAgentRequestSchema.safeParse(request.body);
+    if (!parsed.success) return validationFailed(request, reply);
+    try {
+      const result = await options.service.createAgent(
+        owner.id,
+        {
+          handle: parsed.data.handle,
+          displayName: parsed.data.display_name,
+          bio: parsed.data.bio,
+          discoveryTags: parsed.data.discovery_tags,
+        },
+        request.id,
+      );
+      return reply.code(201).send({
+        schema_version: "1",
+        request_id: request.id,
+        agent: serializeAgent(result.agent),
+        activation: activationResult(result.activationReason),
+      });
+    } catch (error) {
+      return sendConnectionError(request, reply, error);
+    }
+  });
+
+  app.patch("/v1/owner/agents/:agentId", async (request, reply) => {
+    const owner = await ownerForRequest(request, reply, options, true);
+    if (!owner) return reply;
+    const parameters = identifierParametersSchema.safeParse(request.params);
+    const body = UpdateAgentRequestSchema.safeParse(request.body);
+    if (!parameters.success || !parameters.data.agentId || !body.success) {
+      return validationFailed(request, reply);
+    }
+    try {
+      const agent = await options.service.updateAgent(
+        owner.id,
+        parameters.data.agentId,
+        {
+          displayName: body.data.display_name,
+          bio: body.data.bio,
+          discoveryTags: body.data.discovery_tags,
+        },
+        request.id,
+      );
+      return {
+        schema_version: "1",
+        request_id: request.id,
+        agent: serializeAgent(agent),
+      };
+    } catch (error) {
+      return sendConnectionError(request, reply, error);
+    }
+  });
+
+  app.post("/v1/owner/agents/:agentId/activate", async (request, reply) => {
+    const owner = await ownerForRequest(request, reply, options, true);
+    if (!owner) return reply;
+    const parameters = identifierParametersSchema.safeParse(request.params);
+    if (!parameters.success || !parameters.data.agentId) {
+      return validationFailed(request, reply);
+    }
+    try {
+      const result = await options.service.activateAgent(
+        owner.id,
+        parameters.data.agentId,
+        request.id,
+      );
+      return {
+        schema_version: "1",
+        request_id: request.id,
+        agent: serializeAgent(result.agent),
+        activation: activationResult(result.activationReason),
+      };
+    } catch (error) {
+      return sendConnectionError(request, reply, error);
+    }
+  });
+
+  app.post("/v1/owner/agents/:agentId/archive", async (request, reply) => {
+    const owner = await ownerForRequest(request, reply, options, true);
+    if (!owner) return reply;
+    const parameters = identifierParametersSchema.safeParse(request.params);
+    if (!parameters.success || !parameters.data.agentId) {
+      return validationFailed(request, reply);
+    }
+    try {
+      const agent = await options.service.archiveAgent(
+        owner.id,
+        parameters.data.agentId,
+        request.id,
+      );
+      return {
+        schema_version: "1",
+        request_id: request.id,
+        agent: serializeAgent(agent),
+      };
+    } catch (error) {
+      return sendConnectionError(request, reply, error);
+    }
+  });
+
+  app.get("/v1/owner/agents/:agentId/credentials", async (request, reply) => {
+    const owner = await ownerForRequest(request, reply, options, false);
+    if (!owner) return reply;
+    const parameters = identifierParametersSchema.safeParse(request.params);
+    if (!parameters.success || !parameters.data.agentId) {
+      return validationFailed(request, reply);
+    }
+    try {
+      const credentials = await options.service.listCredentials(
+        owner.id,
+        parameters.data.agentId,
+      );
+      return {
+        schema_version: "1",
+        request_id: request.id,
+        credentials: credentials.map(serializeCredential),
+        next_cursor: null,
+      };
+    } catch (error) {
+      return sendConnectionError(request, reply, error);
+    }
+  });
+
+  app.get("/v1/owner/credentials", async (request, reply) => {
+    const owner = await ownerForRequest(request, reply, options, false);
+    if (!owner) return reply;
+    const query = credentialListQuerySchema.safeParse(request.query);
+    if (!query.success) {
+      return validationFailed(request, reply);
+    }
+    try {
+      const credentials = await options.service.listOwnerCredentials(
+        owner.id,
+        query.data.agent_id,
+      );
+      return {
+        schema_version: "1",
+        request_id: request.id,
+        credentials: credentials.map(serializeCredential),
+        next_cursor: null,
+      };
+    } catch (error) {
+      return sendConnectionError(request, reply, error);
+    }
+  });
+
+  app.post("/v1/owner/agents/:agentId/credentials", async (request, reply) => {
+    const owner = await ownerForRequest(request, reply, options, true);
+    if (!owner) return reply;
+    const parameters = identifierParametersSchema.safeParse(request.params);
+    const body = CreateCredentialRequestSchema.safeParse(request.body);
+    if (!parameters.success || !parameters.data.agentId || !body.success) {
+      return validationFailed(request, reply);
+    }
+    try {
+      const result = await options.service.createCredential(
+        owner.id,
+        parameters.data.agentId,
+        {
+          name: body.data.name,
+          scopes: body.data.scopes,
+          expiresAt: body.data.expires_at ? new Date(body.data.expires_at) : undefined,
+        },
+        request.id,
+      );
+      return reply.code(201).send({
+        schema_version: "1",
+        request_id: request.id,
+        credential: serializeCredential(result.credential),
+        api_key: result.apiKey,
+      });
+    } catch (error) {
+      return sendConnectionError(request, reply, error);
+    }
+  });
+
+  app.post("/v1/owner/credentials/:credentialId/rotate", async (request, reply) => {
+    const owner = await ownerForRequest(request, reply, options, true);
+    if (!owner) return reply;
+    const parameters = identifierParametersSchema.safeParse(request.params);
+    const body = RotateCredentialRequestSchema.safeParse(request.body ?? {});
+    if (!parameters.success || !parameters.data.credentialId || !body.success) {
+      return validationFailed(request, reply);
+    }
+    try {
+      const result = await options.service.rotateCredential(
+        owner.id,
+        parameters.data.credentialId,
+        {
+          expiresAt: body.data.expires_at ? new Date(body.data.expires_at) : undefined,
+        },
+        request.id,
+      );
+      return reply.code(201).send({
+        schema_version: "1",
+        request_id: request.id,
+        credential: serializeCredential(result.credential),
+        api_key: result.apiKey,
+      });
+    } catch (error) {
+      return sendConnectionError(request, reply, error);
+    }
+  });
+
+  app.delete("/v1/owner/credentials/:credentialId", async (request, reply) => {
+    const owner = await ownerForRequest(request, reply, options, true);
+    if (!owner) return reply;
+    const parameters = identifierParametersSchema.safeParse(request.params);
+    if (!parameters.success || !parameters.data.credentialId) {
+      return validationFailed(request, reply);
+    }
+    try {
+      const credential = await options.service.revokeCredential(
+        owner.id,
+        parameters.data.credentialId,
+        request.id,
+      );
+      return {
+        schema_version: "1",
+        request_id: request.id,
+        credential: serializeCredential(credential),
+      };
+    } catch (error) {
+      return sendConnectionError(request, reply, error);
+    }
+  });
+
+  app.get("/v1/agent/context", async (request, reply) => {
+    const clientIp = options.resolveClientIp?.(request) ?? request.ip;
+    if (
+      !(await consumeLimit(request, reply, options, `ip:${clientIp}:agent-context`, {
+        max: 120,
+        window: 60,
+      }))
+    ) {
+      return reply;
+    }
+    const token = bearerToken(request);
+    if (!token) {
+      return reply.code(401).send(
+        v1Error(request, {
+          code: "AUTHENTICATION_REQUIRED",
+          message: "A valid Agent Bearer credential is required.",
+        }),
+      );
+    }
+    try {
+      const context = await options.service.authenticateStaticApiKey(token);
+      if (
+        !(await consumeLimit(
+          request,
+          reply,
+          options,
+          `credential:${context.credential.id}:agent-context`,
+          { max: 120, window: 60 },
+        ))
+      ) {
+        return reply;
+      }
+      const now = new Date();
+      const response: AgentContextResponse = {
+        schema_version: "1",
+        request_id: request.id,
+        agent: {
+          id: context.agent.id,
+          actor_id: context.agent.actorId,
+          handle: context.agent.handle,
+          display_name: context.agent.displayName,
+        },
+        owner: { id: context.owner.id },
+        credential: {
+          id: context.credential.id,
+          name: context.credential.name,
+          scopes: context.credential.scopes,
+          audience: context.credential.audience,
+          expires_at: context.credential.expiresAt?.toISOString() ?? null,
+        },
+        permission_tier: context.agent.policy.tier,
+        policy_version: `${context.agent.policy.id}:${context.agent.policy.version}`,
+        effective_capabilities: effectiveCapabilities(context),
+        quota: {
+          window_ends_at: new Date(now.valueOf() + 3_600_000).toISOString(),
+          writes_remaining: 0,
+        },
+        server_time: now.toISOString(),
+      };
+      return response;
+    } catch (error) {
+      return sendConnectionError(request, reply, error);
+    }
+  });
+
+  app.get("/v1/public/agents/:handle", async (request, reply) => {
+    const clientIp = options.resolveClientIp?.(request) ?? request.ip;
+    if (
+      !(await consumeLimit(request, reply, options, `ip:${clientIp}:public-agent`, {
+        max: 120,
+        window: 60,
+      }))
+    ) {
+      return reply;
+    }
+    const parameters = identifierParametersSchema.safeParse(request.params);
+    if (!parameters.success || !parameters.data.handle) {
+      return validationFailed(request, reply);
+    }
+    try {
+      const agent = await options.service.getPublicAgentByHandle(parameters.data.handle);
+      if (!agent) {
+        return reply.code(404).send(
+          v1Error(request, {
+            code: "AGENT_NOT_FOUND",
+            message: "The Agent was not found.",
+          }),
+        );
+      }
+      const response: PublicAgentProfileResponse = {
+        schema_version: "1",
+        request_id: request.id,
+        agent: {
+          id: agent.id,
+          actor_id: agent.actorId,
+          handle: agent.handle,
+          display_name: agent.displayName,
+          bio: agent.bio,
+          discovery_tags: agent.discoveryTags,
+          status: "active",
+          created_at: agent.createdAt.toISOString(),
+          activated_at: agent.joinedAt.toISOString(),
+        },
+        stats: {
+          posts_count: 0,
+          replies_count: 0,
+          followers_count: 0,
+          following_count: 0,
+        },
+      };
+      return response;
+    } catch (error) {
+      return sendConnectionError(request, reply, error);
+    }
+  });
+}

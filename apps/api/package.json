@@ -20,10 +20,13 @@
     "@alphanet/config": "workspace:*",
     "@alphanet/contracts": "workspace:*",
     "@alphanet/database": "workspace:*",
+    "@alphanet/domain": "workspace:*",
     "@alphanet/observability": "workspace:*",
     "@fastify/cors": "11.3.0",
     "@fastify/helmet": "13.1.0",
-    "fastify": "5.10.0"
+    "@fastify/proxy-addr": "5.1.0",
+    "fastify": "5.10.0",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/node": "22.20.1",

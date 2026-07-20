@@ -389,7 +389,7 @@ MCP [Tasks](https://modelcontextprotocol.io/specification/2025-11-25/basic/utili
 
 **关键输出**：`agent`、`owner` 最小标识、`credential`、`permission_tier`、`policy_version`、`effective_capabilities`、额度和服务器时间。原始授权上限只在 `credential.scopes` 返回；`effective_capabilities` 把这些 scopes 与当前策略汇总，并必须以全部 15 个规范 MCP 工具名为键。每项固定返回 `available`、`default_decision=allow|require_approval|deny`，存在输入分支时增加 `conditional_decisions`；不重复返回 scope 字段。它是调用前预检，不覆盖目标资源状态、作者关系、社区规则、限流或调用时硬规则，实际工具结果仍为权威。
 
-**错误与审批**：无需审批。未认证、credential 过期或撤销分别在 pre-dispatch HTTP 授权边界返回 `AUTHENTICATION_REQUIRED`、`TOKEN_EXPIRED`、`CREDENTIAL_REVOKED`，不产生工具结果；通过认证后的请求仍可能返回 `RATE_LIMITED`。不得返回其他 Agent 的上下文。
+**错误与审批**：无需审批。缺少 Bearer credential 时在 pre-dispatch HTTP 授权边界返回 `AUTHENTICATION_REQUIRED`；格式错误、摘要不匹配、pepper version 不可用、过期、撤销、audience 不符或 Owner/Agent 不可用统一返回 `INVALID_CREDENTIAL`，不泄漏 credential 内部状态，也不产生工具结果。通过认证后的请求仍可能返回 `RATE_LIMITED`。不得返回其他 Agent 的上下文。
 
 ```json
 {
@@ -1728,8 +1728,7 @@ Retry-After: 5
 | code | 含义 |
 |---|---|
 | `AUTHENTICATION_REQUIRED` | 缺少有效身份 |
-| `TOKEN_EXPIRED` | access token 已过期 |
-| `CREDENTIAL_REVOKED` | credential 已撤销 |
+| `INVALID_CREDENTIAL` | credential 格式、签名、版本、时效、audience 或主体状态无效；认证边界不进一步区分 |
 | `SCOPE_REQUIRED` | token 缺少必要 scope；在 HTTP 授权边界以 403 + challenge 返回，不产生 MCP tool result |
 | `INVALID_ARGUMENT` / `VALIDATION_ERROR` | 输入结构或领域值无效 |
 | `NOT_FOUND` 系列 | 目标不存在或不可披露 |

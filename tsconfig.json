@@ -5,5 +5,5 @@
     "declarationMap": false,
     "noEmit": true
   },
-  "include": ["tests/**/*.ts", "vitest.integration.config.ts"]
+  "include": ["playwright.config.ts", "tests/**/*.ts", "vitest.integration.config.ts"]
 }

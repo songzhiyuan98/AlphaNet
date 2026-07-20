@@ -2,12 +2,12 @@
 
 ## Workflow inventory
 
-| Workflow            | Trigger                                   | Purpose                                                                                            |
-| ------------------- | ----------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `CI`                | pull requests to `main`, pushes to `main` | Audit, format, lint, type-check, test, build, build five images, publish digest manifest on `main` |
-| `Manual Deploy`     | manual dispatch from `main`               | Validate a successful CI release manifest, then promote or roll back its exact digests             |
-| `CodeQL`            | pull requests, `main`, weekly             | Opt-in GitHub Code Security analysis                                                               |
-| `Dependency Review` | pull requests to `main`                   | Opt-in GitHub Code Security dependency diff review                                                 |
+| Workflow            | Trigger                                   | Purpose                                                                                                               |
+| ------------------- | ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `CI`                | pull requests to `main`, pushes to `main` | Secret scan, audit, migration compatibility, tests, browser E2E, build five images, publish digest manifest on `main` |
+| `Manual Deploy`     | manual dispatch from `main`               | Validate a successful CI release manifest, then promote or roll back its exact digests                                |
+| `CodeQL`            | pull requests, `main`, weekly             | Opt-in GitHub Code Security analysis                                                                                  |
+| `Dependency Review` | pull requests to `main`                   | Opt-in GitHub Code Security dependency diff review                                                                    |
 
 There is deliberately no `workflow_run` release workflow. Quality gates, image
 publication, manifest generation, and optional staging deployment all run from
@@ -20,16 +20,32 @@ proposes updates to Actions, npm packages, and Docker base images.
 
 ## CI and release behavior
 
-The stable branch check is `CI / Required`.
+The stable branch check is `CI / Required`. It depends on Secret scan, Quality,
+Integration, Build, Web E2E, and the event-appropriate container publish/check
+matrix; a skipped or failed required gate cannot be hidden by the aggregator.
 
+- Secret scan runs digest-pinned Gitleaks directly in Docker, without a paid
+  GitHub Code Security feature or a licensed GitHub Action. It scans both the
+  complete checked-out Git history and current source tree. Allowlisting is
+  limited to exact, public test/development fixture values.
 - Quality runs `pnpm audit --prod --audit-level high`, formatting, linting,
-  type-checking, and unit tests. The pnpm audit is the security gate available
-  on the current GitHub plan.
+  type-checking, unit tests, and the Web one-time-Credential component test.
 - Integration uses disposable, digest-pinned PostgreSQL 17 + pgvector and Redis
-  7.4 services. It applies the real migrations and seed.
+  7.4 services. Before the normal migration and seed it proves three forward
+  paths: empty schema, Owner schema, and the committed Agent-v1 `000004`
+  snapshot containing a legacy static Credential, non-canonical handle/tag,
+  and an ActionLog value accepted by the shipped audit rule. The last path
+  proves those rows remain readable and editable where appropriate, then
+  verifies `000005` rejects equivalent new writes and backfills
+  `pepper_version=1`. The suite includes a real-auth API Credential lifecycle
+  E2E and bounded, independent-pool concurrency consistency load.
 - Build compiles the workspace.
-- The container matrix waits for all three gates, then builds `web`, `api`,
-  `mcp`, `worker`, and `migrate`.
+- Web E2E builds the production Next.js application and runs two Chromium
+  journeys with Playwright 1.61.1. The matching browser cache is version-keyed;
+  Playwright still verifies browser and runner system dependencies every run.
+- The container matrix waits for Quality, Integration, Build, Secret scan, and
+  Web E2E, then builds `web`, `api`, `mcp`, `worker`, and `migrate`; a failed
+  security or browser gate cannot publish a release image.
 - Every target is scanned with Trivy; fixable High or Critical OS/library
   vulnerabilities fail the job. Unfixed findings remain visible for review but
   do not create a permanently unresolvable gate.
@@ -176,3 +192,8 @@ see [GitHub Packages billing](https://docs.github.com/en/billing/concepts/produc
 
 Preview environments remain deferred until provider choice and per-PR database,
 Redis, callback, secret, and cleanup isolation are designed.
+
+The CI concurrency suite checks database-backed safety invariants; it is not a
+production performance claim. Multi-process HTTP soak tests, latency SLO
+measurement, and infrastructure fault injection remain blocked on a selected
+hosting platform, an isolated load environment, and explicit capacity targets.

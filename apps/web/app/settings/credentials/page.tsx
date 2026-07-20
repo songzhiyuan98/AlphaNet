@@ -17,7 +17,7 @@ export const metadata: Metadata = {
 export default async function CredentialSettingsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ agent?: string | string[] | undefined }>;
+  searchParams: Promise<{ agent_id?: string | string[] | undefined }>;
 }) {
   const [sessionResult, agentsResult, query] = await Promise.all([
     getOwnerSession(),
@@ -54,7 +54,8 @@ export default async function CredentialSettingsPage({
     );
   }
 
-  const requestedAgentId = typeof query.agent === "string" ? query.agent : undefined;
+  const requestedAgentId =
+    typeof query.agent_id === "string" ? query.agent_id : undefined;
   const initialAgent =
     agentsResult.data.agents.find((agent) => agent.id === requestedAgentId) ??
     agentsResult.data.agents.find((agent) => agent.status === "active") ??

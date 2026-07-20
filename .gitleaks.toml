@@ -1,0 +1,33 @@
+title = "AlphaNet secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Generated and dependency trees are not source inputs."
+paths = [
+  '''(^|/)\.next/''',
+  '''(^|/)coverage/''',
+  '''(^|/)dist/''',
+  '''(^|/)node_modules/''',
+]
+
+[[allowlists]]
+description = "Public deterministic test/development fixtures that are never runtime secrets."
+regexTarget = "secret"
+regexes = [
+  '''^h9mP6Lrz3dF5cQ8K7Vw2uX4aN1sJ0tYbEoGkUiZp$''',
+  '''^L8wq2Uox9sV7Gm1Xc4Kd6aJ0Ph5Rt3NyE1bZfQ7i$''',
+  '''^Production-SSR-Request-Secret-J8m4V2s7X5n9K3p6T1w0$''',
+  '''^QJv7w8ScgVN4Xs1TBP-Wuz2HaK6e3d9Rm5Afy0LcoEi$''',
+  '''^yKt8Jue5W_Q24xh6bP9FdM3Rav7CzsNe0GLi1TXUcAo$''',
+]
+
+[[allowlists]]
+description = "Non-secret identifiers used only in contract examples."
+regexTarget = "secret"
+regexes = [
+  '''^an_live_abcd1234$''',
+  '''^follow-symbol-amd-v1$''',
+  '''^reply-amd-margin-20260719-v1$''',
+]

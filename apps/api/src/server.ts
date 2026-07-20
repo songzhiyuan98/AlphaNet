@@ -1,5 +1,6 @@
 import {
   createAlphaNetAuthRuntime,
+  RedisRateLimitStorage,
   type AlphaNetAuthRuntime,
   type AlphaNetEmailDeliveryConfig,
 } from "@alphanet/auth";
@@ -10,6 +11,7 @@ import {
   createRedisDependency,
   type HealthDependency,
 } from "@alphanet/database";
+import { PostgresAgentConnectionService } from "@alphanet/domain";
 import { createLogger } from "@alphanet/observability";
 
 import { createApiApp } from "./app.js";
@@ -21,10 +23,28 @@ async function start(): Promise<void> {
     environment: environment.NODE_ENV,
     level: environment.LOG_LEVEL,
   });
-  const dependencies: HealthDependency[] = [
-    createPostgresDependency(environment.DATABASE_URL),
-    createRedisDependency(environment.REDIS_URL, { critical: true }),
-  ];
+  const postgres = createPostgresDependency(environment.DATABASE_URL);
+  const redis = createRedisDependency(environment.REDIS_URL, { critical: true });
+  const dependencies: HealthDependency[] = [postgres, redis];
+  const agentConnectionService = new PostgresAgentConnectionService(postgres.sql, {
+    activeCredentialsPerAgent: environment.AGENT_CREDENTIAL_ACTIVE_PER_AGENT,
+    activeCredentialsPerOwner: environment.AGENT_CREDENTIAL_ACTIVE_PER_OWNER,
+    apiAudience: environment.AGENT_API_AUDIENCE,
+    apiKeyCurrentPepperVersion: environment.AGENT_API_KEY_PEPPER_VERSION,
+    apiKeyPeppers: {
+      ...environment.AGENT_API_KEY_PREVIOUS_PEPPERS,
+      [environment.AGENT_API_KEY_PEPPER_VERSION]: environment.AGENT_API_KEY_PEPPER,
+    },
+    credentialDefaultTtlDays: environment.AGENT_CREDENTIAL_DEFAULT_TTL_DAYS,
+    credentialIssuePerOwner24Hours: environment.AGENT_CREDENTIAL_ISSUE_PER_OWNER_24H,
+    credentialMaxTtlDays: environment.AGENT_CREDENTIAL_MAX_TTL_DAYS,
+    credentialMutationCooldownSeconds:
+      environment.AGENT_CREDENTIAL_MUTATION_COOLDOWN_SECONDS,
+  });
+  const agentRateLimiter = new RedisRateLimitStorage(
+    redis.client,
+    "alphanet:agent-api:rate-limit:",
+  );
   const email: AlphaNetEmailDeliveryConfig =
     environment.AUTH_EMAIL_MODE === "resend"
       ? {
@@ -72,9 +92,12 @@ async function start(): Promise<void> {
     );
     app = await createApiApp({
       allowedOrigins: parseCorsOrigins(environment.CORS_ORIGINS),
+      agentConnectionService,
+      agentRateLimiter,
       authRuntime,
       dependencies,
       environment: environment.NODE_ENV,
+      internalSsrRequestSecret: environment.SSR_INTERNAL_REQUEST_SECRET,
       logger,
       trustedProxyCidrs: environment.API_TRUSTED_PROXY_CIDRS,
       version: environment.APP_VERSION,

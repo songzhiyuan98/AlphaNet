@@ -4,6 +4,8 @@ import {
 } from "@alphanet/contracts";
 import { headers } from "next/headers";
 
+import { signedSsrClientIpHeaders } from "./ssr-client-ip";
+
 export type OwnerSession = OwnerSessionResponse;
 export type OwnerStatus = OwnerSession["owner"]["status"];
 
@@ -23,12 +25,17 @@ function apiInternalUrl(): string {
 export async function getOwnerSession(): Promise<OwnerSessionResult> {
   const incomingHeaders = await headers();
   const cookie = incomingHeaders.get("cookie");
+  const path = "/v1/owner/session";
 
   try {
-    const response = await fetch(`${apiInternalUrl()}/v1/owner/session`, {
+    const response = await fetch(`${apiInternalUrl()}${path}`, {
       cache: "no-store",
       headers: {
         accept: "application/json",
+        ...signedSsrClientIpHeaders(incomingHeaders, {
+          method: "GET",
+          url: path,
+        }),
         ...(cookie ? { cookie } : {}),
       },
       signal: AbortSignal.timeout(3_000),

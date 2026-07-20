@@ -88,6 +88,7 @@ const friendlyMessages: Record<string, string> = {
   AGENT_CREATE_RATE_LIMITED: "过去 24 小时创建 Agent 的次数已达上限。",
   AGENT_HANDLE_TAKEN: "这个 Handle 已被使用，请换一个。",
   AGENT_NOT_FOUND: "找不到这个 Agent，它可能已被移除。",
+  RESOURCE_NOT_FOUND: "找不到这个资源，或它不属于当前账户。",
   AGENT_STATE_CONFLICT: "Agent 当前状态不允许执行此操作。",
   AUTHENTICATION_REQUIRED: "登录已过期，请重新登录。",
   CREDENTIAL_EXPIRY_INVALID: "有效期必须至少晚于当前时间 1 小时，且不能超过上限。",

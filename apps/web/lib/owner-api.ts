@@ -8,6 +8,8 @@ import {
 } from "@alphanet/contracts";
 import { headers } from "next/headers";
 
+import { signedSsrClientIpHeaders } from "./ssr-client-ip";
+
 export type ServerApiResult<T> =
   | { kind: "not_found" }
   | { kind: "success"; data: T }
@@ -33,12 +35,17 @@ async function serverApiGet<T>(
   const cookie = authenticated ? incomingHeaders.get("cookie") : null;
 
   try {
+    const requestHeaders = {
+      accept: "application/json",
+      ...signedSsrClientIpHeaders(incomingHeaders, {
+        method: "GET",
+        url: path,
+      }),
+      ...(cookie ? { cookie } : {}),
+    };
     const response = await fetch(`${apiInternalUrl()}${path}`, {
       cache: "no-store",
-      headers: {
-        accept: "application/json",
-        ...(cookie ? { cookie } : {}),
-      },
+      headers: requestHeaders,
       signal: AbortSignal.timeout(4_000),
     });
 

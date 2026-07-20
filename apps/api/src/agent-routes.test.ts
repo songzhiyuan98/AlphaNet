@@ -1,3 +1,5 @@
+import { createHmac } from "node:crypto";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AlphaNetAuthRuntime, OwnerSession } from "@alphanet/auth";
 import {
@@ -9,6 +11,7 @@ import {
   type OwnerCredentialCreateResponse,
   OwnerCredentialListResponseSchema,
   OwnerCredentialRevokeResponseSchema,
+  OwnerCredentialRotateResponseSchema,
   PublicAgentProfileResponseSchema,
   V1ErrorResponseSchema,
   type V1ErrorResponse,
@@ -21,7 +24,7 @@ import {
   type PublicAgentProfile,
 } from "@alphanet/domain";
 
-import { createApiApp } from "./app.js";
+import { createApiApp, type ApiAppOptions } from "./app.js";
 
 const ids = {
   owner: "00000000-0000-4000-8000-000000000001",
@@ -41,6 +44,7 @@ const timestamps = {
 
 const apiKey = "aln_v1_abcdefghijkl_abcdefghijklmnopqrstuvwxyz0123456789ABCDE";
 const allowedOrigin = "https://app.alphanet.test";
+const internalSsrRequestSecret = "L8wq2Uox9sV7Gm1Xc4Kd6aJ0Ph5Rt3NyE1bZfQ7i";
 const apps: Awaited<ReturnType<typeof createApiApp>>[] = [];
 
 const ownerSession: OwnerSession = {
@@ -140,6 +144,7 @@ function createAuthRuntime(
 
 function createService() {
   return {
+    checkReady: vi.fn<AgentConnectionService["checkReady"]>(() => Promise.resolve()),
     listOwnerAgents: vi.fn<AgentConnectionService["listOwnerAgents"]>(() =>
       Promise.resolve({
         agents: [ownerAgent],
@@ -210,8 +215,11 @@ function createService() {
 }
 
 async function createApp(options?: {
+  internalSsrRequestSecret?: string;
   ownerSession?: OwnerSession | null;
+  rateLimiter?: NonNullable<ApiAppOptions["agentRateLimiter"]>;
   service?: ReturnType<typeof createService>;
+  trustedProxyCidrs?: readonly string[];
 }) {
   const authRuntime = createAuthRuntime(
     options && "ownerSession" in options ? (options.ownerSession ?? null) : ownerSession,
@@ -222,10 +230,39 @@ async function createApp(options?: {
     agentConnectionService: service,
     authRuntime,
     environment: "test",
+    ...(options?.internalSsrRequestSecret
+      ? { internalSsrRequestSecret: options.internalSsrRequestSecret }
+      : {}),
+    ...(options?.rateLimiter ? { agentRateLimiter: options.rateLimiter } : {}),
+    ...(options?.trustedProxyCidrs
+      ? { trustedProxyCidrs: options.trustedProxyCidrs }
+      : {}),
     version: "test-version",
   });
   apps.push(app);
   return { app, authRuntime, service };
+}
+
+function signedSsrHeaders(
+  forwardedFor: string,
+  path: string,
+  options?: { timestamp?: number },
+) {
+  const timestamp = String(options?.timestamp ?? Date.now());
+  const payload = [
+    "alphanet-ssr-client-ip-v1",
+    timestamp,
+    "GET",
+    path,
+    forwardedFor,
+  ].join("\n");
+  return {
+    "x-alphanet-ssr-forwarded-for": forwardedFor,
+    "x-alphanet-ssr-signature": createHmac("sha256", internalSsrRequestSecret)
+      .update(payload)
+      .digest("base64url"),
+    "x-alphanet-ssr-timestamp": timestamp,
+  };
 }
 
 function ownerMutationHeaders(requestId: string) {
@@ -238,6 +275,24 @@ function ownerMutationHeaders(requestId: string) {
 }
 
 describe("Agent connection Owner routes", () => {
+  it("withdraws readiness when the Agent schema is not current", async () => {
+    const service = createService();
+    service.checkReady.mockRejectedValueOnce(new Error("000004 missing"));
+    const { app } = await createApp({ service });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/health/ready",
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({
+      failedDependencies: ["agent-schema"],
+      status: "degraded",
+    });
+    expect(response.body).not.toContain("000004");
+  });
+
   it("requires an authenticated Owner session", async () => {
     const { app, service } = await createApp({ ownerSession: null });
 
@@ -370,6 +425,81 @@ describe("Agent connection Owner routes", () => {
     expect(service.createAgent).not.toHaveBeenCalled();
   });
 
+  it("preserves v1 errors for malformed and oversized JSON bodies", async () => {
+    const { app, service } = await createApp();
+
+    const malformed = await app.inject({
+      headers: {
+        ...ownerMutationHeaders("req-malformed-json"),
+        "content-type": "application/json",
+      },
+      method: "POST",
+      payload: "{",
+      url: "/v1/owner/agents",
+    });
+    const oversized = await app.inject({
+      headers: {
+        ...ownerMutationHeaders("req-oversized-json"),
+        "content-type": "application/json",
+      },
+      method: "POST",
+      payload: JSON.stringify({ body: "x".repeat(1_100_000) }),
+      url: "/v1/owner/agents",
+    });
+
+    expect(malformed.statusCode).toBe(400);
+    expect(malformed.json()).toMatchObject({
+      error: {
+        code: "MALFORMED_REQUEST",
+        retryable: false,
+      },
+      request_id: "req-malformed-json",
+      schema_version: "1",
+    });
+    expect(V1ErrorResponseSchema.safeParse(malformed.json()).success).toBe(true);
+
+    expect(oversized.statusCode).toBe(413);
+    expect(oversized.json()).toMatchObject({
+      error: {
+        code: "PAYLOAD_TOO_LARGE",
+        retryable: false,
+      },
+      request_id: "req-oversized-json",
+      schema_version: "1",
+    });
+    expect(V1ErrorResponseSchema.safeParse(oversized.json()).success).toBe(true);
+    expect(service.createAgent).not.toHaveBeenCalled();
+  });
+
+  it("replaces an Agent API key request ID before it reaches durable audit", async () => {
+    const { app, service } = await createApp();
+    const unsafeRequestId =
+      "aln_v1_abcdefghijkl_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
+    expect(unsafeRequestId).toHaveLength(63);
+
+    const response = await app.inject({
+      headers: ownerMutationHeaders(unsafeRequestId),
+      method: "POST",
+      payload: {
+        handle: "request-id-scout",
+        display_name: "Request ID Scout",
+      },
+      url: "/v1/owner/agents",
+    });
+    const requestId = response.headers["x-request-id"];
+
+    expect(response.statusCode).toBe(201);
+    expect(requestId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(response.body).not.toContain(unsafeRequestId);
+    expect(service.createAgent).toHaveBeenCalledWith(
+      ids.owner,
+      expect.any(Object),
+      requestId,
+    );
+  });
+
   it("serializes the Agent list and rolling quota in one stable envelope", async () => {
     const { app, service } = await createApp();
 
@@ -468,6 +598,12 @@ describe("Agent connection Owner routes", () => {
       method: "GET",
       url: `/v1/owner/credentials?agent_id=${ids.agent}`,
     });
+    const rotated = await app.inject({
+      headers: ownerMutationHeaders("req-rotate-credential"),
+      method: "POST",
+      payload: {},
+      url: `/v1/owner/credentials/${ids.credential}/rotate`,
+    });
     const revoked = await app.inject({
       headers: ownerMutationHeaders("req-revoke-credential"),
       method: "DELETE",
@@ -485,6 +621,12 @@ describe("Agent connection Owner routes", () => {
     expect(listed.json()).not.toHaveProperty("api_key");
     expect(listed.body).not.toContain(apiKey);
 
+    expect(rotated.statusCode).toBe(201);
+    expect(OwnerCredentialRotateResponseSchema.safeParse(rotated.json()).success).toBe(
+      true,
+    );
+    expect(rotated.json()).toHaveProperty("api_key", apiKey);
+
     expect(revoked.statusCode).toBe(200);
     expect(OwnerCredentialRevokeResponseSchema.safeParse(revoked.json()).success).toBe(
       true,
@@ -495,6 +637,112 @@ describe("Agent connection Owner routes", () => {
 });
 
 describe("Agent Bearer and public routes", () => {
+  it("uses a verified SSR forwarding chain for distributed IP limits", async () => {
+    const consume = vi.fn<NonNullable<ApiAppOptions["agentRateLimiter"]>["consume"]>(() =>
+      Promise.resolve({ allowed: true, retryAfter: null }),
+    );
+    const { app } = await createApp({
+      internalSsrRequestSecret,
+      rateLimiter: { consume },
+      trustedProxyCidrs: ["10.0.0.0/8"],
+    });
+    const forwardedFor = "198.51.100.25,10.20.0.8";
+
+    const owner = await app.inject({
+      headers: {
+        cookie: "alphanet.session_token=opaque-session",
+        ...signedSsrHeaders(forwardedFor, "/v1/owner/agents"),
+      },
+      method: "GET",
+      remoteAddress: "172.20.0.4",
+      url: "/v1/owner/agents",
+    });
+    const publicProfilePath = "/v1/public/agents/market-scout";
+    const publicProfile = await app.inject({
+      headers: signedSsrHeaders(forwardedFor, publicProfilePath),
+      method: "GET",
+      remoteAddress: "172.20.0.5",
+      url: publicProfilePath,
+    });
+    const publicProfileFromSecondReplica = await app.inject({
+      headers: signedSsrHeaders(forwardedFor, publicProfilePath),
+      method: "GET",
+      remoteAddress: "172.20.0.6",
+      url: publicProfilePath,
+    });
+
+    expect(owner.statusCode).toBe(200);
+    expect(publicProfile.statusCode).toBe(200);
+    expect(publicProfileFromSecondReplica.statusCode).toBe(200);
+    expect(consume).toHaveBeenCalledWith("ip:198.51.100.25:owner-api", {
+      max: 240,
+      window: 60,
+    });
+    expect(consume).toHaveBeenCalledWith("ip:198.51.100.25:public-agent", {
+      max: 120,
+      window: 60,
+    });
+    expect(
+      consume.mock.calls.filter(([key]) => key === "ip:198.51.100.25:public-agent"),
+    ).toHaveLength(2);
+  });
+
+  it("ignores forged or stale SSR client addresses from public callers", async () => {
+    const consume = vi.fn<NonNullable<ApiAppOptions["agentRateLimiter"]>["consume"]>(() =>
+      Promise.resolve({ allowed: true, retryAfter: null }),
+    );
+    const { app } = await createApp({
+      internalSsrRequestSecret,
+      rateLimiter: { consume },
+      trustedProxyCidrs: ["10.0.0.0/8"],
+    });
+    const path = "/v1/public/agents/market-scout";
+
+    const forged = await app.inject({
+      headers: {
+        ...signedSsrHeaders("198.51.100.99", path),
+        "x-alphanet-ssr-signature": "A".repeat(43),
+      },
+      method: "GET",
+      remoteAddress: "203.0.113.7",
+      url: path,
+    });
+    const stale = await app.inject({
+      headers: signedSsrHeaders("198.51.100.99", path, {
+        timestamp: Date.now() - 61_000,
+      }),
+      method: "GET",
+      remoteAddress: "203.0.113.8",
+      url: path,
+    });
+    const wrongPath = await app.inject({
+      headers: signedSsrHeaders("198.51.100.99", "/v1/owner/agents"),
+      method: "GET",
+      remoteAddress: "203.0.113.9",
+      url: path,
+    });
+
+    expect(forged.statusCode).toBe(200);
+    expect(stale.statusCode).toBe(200);
+    expect(wrongPath.statusCode).toBe(200);
+    expect(consume).toHaveBeenCalledWith("ip:203.0.113.7:public-agent", {
+      max: 120,
+      window: 60,
+    });
+    expect(consume).toHaveBeenCalledWith("ip:203.0.113.8:public-agent", {
+      max: 120,
+      window: 60,
+    });
+    expect(consume).toHaveBeenCalledWith("ip:203.0.113.9:public-agent", {
+      max: 120,
+      window: 60,
+    });
+    expect(consume).not.toHaveBeenCalledWith(
+      "ip:198.51.100.99:public-agent",
+      expect.anything(),
+    );
+  });
+
   it("returns the exact Phase 1 context and keeps every later tool unavailable", async () => {
     const service = createService();
     const { app } = await createApp({ service });
@@ -579,6 +827,100 @@ describe("Agent Bearer and public routes", () => {
     expect(notYetAvailable.statusCode).toBe(404);
   });
 
+  it("never expands a credential beyond its immutable policy ceiling", async () => {
+    const service = createService();
+    service.authenticateStaticApiKey.mockResolvedValueOnce({
+      agent: {
+        ...ownerAgent,
+        policy: {
+          ...ownerAgent.policy,
+          tier: "autonomous",
+          version: "2",
+        },
+      },
+      credential: {
+        ...credential,
+        policyCeiling: "read_only",
+      },
+      owner: { id: ids.owner },
+    });
+    const { app } = await createApp({ service });
+
+    const response = await app.inject({
+      headers: { authorization: `Bearer ${apiKey}` },
+      method: "GET",
+      url: "/v1/agent/context",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json<AgentContextResponse>().effective_capabilities).toMatchObject({
+      create_post: { available: false, default_decision: "deny" },
+      reply_to_content: { available: false, default_decision: "deny" },
+      set_follow: { available: false, default_decision: "deny" },
+      set_reaction: { available: false, default_decision: "deny" },
+    });
+  });
+
+  it("fails closed when custom policy rules are not projected into context", async () => {
+    const service = createService();
+    service.authenticateStaticApiKey.mockResolvedValueOnce({
+      agent: {
+        ...ownerAgent,
+        policy: {
+          ...ownerAgent.policy,
+          tier: "custom",
+          version: "2",
+        },
+      },
+      credential,
+      owner: { id: ids.owner },
+    });
+    const { app } = await createApp({ service });
+
+    const response = await app.inject({
+      headers: { authorization: `Bearer ${apiKey}` },
+      method: "GET",
+      url: "/v1/agent/context",
+    });
+
+    expect(response.statusCode).toBe(200);
+    const capabilities = response.json<AgentContextResponse>().effective_capabilities;
+    expect(capabilities.get_agent_context).toEqual({
+      available: true,
+      default_decision: "allow",
+    });
+    expect(
+      Object.entries(capabilities)
+        .filter(([name]) => name !== "get_agent_context")
+        .every(([, value]) => value.default_decision === "deny"),
+    ).toBe(true);
+  });
+
+  it("projects community-only credentials onto both community discovery tools", async () => {
+    const service = createService();
+    service.authenticateStaticApiKey.mockResolvedValueOnce({
+      agent: ownerAgent,
+      credential: {
+        ...credential,
+        scopes: ["community:read"],
+      },
+      owner: { id: ids.owner },
+    });
+    const { app } = await createApp({ service });
+
+    const response = await app.inject({
+      headers: { authorization: `Bearer ${apiKey}` },
+      method: "GET",
+      url: "/v1/agent/context",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json<AgentContextResponse>().effective_capabilities).toMatchObject({
+      find_communities: { available: false, default_decision: "allow" },
+      get_community: { available: false, default_decision: "allow" },
+    });
+  });
+
   it("rejects API keys in query parameters without authenticating them", async () => {
     const service = createService();
     const { app } = await createApp({ service });
@@ -605,10 +947,10 @@ describe("Agent Bearer and public routes", () => {
     expect(service.authenticateStaticApiKey).not.toHaveBeenCalled();
   });
 
-  it("maps revoked and rolling-rate domain failures without echoing secrets", async () => {
+  it("maps invalid credentials and rolling-rate failures without echoing secrets", async () => {
     const service = createService();
     service.authenticateStaticApiKey.mockRejectedValueOnce(
-      new AgentConnectionError("CREDENTIAL_REVOKED"),
+      new AgentConnectionError("INVALID_CREDENTIAL"),
     );
     service.createAgent.mockRejectedValueOnce(
       new AgentConnectionError("AGENT_CREATE_RATE_LIMITED", {
@@ -638,8 +980,8 @@ describe("Agent Bearer and public routes", () => {
     expect(revoked.statusCode).toBe(401);
     expect(revoked.json()).toEqual({
       error: {
-        code: "CREDENTIAL_REVOKED",
-        message: "The Agent credential has been revoked.",
+        code: "INVALID_CREDENTIAL",
+        message: "The Agent credential is invalid.",
         retryable: false,
         details: null,
         retry_after_ms: null,
@@ -683,6 +1025,11 @@ describe("Agent Bearer and public routes", () => {
       method: "GET",
       url: "/v1/public/agents/missing-scout",
     });
+    const invalid = await app.inject({
+      headers: { "x-request-id": "req-invalid-agent" },
+      method: "GET",
+      url: "/v1/public/agents/INVALID_HANDLE",
+    });
 
     expect(found.statusCode).toBe(200);
     expect(found.json()).toEqual({
@@ -722,5 +1069,7 @@ describe("Agent Bearer and public routes", () => {
       request_id: "req-missing-agent",
       schema_version: "1",
     });
+    expect(invalid.statusCode).toBe(422);
+    expect(service.getPublicAgentByHandle).toHaveBeenCalledTimes(2);
   });
 });

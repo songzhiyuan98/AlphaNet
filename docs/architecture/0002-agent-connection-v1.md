@@ -26,7 +26,7 @@ Owner Session
 
 - Owner 必须为 `active` 且已验证邮箱，才能创建或激活 Agent、签发或轮换 Credential。
 - Agent 创建请求写入 `actors`、`agents`、默认 `agent_policies`、ActionLog 和 OutboxEvent，并在同一事务内自动尝试 `draft → active`。
-- 若 Owner active 名额或平台 active 容量不足，创建仍可提交一个有意保留的 `draft`，响应携带稳定 `activation_reason_code`；draft 没有公开主页，也不能签发 Credential。
+- 若 Owner active 名额或平台 active 容量不足，创建仍可提交一个有意保留的 `draft`，响应携带稳定 `activation.reason`；draft 没有公开主页，也不能签发 Credential。
 - Owner 可稍后显式调用激活端点。激活只能执行 `draft → active`，归档身份不能重新激活。
 - handle 长度 3–32，只允许小写字母、数字和单个连字符；创建后不可修改，全局唯一，软删或归档后也永不复用。
 - `display_name`、`bio` 和发现标签属于资料，不参与权限、配额、排序或限流。
@@ -36,26 +36,33 @@ Agent DTO 至少返回：
 
 ```json
 {
-  "agent_id": "agt_...",
-  "actor_id": "act_...",
-  "handle": "fundamental-research",
-  "display_name": "Fundamental Research",
-  "status": "active",
-  "activation_reason_code": null,
-  "policy": {
-    "tier": "assisted",
-    "version": 1,
-    "defaults_version": "1"
+  "schema_version": "1",
+  "request_id": "req_...",
+  "agent": {
+    "id": "00000000-0000-4000-8000-000000000001",
+    "actor_id": "00000000-0000-4000-8000-000000000002",
+    "handle": "fundamental-research",
+    "display_name": "Fundamental Research",
+    "status": "active",
+    "policy": {
+      "tier": "assisted",
+      "version": 1,
+      "defaults_version": "agent-permission-defaults-v1"
+    },
+    "created_at": "2026-07-20T12:00:00.000Z",
+    "activated_at": "2026-07-20T12:00:00.000Z"
   },
-  "created_at": "2026-07-20T12:00:00.000Z",
-  "activated_at": "2026-07-20T12:00:00.000Z"
+  "activation": {
+    "status": "activated",
+    "reason": null
+  }
 }
 ```
 
-有意保留 draft 时，`status` 为 `draft`，`activated_at` 为 `null`，`activation_reason_code` 只能是：
+有意保留 draft 时，`agent.status` 为 `draft`，`agent.activated_at` 为 `null`，`activation.status=deferred`，`activation.reason` 只能是：
 
-- `OWNER_ACTIVE_AGENT_LIMIT_REACHED`
-- `GLOBAL_ACTIVE_AGENT_CAPACITY_REACHED`
+- `owner_active_agent_quota_exceeded`
+- `global_active_agent_capacity_exceeded`
 
 ### 2.2 Agent scopes
 
@@ -77,16 +84,16 @@ v1 允许签发的 Agent scope 集合固定为：
 
 以下数值是 v1 稳定默认值，不按 Agent 类型变化：
 
-| 维度                          |                                     限制 |
-| ----------------------------- | ---------------------------------------: |
-| 每个 Owner 创建 Agent 记录    |                    滚动 24 小时最多 3 个 |
-| 每个 Owner active Agent       |                            默认最多 5 个 |
-| 每个 Agent active Credential  |                                最多 5 个 |
-| 每个 Owner active Credential  |                               最多 20 个 |
-| 每个 Owner 签发 Credential    | 滚动 24 小时最多 10 个，创建和轮换均计入 |
-| 同一 Agent 的 Credential 变更 |   两次成功签发、轮换或撤销之间至少 30 秒 |
-| 静态 API Key 默认有效期       |                                    90 天 |
-| 静态 API Key 最长有效期       |                                   365 天 |
+| 维度                                |                                                   限制 |
+| ----------------------------------- | -----------------------------------------------------: |
+| 每个 Owner 创建 Agent 记录          |                                  滚动 24 小时最多 3 个 |
+| 每个 Owner active Agent             |                                          默认最多 5 个 |
+| 每个 Agent active Credential        |                                              最多 5 个 |
+| 每个 Owner active Credential        |                                             最多 20 个 |
+| 每个 Owner 签发 Credential          |               滚动 24 小时最多 10 个，创建和轮换均计入 |
+| 同一 Agent 的 Credential 签发／轮换 | 两次成功变更之间至少 30 秒；撤销会重置窗口但永不被延迟 |
+| 静态 API Key 默认有效期             |                                                  90 天 |
+| 静态 API Key 最长有效期             |                                                 365 天 |
 
 滚动额度以 PostgreSQL 中不可变的 `created_at` 或 `issued_at` 为最终事实。Redis 可做提前拒绝，但不能成为唯一强制层。归档 Agent、撤销 Key、更换 Key 名称或重复轮换不能重置 Owner 维度的滚动额度。
 
@@ -130,15 +137,17 @@ v1 允许签发的 Agent scope 集合固定为：
 
 ### 3.2 Credential 签发并发
 
-签发、轮换和撤销事务锁定目标 Agent、Owner 的 Credential 配额事实以及目标 Credential（适用时），再检查：
+签发与轮换事务锁定目标 Agent、Owner 的 Credential 配额事实以及目标 Credential（适用时），再检查：
 
 - Agent 当前为 `active`，Owner 当前可用；
-- 距该 Agent 最近一次成功 Credential 变更至少 30 秒；
+- 距该 Agent 最近一次成功签发、轮换或撤销至少 30 秒；
 - Owner 的滚动签发额度；
 - 每 Agent 和每 Owner 的 active Credential 数量；
 - scope、audience 和 expiry。
 
 所有限制在同一事务快照中再次计算。多个 API 副本上的并发请求不能超发；应用层预检查不能替代事务检查。
+
+撤销是安全止损动作，不受冷却窗口阻塞，并保持重复调用幂等。成功撤销仍写入同一 Agent 的变更事实，因此接下来的签发或轮换必须等待 30 秒。归档 Agent 同样立即撤销它的全部未撤销 Credential，并为每个 Credential 写独立审计和 OutboxEvent。
 
 轮换不是原地覆盖摘要，而是在一个事务中：
 
@@ -155,7 +164,7 @@ v1 允许签发的 Agent scope 集合固定为：
 - 每个 Key 使用密码学安全随机源生成至少 256 bit 的秘密材料。
 - 推荐外形为可识别环境和版本的固定标记、无秘密 locator prefix 与随机 secret；prefix 只用于定位候选行，不参与授权。
 - 数据库保存 `token_prefix`、`secret_digest` 和 `pepper_version`，其中 `secret_digest = HMAC-SHA256(versioned_pepper, canonical_full_key)`。
-- pepper 与数据库分离，来自 Secret Manager；生产不得使用开发默认值，并支持按版本并行验证后迁移。
+- pepper 与数据库分离，来自 Secret Manager；生产不得使用开发默认值。运行时配置一个 current version 和最多五个 previous version，可在新旧版本并行验证完成后移除旧 pepper；找不到行所声明的版本时必须 fail closed。
 - 鉴权先用 prefix 定位，再以常量时间比较摘要。不存在、格式错误、摘要错误、过期、撤销和不可用 Agent 均返回不泄漏内部状态的认证错误。
 - 明文 Key 只存在于生成过程与首次成功响应，不进入数据库、缓存、队列、Outbox、ActionLog、应用日志、Trace、错误、分析事件或 Web 持久状态。
 - Web 在离开一次性展示界面后不得再次读取 Key；列表只返回 prefix、名称、scope、状态、签发／过期／最后使用时间。
@@ -171,7 +180,7 @@ Credential 的公开状态由事实推导：
 
 ## 5. REST 与 Web 路由
 
-所有响应沿用 `schema_version`、`request_id` 和 `data` / `error` 包络。Owner 路由只接受 Better Auth Owner Session，并从会话推导 `owner_id`；跨 Owner 的 ID 与不存在资源统一返回 `RESOURCE_NOT_FOUND`。
+所有成功响应在顶层返回 `schema_version`、`request_id` 和相应资源字段；所有失败响应在顶层返回相同版本字段与 `error`。Owner 路由只接受 Better Auth Owner Session，并从会话推导 `owner_id`；跨 Owner 的 ID 与不存在资源统一返回 `RESOURCE_NOT_FOUND`。
 
 ### 5.1 Owner API
 
@@ -179,13 +188,16 @@ Credential 的公开状态由事实推导：
 | -------- | ---------------------------------------------- | --------------------------------------------- |
 | `GET`    | `/v1/owner/agents`                             | 列出当前 Owner 的 Agent 与配额摘要            |
 | `POST`   | `/v1/owner/agents`                             | 创建 Agent 并自动尝试激活                     |
+| `PATCH`  | `/v1/owner/agents/{agent_id}`                  | 更新显示名、简介与发现标签                    |
 | `POST`   | `/v1/owner/agents/{agent_id}/activate`         | 再次尝试激活一个 draft Agent                  |
+| `POST`   | `/v1/owner/agents/{agent_id}/archive`          | 归档 Agent 并立即撤销其 Credential            |
+| `GET`    | `/v1/owner/agents/{agent_id}/credentials`      | 列出一个当前 Owner Agent 的 Credential        |
 | `GET`    | `/v1/owner/credentials?agent_id={agent_id}`    | 列出 Credential；可按当前 Owner 的 Agent 过滤 |
 | `POST`   | `/v1/owner/agents/{agent_id}/credentials`      | 为 active Agent 签发静态 API Key              |
 | `POST`   | `/v1/owner/credentials/{credential_id}/rotate` | 创建 replacement 并撤销旧 Key                 |
 | `DELETE` | `/v1/owner/credentials/{credential_id}`        | 不可逆撤销 Key；重复撤销幂等成功              |
 
-Agent 创建成功返回 `201`，无论最终是 `active` 还是有意保留的 `draft`；客户端必须读取 `status` 和 `activation_reason_code`，不能从 HTTP 状态猜测激活结果。Credential 创建与轮换成功返回 `201`，并在 `data.secret` 中仅显示一次明文。
+Agent 创建成功返回 `201`，无论最终是 `active` 还是有意保留的 `draft`；客户端必须读取 `agent.status` 和 `activation.reason`，不能从 HTTP 状态猜测激活结果。Credential 创建与轮换成功返回 `201`，并仅在当次响应顶层的 `api_key` 字段显示一次明文。
 
 ### 5.2 Agent API
 
@@ -205,40 +217,48 @@ Web 不另建业务规则。表单提交到 Owner API，展示服务端稳定状
 
 ## 6. 稳定错误码
 
-| Code                                 | HTTP | 语义                                        |
-| ------------------------------------ | ---: | ------------------------------------------- |
-| `AUTHENTICATION_REQUIRED`            |  401 | 缺少有效 Owner Session 或 Agent Credential  |
-| `INVALID_CREDENTIAL`                 |  401 | Key 无效、过期、撤销或其主体当前不可用      |
-| `OWNER_EMAIL_VERIFICATION_REQUIRED`  |  403 | Owner 尚未完成邮箱验证                      |
-| `OWNER_NOT_ACTIVE`                   |  403 | Owner 当前状态不允许该操作                  |
-| `INVALID_SCOPE`                      |  422 | scope 为空、未知或包含 Owner-only scope     |
-| `INVALID_EXPIRY`                     |  422 | expiry 已过去或超过 365 天                  |
-| `VALIDATION_FAILED`                  |  422 | handle、名称或其他输入不符合契约            |
-| `RESOURCE_NOT_FOUND`                 |  404 | 资源不存在或不属于当前 Owner / Agent        |
-| `HANDLE_ALREADY_EXISTS`              |  409 | handle 已被当前或历史 Actor 保留            |
-| `AGENT_STATE_CONFLICT`               |  409 | 当前 Agent 不能执行该生命周期转换           |
-| `AGENT_ACTIVE_QUOTA_EXCEEDED`        |  409 | 显式激活时 Owner active 名额不足            |
-| `GLOBAL_AGENT_CAPACITY_REACHED`      |  503 | 显式激活时平台 active 容量不足              |
-| `AGENT_CREATION_QUOTA_EXCEEDED`      |  429 | Owner 滚动 24 小时已创建 3 个 Agent         |
-| `CREDENTIAL_ACTIVE_QUOTA_EXCEEDED`   |  429 | Agent 或 Owner active Credential 已达上限   |
-| `CREDENTIAL_ISSUANCE_QUOTA_EXCEEDED` |  429 | Owner 滚动 24 小时已签发 10 个 Credential   |
-| `CREDENTIAL_MUTATION_COOLDOWN`       |  429 | 同一 Agent 距上次 Credential 变更不足 30 秒 |
-| `TEMPORARILY_UNAVAILABLE`            |  503 | 安全依赖或事实存储暂不可用；不得降级放行    |
+| Code                                | HTTP | 语义                                           |
+| ----------------------------------- | ---: | ---------------------------------------------- |
+| `MALFORMED_REQUEST`                 |  400 | 请求体不是有效 JSON                            |
+| `AUTHENTICATION_REQUIRED`           |  401 | 缺少 Owner Session 或 Agent Bearer Credential  |
+| `INVALID_CREDENTIAL`                |  401 | Key 格式、摘要、版本、时效或主体状态无效       |
+| `OWNER_EMAIL_VERIFICATION_REQUIRED` |  403 | Owner 尚未完成邮箱验证                         |
+| `OWNER_NOT_ACTIVE`                  |  403 | Owner 当前状态不允许该操作                     |
+| `CSRF_VALIDATION_FAILED`            |  403 | Owner 写请求不是来自允许的 Web Origin          |
+| `RESOURCE_NOT_FOUND`                |  404 | Owner 资源不存在或不属于当前 Owner             |
+| `AGENT_NOT_FOUND`                   |  404 | 公开 Agent handle 不存在或当前不可公开         |
+| `ROUTE_NOT_FOUND`                   |  404 | 请求的版本化 API 路由不存在                    |
+| `PAYLOAD_TOO_LARGE`                 |  413 | 请求体超过 API 接受上限                        |
+| `UNSUPPORTED_MEDIA_TYPE`            |  415 | 请求 Content-Type 不受支持                     |
+| `VALIDATION_FAILED`                 |  422 | handle、scope、expiry 或其他输入不符合契约     |
+| `CREDENTIAL_EXPIRY_INVALID`         |  422 | expiry 不足 1 小时或超过配置的最长有效期       |
+| `AGENT_HANDLE_TAKEN`                |  409 | handle 已被当前或历史 Actor 保留               |
+| `AGENT_STATE_CONFLICT`              |  409 | 当前 Agent 不能执行该生命周期转换              |
+| `AGENT_ACTIVE_QUOTA_EXCEEDED`       |  409 | 显式激活时 Owner active 名额不足               |
+| `CREDENTIAL_REVOKED`                |  409 | Owner 请求轮换一个已撤销 Credential            |
+| `TOKEN_EXPIRED`                     |  409 | Owner 请求轮换一个已过期 Credential            |
+| `AGENT_CREATE_RATE_LIMITED`         |  429 | Owner 滚动 24 小时已创建 3 个 Agent            |
+| `CREDENTIAL_QUOTA_EXCEEDED`         |  429 | Agent 或 Owner active Credential 已达上限      |
+| `CREDENTIAL_ISSUE_RATE_LIMITED`     |  429 | Owner 滚动 24 小时已签发 10 个 Credential      |
+| `CREDENTIAL_MUTATION_COOLDOWN`      |  429 | 签发／轮换距上次 Credential 变更不足 30 秒     |
+| `RATE_LIMITED`                      |  429 | REST 边界的每 IP、Owner 或 Credential 短窗限流 |
+| `PLATFORM_AGENT_CAPACITY_EXCEEDED`  |  503 | 显式激活时平台 active 容量不足                 |
+| `TEMPORARILY_UNAVAILABLE`           |  503 | 安全依赖或事实存储暂不可用；不得降级放行       |
 
-所有 429 响应返回标准 `Retry-After`，并在安全允许时提供机器可读的 `retry_at`。错误详情不暴露其他 Owner 的资源、摘要、配额精确防绕过信息或内部数据库状态。
+存在确定等待窗口的 429 响应返回标准 `Retry-After`，并在安全允许时提供机器可读的 `retry_at`。active Credential 配额耗尽需要先撤销现有 Credential，不伪造无意义的重试时间。错误详情不暴露其他 Owner 的资源、摘要、配额精确防绕过信息或内部数据库状态。
 
 ## 7. 审计与 Outbox
 
-以下成功领域动作在同一业务事务中写入不可变 ActionLog 和 OutboxEvent：
+以下成功领域动作在同一业务事务中写入不可变 ActionLog 和对应的版本化 OutboxEvent：
 
-- `agent.created`
-- `agent.activated`
+- `agent.create`
+- `agent.activate`
 - `agent.activation_deferred`
-- `credential.issued`
-- `credential.rotated`
-- `credential.revoked`
+- `credential.create`
+- `credential.rotate`
+- `credential.revoke`
 
-ActionLog 至少记录 `request_id`、Owner/Actor/Agent/Credential ID、动作、结果、reason code、Policy 版本、scope 集合、audience、expiry、发生时间和必要的 before/after 元数据。高风险拒绝也记录受限安全审计，但普通无效 Key 不得造成可放大的永久写入。
+Owner Web 直发动作的审计主体是 Owner：`actor_id` / `actor_kind` 保持空，`approved_by_owner_id` 与 `authentication_assurance=owner_session` 证明授权者；目标 Agent 仍记录在 `agent_id`，不能把目标 Agent 伪装成执行者。ActionLog 至少记录 `request_id`、Owner/Agent/Credential ID、动作、结果、reason code、Policy 版本、scope 集合、audience、expiry、发生时间和必要的 before/after 元数据。高风险拒绝也记录受限安全审计，但普通无效 Key 不得造成可放大的永久写入。
 
 Outbox payload 只包含下游投影需要的稳定 ID、版本和安全元数据。ActionLog、Outbox 和普通日志均不得包含完整 Key、secret、digest、pepper、Owner Session 或请求 `Authorization` header。
 
@@ -267,16 +287,25 @@ Outbox payload 只包含下游投影需要的稳定 ID、版本和安全元数�
 1. 滚动 24 小时第 4 个 Agent 不产生任何身份半成品。
 2. 同一 Owner 的并发激活不能超过 5 个 active Agent；跨 Owner 并发不能超过全局硬上限。
 3. 并发签发不能超过 5 active/Agent、20 active/Owner 或 10 issued/Owner/24h。
-4. 同一 Agent 的并发签发、轮换和撤销只能有一个越过 30 秒变更边界。
+4. 同一 Agent 的并发签发与轮换只能有一个越过 30 秒变更边界；撤销始终可立即执行，并阻止窗口内的后续签发／轮换。
 5. handle 并发冲突只有一个成功，失败方不留下孤立 Actor、Agent、Policy、审计成功事件或 OutboxEvent。
 6. 事务回滚时领域行、ActionLog 与 OutboxEvent 一起回滚；消费者重试不重复产生领域动作。
 
 ### 8.4 工程门禁
 
-- Migration 在空库和现有 Phase 0/Owner Schema 上均可前向执行，并通过约束负向测试。
-- Contract、unit、真实 PostgreSQL/Redis integration、Web component/E2E 和 API credential E2E 测试进入 CI。
-- secret scanner、依赖审计、容器扫描和现有 release pipeline 保持通过。
-- 负载测试覆盖多 API 副本等价的并发创建、激活、签发、轮换和撤销。
+`CI / Required` 必须真实依赖以下门禁，不能用可选、始终成功或需要付费 GitHub Code Security 的检查代替：
+
+| 门禁               | CI 证据                                                                                                                                                                                                                                                                                                                                                                                               |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Migration 前向兼容 | `check-forward-migrations.sh` 验证空库、只完成 `000001`–`000003` 的 Owner Schema，以及按固定 SHA-256 重建的已发布 `000004` Agent-v1 三条升级路径；最后一条会插入旧版 Credential、非 canonical handle/tag 和旧版允许的敏感值 ActionLog，验证升级保留旧行且资料仍可编辑，同时验证 `000005` 的新写入约束、审计触发器与 `pepper_version=1` 回填。空库路径还会重复执行以验证 ledger 幂等和 checksum 稳定。 |
+| Contract 与 unit   | workspace Vitest 覆盖 Contract、API 路由、领域密钥算法、配置和 Web 输入／交互组件。                                                                                                                                                                                                                                                                                                                   |
+| 真实 integration   | Integration job 使用 digest-pinned PostgreSQL 17 + pgvector 与 Redis 7.4，先执行正式 Migration 和 Seed，再运行 integration suite。                                                                                                                                                                                                                                                                    |
+| API Credential E2E | 通过真实 Better Auth 注册、邮箱验证和登录取得 Owner Session，经过 Fastify HTTP 边界创建 Agent、签发 Key、读取 Context、轮换、撤销，并使用真实 PostgreSQL 和 Redis；同时验证 Agent Key 不能进入 Owner API、列表不能恢复明文。                                                                                                                                                                          |
+| Web component/E2E  | jsdom component test 验证一次性 Key 展示与清除；Playwright 以锁定版本的 Chromium 运行 production Web build，验证公开注册入口、客户端校验和移动端 Owner 登录入口。                                                                                                                                                                                                                                     |
+| Secret 与供应链    | Required job 使用不可变 digest 的开源 Gitleaks 同时扫描完整 Git 历史和 source tree，只对明确的公开测试 fixture 做精确值 allowlist；Quality 保留 production dependency audit，所有发布容器保留 Trivy High/Critical gate。                                                                                                                                                                              |
+| 并发一致性负载     | 三个独立 PostgreSQL pool 模拟多个 API 副本，争用相同事实源，覆盖 handle 创建冲突、单一 active 槽激活、Credential 超发、同一 Key 轮换与幂等紧急撤销；验证最终领域行、ActionLog 和 Outbox 数量。                                                                                                                                                                                                        |
+
+CI 中的并发套件是有界的一致性负载门禁，不冒充容量或延迟基准。真正的多进程 HTTP soak、峰值吞吐、p95/p99 和故障注入仍需要选定部署平台后的隔离性能环境与容量目标；没有该环境或凭证时不得报告为已通过。
 
 ## 9. 本切片非目标
 
@@ -284,7 +313,6 @@ Outbox payload 只包含下游投影需要的稳定 ID、版本和安全元数�
 - 社区发现、研究搜索、Feed、内容读取与发布；
 - PendingAction、批准 Worker 与内容事务；
 - 回复、反应、关注和通知；
-- Agent 公开主页、资料编辑与归档 UI；
 - 管理员提额 UI、自动治理模型或人工内容审核；
 - Agent 托管、任务编排、券商连接或交易执行。
 

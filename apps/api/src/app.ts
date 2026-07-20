@@ -1,6 +1,12 @@
+import { randomUUID } from "node:crypto";
+
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
-import type { AlphaNetAuthRuntime, OwnerSession } from "@alphanet/auth";
+import type {
+  AlphaNetAuthRuntime,
+  OwnerSession,
+  RedisRateLimitStorage,
+} from "@alphanet/auth";
 import {
   createHealthResponse,
   type ApiError,
@@ -8,18 +14,26 @@ import {
   type SystemStatusResponse,
 } from "@alphanet/contracts";
 import { closeDependencies, type HealthDependency } from "@alphanet/database";
+import type { AgentConnectionService } from "@alphanet/domain";
 import Fastify, {
   type FastifyInstance,
   type FastifyBaseLogger,
+  type FastifyReply,
   type FastifyRequest,
   LogController,
 } from "fastify";
 
+import { registerAgentConnectionRoutes, v1Error } from "./agent-routes.js";
+import { createRequestClientIpResolver, ssrClientIpHeaders } from "./ssr-client-ip.js";
+
 export interface ApiAppOptions {
   allowedOrigins: string[];
+  agentConnectionService?: AgentConnectionService;
+  agentRateLimiter?: Pick<RedisRateLimitStorage, "consume">;
   authRuntime?: AlphaNetAuthRuntime;
   dependencies?: readonly HealthDependency[];
   environment: "development" | "test" | "production";
+  internalSsrRequestSecret?: string;
   logger?: FastifyBaseLogger;
   trustedProxyCidrs?: readonly string[];
   version: string;
@@ -40,6 +54,11 @@ const allowedGoogleSocialBodyKeys = new Set([
   "errorCallbackURL",
   "provider",
 ]);
+const alphanetRequestIdPattern = /^req[-_][A-Za-z0-9][A-Za-z0-9_-]{0,59}$/;
+const staticApiKeyPattern = /^aln_v1_[A-Za-z0-9_-]{12}_[A-Za-z0-9_-]{43}$/;
+const traceIdPattern = /^(?!0{32}$)[0-9a-f]{32}$/i;
+const uuidRequestIdPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function isAllowedAuthRequest(
   method: string,
@@ -82,6 +101,50 @@ function routeNotFound(request: FastifyRequest): ApiError {
   };
 }
 
+function safeRequestId(value: string | string[] | undefined): string {
+  const candidate = Array.isArray(value) ? value[0] : value;
+  return candidate &&
+    !staticApiKeyPattern.test(candidate) &&
+    (uuidRequestIdPattern.test(candidate) ||
+      traceIdPattern.test(candidate) ||
+      alphanetRequestIdPattern.test(candidate))
+    ? candidate
+    : randomUUID();
+}
+
+function errorStatusCode(error: unknown): number {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "statusCode" in error &&
+    typeof error.statusCode === "number" &&
+    Number.isInteger(error.statusCode) &&
+    error.statusCode >= 400 &&
+    error.statusCode <= 599
+  ) {
+    return error.statusCode;
+  }
+  return 500;
+}
+
+function fastifyErrorCode(error: unknown): string | null {
+  return typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string"
+    ? error.code
+    : null;
+}
+
+function usesAgentV1ErrorEnvelope(request: FastifyRequest): boolean {
+  const pathname = new URL(request.url, "http://alphanet.invalid").pathname;
+  return (
+    pathname.startsWith("/v1/") &&
+    pathname !== "/v1/owner/session" &&
+    pathname !== "/v1/system/status"
+  );
+}
+
 async function checkWithTimeout(dependency: ReadinessDependency): Promise<void> {
   let timeout: NodeJS.Timeout | undefined;
 
@@ -101,10 +164,65 @@ async function checkWithTimeout(dependency: ReadinessDependency): Promise<void> 
   }
 }
 
-function toAuthHeaders(request: FastifyRequest): Headers {
+async function enforceOwnerSessionRateLimit(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  options: ApiAppOptions,
+  resolveClientIp: (request: FastifyRequest) => string,
+): Promise<boolean> {
+  if (!options.agentRateLimiter) {
+    return true;
+  }
+  try {
+    const result = await options.agentRateLimiter.consume(
+      `ip:${resolveClientIp(request)}:owner-session`,
+      {
+        max: 240,
+        window: 60,
+      },
+    );
+    if (result.allowed) {
+      return true;
+    }
+    void reply.header("retry-after", String(result.retryAfter ?? 60));
+    void reply.code(429).send({
+      error: {
+        code: "rate_limited",
+        message: "Too many Owner session requests were made in this time window.",
+        requestId: request.id,
+      },
+    } satisfies ApiError);
+    return false;
+  } catch (error) {
+    request.log.error(
+      { errorName: error instanceof Error ? error.name : "UnknownError" },
+      "Owner session rate limiter failed",
+    );
+    void reply.code(503).send({
+      error: {
+        code: "auth_unavailable",
+        message: "Owner authentication is temporarily unavailable.",
+        requestId: request.id,
+      },
+    } satisfies ApiError);
+    return false;
+  }
+}
+
+function toAuthHeaders(
+  request: FastifyRequest,
+  resolveClientIp: (request: FastifyRequest) => string,
+): Headers {
   const headers = new Headers();
   for (const [name, value] of Object.entries(request.headers)) {
-    if (value === undefined || name.toLowerCase() === "x-alphanet-client-ip") {
+    const normalizedName = name.toLowerCase();
+    if (
+      value === undefined ||
+      normalizedName === "x-alphanet-client-ip" ||
+      Object.values(ssrClientIpHeaders).includes(
+        normalizedName as (typeof ssrClientIpHeaders)[keyof typeof ssrClientIpHeaders],
+      )
+    ) {
       continue;
     }
     if (Array.isArray(value)) {
@@ -118,7 +236,7 @@ function toAuthHeaders(request: FastifyRequest): Headers {
 
   // This header is private to the API/Auth boundary. Never trust the
   // caller-supplied value when Better Auth constructs its rate-limit key.
-  headers.set("x-alphanet-client-ip", request.ip);
+  headers.set("x-alphanet-client-ip", resolveClientIp(request));
   return headers;
 }
 
@@ -147,19 +265,48 @@ function sanitizeAuthResponseBody(
 }
 
 export async function createApiApp(options: ApiAppOptions): Promise<FastifyInstance> {
+  if (
+    options.environment === "production" &&
+    options.authRuntime &&
+    !options.agentRateLimiter
+  ) {
+    throw new Error(
+      "A Redis-backed API rate limiter is required with Owner authentication in production.",
+    );
+  }
   const dependencies = options.dependencies ?? [];
   const authRuntime = options.authRuntime;
-  const readinessDependencies = authRuntime
-    ? [
-        ...dependencies,
-        {
-          critical: true,
-          name: "auth-schema",
-          check: () => authRuntime.checkReady(),
-        },
-      ]
-    : dependencies;
+  const readinessDependencies: ReadinessDependency[] = [
+    ...dependencies,
+    ...(authRuntime
+      ? [
+          {
+            critical: true,
+            name: "auth-schema",
+            check: () => authRuntime.checkReady(),
+          },
+        ]
+      : []),
+    ...(options.agentConnectionService
+      ? [
+          {
+            critical: true,
+            name: "agent-schema",
+            check: () => options.agentConnectionService!.checkReady(),
+          },
+        ]
+      : []),
+  ];
+  const resolveClientIp = createRequestClientIpResolver({
+    ...(options.internalSsrRequestSecret
+      ? { internalSsrRequestSecret: options.internalSsrRequestSecret }
+      : {}),
+    ...(options.trustedProxyCidrs
+      ? { trustedProxyCidrs: options.trustedProxyCidrs }
+      : {}),
+  });
   const app = Fastify({
+    genReqId: (request) => safeRequestId(request.headers["x-request-id"]),
     logController: new LogController({
       // Auth links contain one-time secrets in the path or query string. AlphaNet
       // emits its own route-template completion log below and never logs raw URLs.
@@ -167,7 +314,7 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
     }),
     logger: options.logger ? false : { level: "silent" },
     ...(options.logger ? { loggerInstance: options.logger } : {}),
-    requestIdHeader: "x-request-id",
+    requestIdHeader: false,
     trustProxy:
       options.trustedProxyCidrs && options.trustedProxyCidrs.length > 0
         ? [...options.trustedProxyCidrs]
@@ -180,15 +327,18 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
   await app.register(cors, {
     credentials: true,
     maxAge: 86_400,
-    methods: ["GET", "POST", "OPTIONS"],
+    methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     origin: options.allowedOrigins,
   });
 
   app.addHook("onSend", (request, reply, payload, done) => {
     void reply.header("x-request-id", request.id);
+    const routeUrl = request.routeOptions.url ?? "";
     if (
-      request.routeOptions.url === "/api/auth/*" ||
-      request.routeOptions.url === "/v1/owner/session"
+      routeUrl === "/api/auth/*" ||
+      routeUrl === "/v1/owner/session" ||
+      routeUrl.startsWith("/v1/owner/") ||
+      routeUrl === "/v1/agent/context"
     ) {
       void reply.header("cache-control", "no-store, private");
       void reply.header("pragma", "no-cache");
@@ -288,7 +438,7 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
           };
           return reply.code(400).send(payload);
         }
-        const headers = toAuthHeaders(request);
+        const headers = toAuthHeaders(request, resolveClientIp);
         const body =
           request.method === "GET" || request.body === undefined
             ? undefined
@@ -338,7 +488,30 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
     });
 
     app.get("/v1/owner/session", async (request, reply) => {
-      const session = await authRuntime.getOwnerSession(toAuthHeaders(request));
+      if (
+        !(await enforceOwnerSessionRateLimit(request, reply, options, resolveClientIp))
+      ) {
+        return reply;
+      }
+      let session: OwnerSession | null;
+      try {
+        session = await authRuntime.getOwnerSession(
+          toAuthHeaders(request, resolveClientIp),
+        );
+      } catch (error) {
+        request.log.error(
+          { errorName: error instanceof Error ? error.name : "UnknownError" },
+          "Owner session lookup failed",
+        );
+        const response: ApiError = {
+          error: {
+            code: "auth_unavailable",
+            message: "Owner authentication is temporarily unavailable.",
+            requestId: request.id,
+          },
+        };
+        return reply.code(503).send(response);
+      }
       if (!session) {
         const response: ApiError = {
           error: {
@@ -352,21 +525,70 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
 
       return serializeOwnerSession(session);
     });
+
+    if (options.agentConnectionService) {
+      registerAgentConnectionRoutes(app, {
+        allowedOrigins: options.allowedOrigins,
+        authRuntime,
+        ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
+        resolveClientIp,
+        service: options.agentConnectionService,
+      });
+    }
   }
 
   app.setNotFoundHandler(async (request, reply) => {
+    if (usesAgentV1ErrorEnvelope(request)) {
+      return reply.code(404).send(
+        v1Error(request, {
+          code: "ROUTE_NOT_FOUND",
+          message: "The requested API route does not exist.",
+        }),
+      );
+    }
     return reply.code(404).send(routeNotFound(request));
   });
 
   app.setErrorHandler(async (error, request, reply) => {
     const errorName = error instanceof Error ? error.name : "UnknownError";
-    const statusCode =
-      typeof error === "object" &&
-      error !== null &&
-      "statusCode" in error &&
-      typeof error.statusCode === "number"
-        ? error.statusCode
-        : 500;
+    const statusCode = errorStatusCode(error);
+    const code = fastifyErrorCode(error);
+    if (statusCode < 500) {
+      request.log.warn({ errorName, statusCode }, "request rejected");
+      if (usesAgentV1ErrorEnvelope(request)) {
+        const payloadTooLarge =
+          statusCode === 413 || code === "FST_ERR_CTP_BODY_TOO_LARGE";
+        const unsupportedMediaType = statusCode === 415;
+        const malformedJson = code === "FST_ERR_CTP_INVALID_JSON_BODY";
+        return reply.code(statusCode).send(
+          v1Error(request, {
+            code: payloadTooLarge
+              ? "PAYLOAD_TOO_LARGE"
+              : unsupportedMediaType
+                ? "UNSUPPORTED_MEDIA_TYPE"
+                : "MALFORMED_REQUEST",
+            message: payloadTooLarge
+              ? "The request body exceeds the maximum allowed size."
+              : unsupportedMediaType
+                ? "The request content type is not supported."
+                : malformedJson
+                  ? "The request body is not valid JSON."
+                  : "The request could not be parsed.",
+          }),
+        );
+      }
+      const response: ApiError = {
+        error: {
+          code: statusCode === 413 ? "payload_too_large" : "invalid_request",
+          message:
+            statusCode === 413
+              ? "The request body exceeds the maximum allowed size."
+              : "The request could not be parsed.",
+          requestId: request.id,
+        },
+      };
+      return reply.code(statusCode).send(response);
+    }
     request.log.error(
       {
         errorName,

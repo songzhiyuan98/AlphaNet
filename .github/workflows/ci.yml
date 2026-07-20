@@ -20,6 +20,19 @@ env:
   NODE_VERSION: "22.22.0"
 
 jobs:
+  security:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out complete history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Scan history and source tree with pinned Gitleaks
+        run: bash .github/scripts/scan-secrets.sh
+
   quality:
     name: Quality
     runs-on: ubuntu-latest
@@ -96,6 +109,9 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
+      - name: Verify empty and Owner-schema forward migrations
+        run: bash .github/scripts/check-forward-migrations.sh
+
       - name: Apply migrations and seed data
         run: |
           bash db/scripts/migrate.sh
@@ -123,6 +139,45 @@ jobs:
       - name: Build all workspace applications
         run: pnpm build
 
+  web-e2e:
+    name: Web E2E (Chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up workspace
+        uses: ./.github/actions/setup-pnpm
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Cache version-matched Playwright browser
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-1.61.1
+          path: ~/.cache/ms-playwright
+
+      - name: Install Chromium and runner dependencies
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Build production Web application
+        run: pnpm --filter @alphanet/web build
+
+      - name: Run browser E2E
+        run: pnpm test:web:e2e
+
+      - name: Upload browser diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: web-e2e-diagnostics-${{ github.sha }}
+          path: |
+            playwright-report
+            test-results
+          if-no-files-found: ignore
+          retention-days: 7
+
   container-check:
     name: Container check (${{ matrix.target }})
     if: github.event_name == 'pull_request'
@@ -130,6 +185,8 @@ jobs:
       - quality
       - integration
       - build
+      - security
+      - web-e2e
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -175,6 +232,8 @@ jobs:
       - quality
       - integration
       - build
+      - security
+      - web-e2e
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -259,6 +318,8 @@ jobs:
       - quality
       - integration
       - build
+      - security
+      - web-e2e
       - container-check
       - publish
     runs-on: ubuntu-latest
@@ -272,6 +333,8 @@ jobs:
           INTEGRATION_RESULT: ${{ needs.integration.result }}
           PUBLISH_RESULT: ${{ needs.publish.result }}
           QUALITY_RESULT: ${{ needs.quality.result }}
+          SECURITY_RESULT: ${{ needs.security.result }}
+          WEB_E2E_RESULT: ${{ needs.web-e2e.result }}
         run: |
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
             container_result="$CONTAINER_CHECK_RESULT"
@@ -284,6 +347,8 @@ jobs:
           if [[ "$QUALITY_RESULT" != "success" ||
                 "$INTEGRATION_RESULT" != "success" ||
                 "$BUILD_RESULT" != "success" ||
+                "$SECURITY_RESULT" != "success" ||
+                "$WEB_E2E_RESULT" != "success" ||
                 "$container_result" != "success" ||
                 "$inactive_result" != "skipped" ]]; then
             echo "::error::One or more required CI jobs failed or were cancelled."
