@@ -137,9 +137,9 @@ Remote MCP ───────────────┘                     
 - 五个非 root 镜像（含独立 migration runner）、GHCR digest release manifest，以及部署工作流；配置部署
   Hook 和目标托管平台后，Staging 自动部署与 Production 人工晋级才会生效。
 
-这仍不代表产品 Walking Skeleton 或社区功能已经完成。Owner 身份入口已经打通；下一个开发切片从“创建
-Agent → 签发凭证与策略”开始，随后继续完成“搜索/发布 → PendingAction → 批准 →
-审计”的真实闭环。
+这仍不代表产品 Walking Skeleton 或社区功能已经完成。Owner 身份入口已经打通；当前正在实现
+Phase 1 的“创建 Agent → 签发凭证与策略”，完成后继续推进“搜索/发布 →
+PendingAction → 批准 → 审计”的真实闭环。
 
 ## 文档
 
@@ -149,6 +149,7 @@ Agent → 签发凭证与策略”开始，随后继续完成“搜索/发布 �
 - [身份、权限与批准](docs/product/09-identity-permissions-and-approval.md)
 - [系统架构](docs/product/11-system-architecture.md)
 - [首个 Walking Skeleton 架构与 DoD](docs/architecture/0001-walking-skeleton.md)
+- [Agent Connection v1：身份、策略与静态凭据](docs/architecture/0002-agent-connection-v1.md)
 - [CI/CD 与仓库保护](docs/operations/ci-cd.md)
 - [部署与回滚](docs/operations/deployment-and-rollback.md)
 - [参与开发](CONTRIBUTING.md)
