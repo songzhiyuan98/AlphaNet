@@ -40,6 +40,12 @@ const agentConnectionOptions = {
   credentialMaxTtlDays: 365,
   credentialMutationCooldownSeconds: 0,
 } as const;
+const fixtureAgentContentRateLimits = {
+  establishedPostsPerHour: 10_000,
+  establishedRepliesPerHour: 10_000,
+  newAgentPostsPerHour: 10_000,
+  newAgentRepliesPerHour: 10_000,
+} as const;
 
 const generalCommunityId = "00000000-0000-4000-8000-000000000001";
 const semiconductorsCommunityId = "00000000-0000-4000-8000-000000004001";
@@ -94,6 +100,7 @@ describeResearchWrite("PostgresResearchWriteService", () => {
     agentConnectionOptions,
   );
   const service = new PostgresResearchWriteService(postgres.sql, {
+    agentContentRateLimits: fixtureAgentContentRateLimits,
     pendingActionKeyRing,
   });
   const ownerActionService = new PostgresOwnerPendingActionService(postgres.sql, {
@@ -101,6 +108,7 @@ describeResearchWrite("PostgresResearchWriteService", () => {
     pendingActionKeyRing,
   });
   const competingService = new PostgresResearchWriteService(competingPostgres.sql, {
+    agentContentRateLimits: fixtureAgentContentRateLimits,
     pendingActionKeyRing: {
       currentVersion: 1,
       keys: { 1: randomBytes(32) },
@@ -3309,6 +3317,127 @@ describeResearchWrite("PostgresResearchWriteService", () => {
         symbol_count: 1,
         succeeded_update_log_count: 11,
         version: 12,
+      },
+    ]);
+  });
+
+  it("enforces the default new-Agent post quota on real persisted writes", async () => {
+    const rateMarker = randomUUID().replaceAll("-", "").slice(0, 10);
+    const ownerId = await createVerifiedOwner(`agent-rate-${rateMarker}`);
+    const agent = await agentService.createAgent(
+      ownerId,
+      {
+        displayName: "Default Rate Integration Agent",
+        handle: `agent-rate-${rateMarker}`,
+      },
+      randomUUID(),
+    );
+    await activatePolicy(ownerId, agent.agent.id, "autonomous");
+    const credential = await agentService.createCredential(
+      ownerId,
+      agent.agent.id,
+      {
+        name: "Default Agent rate integration",
+        scopes: ["research:read", "content:write"],
+      },
+      randomUUID(),
+    );
+    const context = await agentService.authenticateStaticApiKey(credential.apiKey);
+    const rateService = new PostgresResearchWriteService(postgres.sql, {
+      pendingActionKeyRing,
+    });
+
+    for (let index = 1; index <= 2; index += 1) {
+      const accepted = await rateService.createPost(
+        context,
+        {
+          bodyMarkdown: `Default new-Agent quota accepted post ${index}.`,
+          idempotencyKey: `agent-rate-accepted-${index}-${randomUUID()}`,
+          primaryCommunityId: generalCommunityId,
+          title: `Accepted default Agent quota post ${index}`,
+        },
+        { requestId: `req-${randomUUID()}` },
+      );
+      expect(accepted).toMatchObject({
+        decision: "allow",
+        replayed: false,
+        status: "succeeded",
+      });
+    }
+
+    const rejectedKey = `agent-rate-rejected-${randomUUID()}`;
+    const rejected = await rateService.createPost(
+      context,
+      {
+        bodyMarkdown: "The third new-Agent post must remain outside the rolling window.",
+        idempotencyKey: rejectedKey,
+        primaryCommunityId: generalCommunityId,
+        title: "Rejected default Agent quota post",
+      },
+      { requestId: `req-${randomUUID()}` },
+    );
+    expect(rejected).toMatchObject({
+      decision: "deny",
+      error: {
+        code: "RATE_LIMITED",
+        details: {
+          limit: 2,
+          limit_dimension: "agent_post_hour",
+          new_agent_window: true,
+          rule_version: "agent-content-rate-v1",
+        },
+        retryable: true,
+      },
+      pendingAction: null,
+      replayed: false,
+      result: null,
+      status: "denied",
+    });
+
+    const state = await postgres.sql<
+      {
+        admitted_content: number;
+        rejected_idempotency: number;
+        rate_denials: number;
+        succeeded_actions: number;
+      }[]
+    >`
+      select
+        (
+          select count(*)::integer
+          from platform.content_items
+          where author_actor_id = ${context.agent.actorId}
+            and kind = 'post'
+        ) as admitted_content,
+        (
+          select count(*)::integer
+          from platform.idempotency_records
+          where principal_scope_key = ${`credential:${context.credential.id}`}
+            and operation = 'create_post'
+            and idempotency_key = ${rejectedKey}
+        ) as rejected_idempotency,
+        (
+          select count(*)::integer
+          from platform.action_logs
+          where agent_id = ${context.agent.id}
+            and action = 'content.create_post'
+            and outcome = 'denied'
+            and error_code = 'RATE_LIMITED'
+        ) as rate_denials,
+        (
+          select count(*)::integer
+          from platform.action_logs
+          where agent_id = ${context.agent.id}
+            and action = 'content.create_post'
+            and outcome = 'succeeded'
+        ) as succeeded_actions
+    `;
+    expect(state).toEqual([
+      {
+        admitted_content: 2,
+        rate_denials: 1,
+        rejected_idempotency: 0,
+        succeeded_actions: 2,
       },
     ]);
   });

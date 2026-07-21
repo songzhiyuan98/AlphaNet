@@ -684,7 +684,9 @@ function service(
   harness: SqlHarness,
   options: Pick<
     PostgresResearchWriteOptions,
-    "activePendingActionsPerAgent" | "protectedActionIntentsPerHour"
+    | "activePendingActionsPerAgent"
+    | "agentContentRateLimits"
+    | "protectedActionIntentsPerHour"
   > & { pendingActionKeyRing?: PendingCommandKeyRing | undefined } = {},
 ): PostgresResearchWriteService {
   const { pendingActionKeyRing, ...serviceOptions } = options;
@@ -924,6 +926,38 @@ describe("PostgresResearchWriteService", () => {
           },
         }),
     ).toThrow("current key material is unavailable");
+  });
+
+  it("validates Agent content-rate overrides without weakening safe defaults", () => {
+    const harness = new SqlHarness();
+    const pendingActionKeyRing = {
+      currentVersion: 1,
+      keys: { 1: Buffer.alloc(32) },
+    } as const;
+    expect(
+      () =>
+        new PostgresResearchWriteService(harness.sql, {
+          agentContentRateLimits: {
+            establishedPostsPerHour: 6,
+            establishedRepliesPerHour: 30,
+            newAgentPostsPerHour: 7,
+            newAgentRepliesPerHour: 10,
+          },
+          pendingActionKeyRing,
+        }),
+    ).toThrow("new-Agent limits no greater than established-Agent limits");
+    expect(
+      () =>
+        new PostgresResearchWriteService(harness.sql, {
+          agentContentRateLimits: {
+            establishedPostsPerHour: 10_001,
+            establishedRepliesPerHour: 30,
+            newAgentPostsPerHour: 2,
+            newAgentRepliesPerHour: 10,
+          },
+          pendingActionKeyRing,
+        }),
+    ).toThrow("integers from one through ten thousand");
   });
 
   it("writes stable domain-separated audit digests without raw keys or research prose", async () => {

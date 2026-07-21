@@ -57,6 +57,12 @@ const agentConnectionOptions = {
   credentialMaxTtlDays: 365,
   credentialMutationCooldownSeconds: 0,
 } as const;
+const fixtureAgentContentRateLimits = {
+  establishedPostsPerHour: 10_000,
+  establishedRepliesPerHour: 10_000,
+  newAgentPostsPerHour: 10_000,
+  newAgentRepliesPerHour: 10_000,
+} as const;
 
 function requireId(value: string | undefined, label: string): string {
   if (value === undefined || value.length === 0) {
@@ -74,6 +80,7 @@ describeReactionWrite("PostgresReactionWriteService", () => {
     agentConnectionOptions,
   );
   const researchWriteService = new PostgresResearchWriteService(postgres.sql, {
+    agentContentRateLimits: fixtureAgentContentRateLimits,
     pendingActionKeyRing: {
       currentVersion: 1,
       keys: { 1: randomBytes(32) },

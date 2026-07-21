@@ -63,10 +63,12 @@ const DEFAULT_PROTECTED_ACTION_INTENTS_PER_HOUR = 20;
 const AGENT_CONTENT_RATE_RULE_VERSION = "agent-content-rate-v1";
 const AGENT_CONTENT_RATE_WINDOW_MS = 60 * 60 * 1_000;
 const NEW_AGENT_CONTENT_RATE_WINDOW_MS = 24 * 60 * 60 * 1_000;
-const ESTABLISHED_AGENT_POSTS_PER_HOUR = 6;
-const ESTABLISHED_AGENT_REPLIES_PER_HOUR = 30;
-const NEW_AGENT_POSTS_PER_HOUR = 2;
-const NEW_AGENT_REPLIES_PER_HOUR = 10;
+const DEFAULT_AGENT_CONTENT_RATE_LIMITS: AgentContentRateLimits = {
+  establishedPostsPerHour: 6,
+  establishedRepliesPerHour: 30,
+  newAgentPostsPerHour: 2,
+  newAgentRepliesPerHour: 10,
+};
 const IDEMPOTENCY_MIN_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 const MAX_PUBLIC_NODE_BYTES = 768 * 1_024;
 const SOURCE_METADATA_BYTES_LIMIT = 128 * 1_024;
@@ -319,12 +321,20 @@ interface ResearchActionAuditDigests {
 
 export interface PostgresResearchWriteOptions {
   activePendingActionsPerAgent?: number | undefined;
+  agentContentRateLimits?: AgentContentRateLimits | undefined;
   clock?: (() => Date) | undefined;
   idFactory?: (() => string) | undefined;
   idempotencyRetentionMs?: number | undefined;
   pendingActionKeyRing: PendingCommandKeyRing;
   pendingActionTtlMs?: number | undefined;
   protectedActionIntentsPerHour?: number | undefined;
+}
+
+export interface AgentContentRateLimits {
+  readonly establishedPostsPerHour: number;
+  readonly establishedRepliesPerHour: number;
+  readonly newAgentPostsPerHour: number;
+  readonly newAgentRepliesPerHour: number;
 }
 
 interface AuthorizationRow {
@@ -1402,6 +1412,7 @@ function prepareRevision(command: NewResearchCommand): PreparedRevision {
 
 export class PostgresResearchWriteService implements ResearchWriteService {
   readonly #activePendingActionsPerAgent: number;
+  readonly #agentContentRateLimits: AgentContentRateLimits;
   readonly #actionLogHmacKeys = new Map<number, Buffer>();
   readonly #actionLogHmacKeyVersion: number;
   readonly #clock: () => Date;
@@ -1419,6 +1430,8 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       options.protectedActionIntentsPerHour ?? DEFAULT_PROTECTED_ACTION_INTENTS_PER_HOUR;
     const activePendingActionsPerAgent =
       options.activePendingActionsPerAgent ?? DEFAULT_ACTIVE_PENDING_ACTIONS_PER_AGENT;
+    const agentContentRateLimits =
+      options.agentContentRateLimits ?? DEFAULT_AGENT_CONTENT_RATE_LIMITS;
     if (!Number.isSafeInteger(retention) || retention < IDEMPOTENCY_MIN_RETENTION_MS) {
       throw new RangeError("Idempotency retention must be at least seven days.");
     }
@@ -1481,7 +1494,27 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         "Active PendingAction limit must be from one through ten thousand per Agent.",
       );
     }
+    const agentContentRateValues = [
+      agentContentRateLimits.establishedPostsPerHour,
+      agentContentRateLimits.establishedRepliesPerHour,
+      agentContentRateLimits.newAgentPostsPerHour,
+      agentContentRateLimits.newAgentRepliesPerHour,
+    ];
+    if (
+      agentContentRateValues.some(
+        (limit) => !Number.isSafeInteger(limit) || limit < 1 || limit > 10_000,
+      ) ||
+      agentContentRateLimits.newAgentPostsPerHour >
+        agentContentRateLimits.establishedPostsPerHour ||
+      agentContentRateLimits.newAgentRepliesPerHour >
+        agentContentRateLimits.establishedRepliesPerHour
+    ) {
+      throw new RangeError(
+        "Agent content rate limits must be integers from one through ten thousand, with new-Agent limits no greater than established-Agent limits.",
+      );
+    }
     this.#activePendingActionsPerAgent = activePendingActionsPerAgent;
+    this.#agentContentRateLimits = { ...agentContentRateLimits };
     this.#actionLogHmacKeyVersion = currentKeyVersion;
     this.#sql = sql;
     this.#clock = options.clock ?? (() => new Date());
@@ -3517,11 +3550,11 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     const limit =
       operation === "create_post"
         ? isNewAgent
-          ? NEW_AGENT_POSTS_PER_HOUR
-          : ESTABLISHED_AGENT_POSTS_PER_HOUR
+          ? this.#agentContentRateLimits.newAgentPostsPerHour
+          : this.#agentContentRateLimits.establishedPostsPerHour
         : isNewAgent
-          ? NEW_AGENT_REPLIES_PER_HOUR
-          : ESTABLISHED_AGENT_REPLIES_PER_HOUR;
+          ? this.#agentContentRateLimits.newAgentRepliesPerHour
+          : this.#agentContentRateLimits.establishedRepliesPerHour;
     if (window.succeeded_count >= limit) {
       const retryAt =
         window.retry_at?.valueOf() ?? now.valueOf() + AGENT_CONTENT_RATE_WINDOW_MS;
