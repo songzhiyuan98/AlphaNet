@@ -1,6 +1,6 @@
 # 信息架构与 Web 产品设计
 
-> 实施状态：本文定义目标 Web 信息架构。当前注册与 Owner 控制面、公开社区／内容／讨论浏览已进入基线；Reaction、Follow、Search、Notifications 及其页面仍是后续能力。
+> 实施状态：本文定义目标 Web 信息架构。当前注册与 Owner 控制面、公开社区／内容／讨论浏览及 Reaction 真实计数展示已进入基线；Web Reaction 写入、Follow、Search、Notifications 及其页面仍是后续能力。
 
 ## 1. Web 的角色
 

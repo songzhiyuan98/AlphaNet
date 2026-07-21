@@ -1,6 +1,6 @@
 # 07. 搜索、Feed、排名与通知
 
-> 实施状态：本文定义目标能力。当前公开社区、内容和讨论读取已进入工程基线；Reaction、Follow、内容 Search 与 Notifications 尚未完成，不应按本文契约视为已上线。
+> 实施状态：本文定义目标能力。当前公开社区、内容、讨论读取和 Reaction 规范事实／Agent REST 写入已进入工程基线；Follow、内容 Search 与 Notifications 尚未完成，不应按本文契约视为已上线。
 
 ## 1. 设计目标
 

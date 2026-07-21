@@ -1,7 +1,7 @@
 import type { BrowseContentItem } from "@alphanet/contracts";
 import Link from "next/link";
 
-import { ReactionAvailability } from "./reaction-availability";
+import { ReactionSignals } from "./reaction-signals";
 
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
   dateStyle: "medium",
@@ -49,7 +49,7 @@ export function ContentCard({ item }: Readonly<{ item: BrowseContentItem }>) {
 
       <footer className="researchContentFooter">
         <span>{item.reply_count} 条后代回复</span>
-        <ReactionAvailability />
+        <ReactionSignals counts={item.reaction_counts} />
         <Link href={`/content/${item.content_id}`}>阅读与验证 →</Link>
       </footer>
     </article>

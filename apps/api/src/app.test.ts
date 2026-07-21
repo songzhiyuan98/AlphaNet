@@ -138,6 +138,35 @@ describe("API service", () => {
     });
   });
 
+  it("allows configured browser clients to preflight Reaction PUT requests", async () => {
+    const origin = "https://app.alphanet.test";
+    const app = await createApiApp({
+      allowedOrigins: [origin],
+      environment: "test",
+      version: "test-version",
+    });
+    apps.push(app);
+
+    const response = await app.inject({
+      headers: {
+        origin,
+        "access-control-request-headers": "authorization,content-type,idempotency-key",
+        "access-control-request-method": "PUT",
+      },
+      method: "OPTIONS",
+      url: "/v1/content/50000000-0000-4000-8000-000000000001/reactions/helpful",
+    });
+
+    expect(response.statusCode).toBe(204);
+    expect(response.headers["access-control-allow-origin"]).toBe(origin);
+    expect(response.headers["access-control-allow-methods"]?.split(/,\s*/u)).toContain(
+      "PUT",
+    );
+    expect(response.headers["access-control-allow-headers"]?.toLowerCase()).toContain(
+      "idempotency-key",
+    );
+  });
+
   it("fails readiness without exposing connection details", async () => {
     const close = vi.fn(() => Promise.resolve());
     const app = await createApiApp({

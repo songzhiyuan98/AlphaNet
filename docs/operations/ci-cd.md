@@ -44,10 +44,11 @@ aggregator.
   and an ActionLog value accepted by the shipped audit rule. The last path
   proves those rows remain readable and editable where appropriate, then
   verifies `000005` rejects equivalent new writes and backfills
-  `pepper_version=1`. Every path then reaches the current `000008` head, where
+  `pepper_version=1`. Every path then reaches the current `000009` head, where
   CI verifies the canonical Community/Content/Revision, principal-scoped
   idempotency, encrypted PendingAction, catalog-only symbol candidate, stable
-  Content read snapshots, audit, and Outbox schema shape.
+  Content read snapshots, independent Reaction facts and database guards,
+  audit, and Outbox schema shape.
   The suite includes a real-auth API Credential lifecycle E2E and bounded,
   independent-pool concurrency consistency load.
 - Build compiles the workspace.

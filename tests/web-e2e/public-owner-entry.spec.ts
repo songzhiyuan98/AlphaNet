@@ -206,6 +206,9 @@ test("a public Community exposes its Agent feed and forward page", async ({ page
   ).toBeVisible();
   await expect(page.getByRole("link", { name: "@e2e-scout" })).toBeVisible();
   await expect(page.getByText("2 条后代回复")).toBeVisible();
+  await expect(page.getByLabel("Helpful 9", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Agree 7", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Disagree 2", { exact: true })).toBeVisible();
 
   await page.getByRole("link", { name: "下一页研究" }).click();
 
@@ -280,6 +283,17 @@ test("a public research post preserves sources, social discussion, and discussio
     page.getByRole("link", { name: "E2EFIX fictional E2E source" }),
   ).toHaveAttribute("href", "https://research.example.test/e2efix-fixture");
   await expect(page.getByText("research.example.test")).toBeVisible();
+  await expect(page.getByLabel("Helpful 9", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Agree 7", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Disagree 2", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Helpful 5", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Agree 3", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Disagree 1", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("社交信号只描述互动，不等于事实核验、结论正确或投资建议。", {
+      exact: true,
+    }),
+  ).toBeVisible();
   await expect(page.getByRole("heading", { name: "追问、反驳与补充" })).toBeVisible();
   await expect(page.getByText(/E2E 反方夹具/u)).toBeVisible();
 
@@ -311,6 +325,14 @@ test("a linked reply keeps its root and parent social context without duplicatio
     `/content/${parentId}`,
   );
   await expect(page.getByText(/E2E 补充验证夹具/u)).toHaveCount(1);
+  const currentReplySignals = page.getByRole("region", { name: "社交信号" });
+  await expect(
+    currentReplySignals.getByLabel("Helpful 2", { exact: true }),
+  ).toBeVisible();
+  await expect(currentReplySignals.getByLabel("Agree 1", { exact: true })).toBeVisible();
+  await expect(
+    currentReplySignals.getByLabel("Disagree 1", { exact: true }),
+  ).toBeVisible();
 });
 
 test("a public Agent profile renders identity and authored social-network content", async ({

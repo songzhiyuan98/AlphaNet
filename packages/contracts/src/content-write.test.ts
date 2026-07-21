@@ -7,6 +7,10 @@ import {
   IdempotencyKeySchema,
   ReplyToContentRequestSchema,
   ReplyToContentWriteResultSchema,
+  SetReactionPathParamsSchema,
+  SetReactionRequestSchema,
+  SetReactionResultSchema,
+  SetReactionWriteResultSchema,
   UnifiedContentWriteResultSchema,
 } from "./content-write.ts";
 
@@ -425,6 +429,171 @@ describe("unified write and PendingAction contracts", () => {
           ...rateLimited.error,
           retry_after_ms: null,
         },
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe("Reaction write contracts", () => {
+  const reactionPath = {
+    content_id: "cnt_amd_thesis",
+    reaction: "helpful",
+  } as const;
+  const reactionRequest = {
+    active: true,
+    idempotency_key: "reaction-amd-helpful-v1",
+  } as const;
+  const reactionResult = {
+    content_id: "cnt_amd_thesis",
+    reaction_counts: {
+      helpful: 7,
+      agree: 3,
+      disagree: 2,
+    },
+    viewer_state: {
+      reactions: ["helpful", "disagree"],
+      following: false,
+    },
+  } as const;
+
+  it("accepts the path, target-state request, and independent reaction projection", () => {
+    expect(SetReactionPathParamsSchema.parse(reactionPath)).toEqual(reactionPath);
+    expect(SetReactionRequestSchema.parse(reactionRequest)).toEqual(reactionRequest);
+    expect(SetReactionRequestSchema.parse({ ...reactionRequest, active: false })).toEqual(
+      { ...reactionRequest, active: false },
+    );
+    expect(SetReactionResultSchema.parse(reactionResult)).toEqual(reactionResult);
+  });
+
+  it("rejects unknown reactions, forged transport fields, and malformed target state", () => {
+    expect(
+      SetReactionPathParamsSchema.safeParse({
+        ...reactionPath,
+        reaction: "like",
+      }).success,
+    ).toBe(false);
+    expect(
+      SetReactionPathParamsSchema.safeParse({
+        ...reactionPath,
+        actor_id: "act_forged",
+      }).success,
+    ).toBe(false);
+    expect(
+      SetReactionRequestSchema.safeParse({
+        ...reactionRequest,
+        active: "true",
+      }).success,
+    ).toBe(false);
+    expect(
+      SetReactionRequestSchema.safeParse({
+        ...reactionRequest,
+        content_id: reactionPath.content_id,
+      }).success,
+    ).toBe(false);
+    expect(
+      SetReactionRequestSchema.safeParse({
+        ...reactionRequest,
+        idempotency_key: "reaction\nsecond-line",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects invalid aggregate counts and duplicate viewer reactions", () => {
+    expect(
+      SetReactionResultSchema.safeParse({
+        ...reactionResult,
+        reaction_counts: {
+          ...reactionResult.reaction_counts,
+          helpful: -1,
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      SetReactionResultSchema.safeParse({
+        ...reactionResult,
+        viewer_state: {
+          ...reactionResult.viewer_state,
+          reactions: ["helpful", "helpful"],
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      SetReactionResultSchema.safeParse({
+        ...reactionResult,
+        reaction_counts_by_actor_kind: {
+          agent: reactionResult.reaction_counts,
+          human: { helpful: 0, agree: 0, disagree: 0 },
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("accepts a successful Reaction result through the operation and unified schemas", () => {
+    const succeeded = {
+      decision: "allow",
+      status: "succeeded",
+      result: reactionResult,
+      pending_action: null,
+      error: null,
+      request_id: "req-reaction",
+      schema_version: "1",
+    } as const;
+
+    expect(SetReactionWriteResultSchema.parse(succeeded)).toEqual(succeeded);
+    expect(UnifiedContentWriteResultSchema.parse(succeeded)).toEqual(succeeded);
+    expect(
+      SetReactionWriteResultSchema.safeParse({
+        ...succeeded,
+        result: null,
+      }).success,
+    ).toBe(false);
+    expect(
+      SetReactionWriteResultSchema.safeParse({
+        ...succeeded,
+        pending_action: {
+          id: "act_reaction",
+          operation: "set_reaction",
+          state: "pending_approval",
+          expires_at: timestamp,
+          input_digest: "sha256:45891d",
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("accepts structured denial/failure and rejects incomplete rate-limit evidence", () => {
+    const denied = {
+      decision: "deny",
+      status: "denied",
+      result: null,
+      pending_action: null,
+      error: structuredError,
+      request_id: "req-reaction-denied",
+      schema_version: "1",
+    } as const;
+    expect(SetReactionWriteResultSchema.parse(denied)).toEqual(denied);
+
+    const rateLimited = {
+      ...denied,
+      error: {
+        code: "RATE_LIMITED",
+        message: "The Reaction rate limit has been reached.",
+        retryable: true,
+        details: { limit_dimension: "agent_reaction" },
+        retry_after_ms: 45_000,
+      },
+    } as const;
+    expect(SetReactionWriteResultSchema.parse(rateLimited)).toEqual(rateLimited);
+    expect(
+      SetReactionWriteResultSchema.safeParse({
+        ...rateLimited,
+        error: { ...rateLimited.error, retry_after_ms: null },
+      }).success,
+    ).toBe(false);
+    expect(
+      SetReactionWriteResultSchema.safeParse({
+        ...denied,
+        error: null,
       }).success,
     ).toBe(false);
   });

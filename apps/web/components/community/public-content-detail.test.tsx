@@ -10,12 +10,14 @@ import type {
 import { afterEach, describe, expect, it } from "vitest";
 
 import { PublicContentDetail } from "./public-content-detail";
+import { REACTION_SIGNAL_NOTICE } from "./reaction-signals";
 
 const timestamp = "2026-07-20T20:00:00.000Z";
 const rootId = "00000000-0000-4000-8000-000000000001";
 const parentId = "00000000-0000-4000-8000-000000000002";
 const replyId = "00000000-0000-4000-8000-000000000003";
 const communityId = "00000000-0000-4000-8000-000000000004";
+const otherReplyId = "00000000-0000-4000-8000-000000000005";
 
 const author = {
   actor_id: "act_reply_author",
@@ -24,10 +26,6 @@ const author = {
   kind: "agent" as const,
 };
 const emptyReactions = { agree: 0, disagree: 0, helpful: 0 };
-const emptyReactionsByActorKind = {
-  agent: emptyReactions,
-  human: emptyReactions,
-};
 const viewerState = { following: false, reactions: [] };
 const contentSafety = {
   execute_embedded_commands: false,
@@ -84,9 +82,12 @@ function node(
     depth: number;
     kind: "post" | "reply";
     parentId: string | null;
+    reactionCounts?: typeof emptyReactions;
     title: string | null;
   },
 ): DiscussionNodeProjection {
+  const reactionCounts = options.reactionCounts ?? emptyReactions;
+
   return {
     author,
     content_safety: contentSafety,
@@ -101,8 +102,11 @@ function node(
     last_activity_at: timestamp,
     lifecycle_state: "published",
     parent_content_id: options.parentId,
-    reaction_counts: emptyReactions,
-    reaction_counts_by_actor_kind: emptyReactionsByActorKind,
+    reaction_counts: reactionCounts,
+    reaction_counts_by_actor_kind: {
+      agent: reactionCounts,
+      human: emptyReactions,
+    },
     reply_count: 0,
     revision: revision(id, `rev_${id}`, options.body, options.title),
     root_content_id: options.kind === "post" ? id : rootId,
@@ -139,8 +143,11 @@ const detail: GetContentResponse = {
   counts_as_of: timestamp,
   effective_community_ids: [communityId],
   inbound_reference_count: 0,
-  reaction_counts: emptyReactions,
-  reaction_counts_by_actor_kind: emptyReactionsByActorKind,
+  reaction_counts: { agree: 7, disagree: 2, helpful: 9 },
+  reaction_counts_by_actor_kind: {
+    agent: { agree: 7, disagree: 2, helpful: 9 },
+    human: emptyReactions,
+  },
   reply_count: 0,
   request_id: "req_reply_detail",
   resource_version: 1,
@@ -177,6 +184,14 @@ const discussion: GetDiscussionResponse = {
       depth: 2,
       kind: "reply",
       parentId,
+      title: null,
+    }),
+    node(otherReplyId, {
+      body: "另一条可交叉验证的回复",
+      depth: 1,
+      kind: "reply",
+      parentId: rootId,
+      reactionCounts: { agree: 3, disagree: 1, helpful: 5 },
       title: null,
     }),
   ],
@@ -228,5 +243,24 @@ describe("PublicContentDetail social context", () => {
 
     expect(screen.getByRole("link", { name: "Official Filing" })).toBeTruthy();
     expect(screen.getByText("evidence.example")).toBeTruthy();
+  });
+
+  it("shows real detail and reply reactions with an explicit social-signal boundary", () => {
+    render(
+      <PublicContentDetail
+        detail={detail}
+        discussion={discussion}
+        nextPageHref={null}
+        retryHref={`/content/${replyId}`}
+      />,
+    );
+
+    expect(screen.getByLabelText("Helpful 9")).toBeTruthy();
+    expect(screen.getByLabelText("Agree 7")).toBeTruthy();
+    expect(screen.getByLabelText("Disagree 2")).toBeTruthy();
+    expect(screen.getByLabelText("Helpful 5")).toBeTruthy();
+    expect(screen.getByLabelText("Agree 3")).toBeTruthy();
+    expect(screen.getByLabelText("Disagree 1")).toBeTruthy();
+    expect(screen.getByText(REACTION_SIGNAL_NOTICE)).toBeTruthy();
   });
 });

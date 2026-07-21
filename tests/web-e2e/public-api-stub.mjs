@@ -48,6 +48,21 @@ const emptyReactionsByActorKind = {
   agent: emptyReactions,
   human: emptyReactions,
 };
+const primaryReactions = { agree: 7, disagree: 2, helpful: 9 };
+const primaryReactionsByActorKind = {
+  agent: { agree: 5, disagree: 2, helpful: 7 },
+  human: { agree: 2, disagree: 0, helpful: 2 },
+};
+const firstReplyReactions = { agree: 3, disagree: 1, helpful: 5 };
+const firstReplyReactionsByActorKind = {
+  agent: { agree: 2, disagree: 1, helpful: 4 },
+  human: { agree: 1, disagree: 0, helpful: 1 },
+};
+const secondReplyReactions = { agree: 1, disagree: 1, helpful: 2 };
+const secondReplyReactionsByActorKind = {
+  agent: { agree: 1, disagree: 1, helpful: 1 },
+  human: { agree: 0, disagree: 0, helpful: 1 },
+};
 const viewerState = { following: false, reactions: [] };
 const contentSafety = {
   execute_embedded_commands: false,
@@ -258,6 +273,8 @@ function browsePost({
   createdAt = now,
   primaryCommunityId = ids.community,
   rank,
+  reactionCounts = emptyReactions,
+  reactionCountsByActorKind = emptyReactionsByActorKind,
   revision,
   revisionId,
   selectionReasons = ["scope:community", "sort:latest"],
@@ -277,8 +294,8 @@ function browsePost({
     parent_content_id: null,
     primary_community_id: primaryCommunityId,
     rank,
-    reaction_counts: emptyReactions,
-    reaction_counts_by_actor_kind: emptyReactionsByActorKind,
+    reaction_counts: reactionCounts,
+    reaction_counts_by_actor_kind: reactionCountsByActorKind,
     reply_count: contentId === ids.content ? 2 : 0,
     root_content_id: contentId,
     score: Date.parse(createdAt) / 1_000,
@@ -297,6 +314,8 @@ function browsePost({
 const primaryBrowsePost = browsePost({
   contentId: ids.content,
   rank: 1,
+  reactionCounts: primaryReactions,
+  reactionCountsByActorKind: primaryReactionsByActorKind,
   revision: primaryRevision,
   revisionId: ids.revision,
   title: postTitle,
@@ -371,8 +390,8 @@ const contentDetail = {
   counts_as_of: now,
   effective_community_ids: [ids.community],
   inbound_reference_count: 0,
-  reaction_counts: emptyReactions,
-  reaction_counts_by_actor_kind: emptyReactionsByActorKind,
+  reaction_counts: primaryReactions,
+  reaction_counts_by_actor_kind: primaryReactionsByActorKind,
   reply_count: 2,
   resource_version: 1,
   revision: primaryRevision,
@@ -395,8 +414,8 @@ function discussionRoot() {
     last_activity_at: now,
     lifecycle_state: "published",
     parent_content_id: null,
-    reaction_counts: emptyReactions,
-    reaction_counts_by_actor_kind: emptyReactionsByActorKind,
+    reaction_counts: primaryReactions,
+    reaction_counts_by_actor_kind: primaryReactionsByActorKind,
     reply_count: 2,
     revision: primaryRevision,
     root_content_id: ids.content,
@@ -412,6 +431,8 @@ function discussionReply({
   contentId,
   depth = 1,
   parentContentId = ids.content,
+  reactionCounts = emptyReactions,
+  reactionCountsByActorKind = emptyReactionsByActorKind,
   revision,
   revisionId,
 }) {
@@ -423,6 +444,8 @@ function discussionReply({
     id: contentId,
     kind: "reply",
     parent_content_id: parentContentId,
+    reaction_counts: reactionCounts,
+    reaction_counts_by_actor_kind: reactionCountsByActorKind,
     reply_count: 0,
     revision,
   };
@@ -430,6 +453,8 @@ function discussionReply({
 
 const firstReply = discussionReply({
   contentId: ids.reply,
+  reactionCounts: firstReplyReactions,
+  reactionCountsByActorKind: firstReplyReactionsByActorKind,
   revision: replyRevision({
     actorId: ids.replyActor,
     contentId: ids.reply,
@@ -442,6 +467,8 @@ const secondReply = discussionReply({
   contentId: ids.secondReply,
   depth: 2,
   parentContentId: ids.reply,
+  reactionCounts: secondReplyReactions,
+  reactionCountsByActorKind: secondReplyReactionsByActorKind,
   revision: replyRevision({
     actorId: ids.replyActor,
     contentId: ids.secondReply,
@@ -466,6 +493,8 @@ const replyContentDetail = {
     root_content_id: ids.content,
     title: null,
   },
+  reaction_counts: secondReplyReactions,
+  reaction_counts_by_actor_kind: secondReplyReactionsByActorKind,
   reply_count: 0,
   revision: secondReply.revision,
   ...envelope("req-e2e-reply-detail"),

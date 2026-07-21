@@ -5,6 +5,8 @@ import type postgres from "postgres";
 
 import { evaluateAgentOperation, type AgentPolicyReason } from "./agent-policy.js";
 import type { AgentCredentialContext } from "./agent-connection.js";
+import type { ReactionType } from "./reaction-write.js";
+import { CONTENT_REACTIONS_MIGRATION_CHECKSUM } from "./schema-migrations.js";
 
 export const CONTENT_READ_ORDERING_VERSION = "content-read-v1";
 export const DISCUSSION_ORDERING_VERSION = "discussion-flat-v1";
@@ -17,6 +19,8 @@ const CONTENT_READ_VISIBILITY_MIGRATION_NAME = "content_read_visibility_epochs";
 const CONTENT_READ_VISIBILITY_MIGRATION_VERSION = "000008";
 const CONTENT_READ_VISIBILITY_MIGRATION_CHECKSUM =
   "90ffb9571a843b1863bd7adcec1cb2464f585302514304f8387b9aca45f4657b";
+const CONTENT_REACTIONS_MIGRATION_NAME = "content_reactions";
+const CONTENT_REACTIONS_MIGRATION_VERSION = "000009";
 const CURSOR_VERSION = 3;
 const CURSOR_SIGNATURE_DOMAIN = "alphanet.content-read.cursor-signature.v1";
 const CURSOR_BINDING_DOMAIN = "alphanet.content-read.cursor-binding.v1";
@@ -89,7 +93,7 @@ export interface ReactionCountsByActorKindProjection {
 
 export interface ViewerContentStateProjection {
   following: false;
-  reactions: [];
+  reactions: ReactionType[];
 }
 
 export interface SourceLinkProjection {
@@ -476,8 +480,12 @@ interface CommunityVisibilityRow {
 }
 
 interface ProjectionRow {
+  active_reactions: string[] | null;
   actor_id: string;
   actor_kind: string;
+  agree_agent_count: number;
+  agree_count: number;
+  agree_human_count: number;
   additional_community_ids: string[] | null;
   agent_id: string | null;
   author_handle: string;
@@ -488,11 +496,17 @@ interface ProjectionRow {
   current_revision_id: string | null;
   deleted_at: Date | null;
   depth: number;
+  disagree_agent_count: number;
+  disagree_count: number;
+  disagree_human_count: number;
   distribution_state: string;
   edit_summary: string | null;
   effective_community_ids: string[] | null;
   erasure_state: string;
   id: string;
+  helpful_agent_count: number;
+  helpful_count: number;
+  helpful_human_count: number;
   inbound_reference_count: number;
   kind: string;
   last_activity_at: Date;
@@ -531,18 +545,6 @@ const contentSafety: ContentSafetyProjection = Object.freeze({
   verifyFinancialClaimsIndependently: true,
 });
 
-function zeroReactionCounts(): ReactionCountsProjection {
-  return { agree: 0, disagree: 0, helpful: 0 };
-}
-
-function zeroReactionCountsByActorKind(): ReactionCountsByActorKindProjection {
-  return { agent: zeroReactionCounts(), human: zeroReactionCounts() };
-}
-
-function emptyViewerState(): ViewerContentStateProjection {
-  return { following: false, reactions: [] };
-}
-
 function compareUnicodeCodePoints(left: string, right: string): number {
   const leftPoints = [...left].map((value) => value.codePointAt(0)!);
   const rightPoints = [...right].map((value) => value.codePointAt(0)!);
@@ -558,6 +560,21 @@ function compareUnicodeCodePoints(left: string, right: string): number {
 
 function uniqueSorted<T extends string>(values: readonly T[]): T[] {
   return [...new Set(values)].sort(compareUnicodeCodePoints);
+}
+
+function mapReactionTypes(value: string[] | null): ReactionType[] {
+  const reactions = value ?? [];
+  if (
+    reactions.length > 3 ||
+    new Set(reactions).size !== reactions.length ||
+    !reactions.every(
+      (reaction): reaction is ReactionType =>
+        reaction === "helpful" || reaction === "agree" || reaction === "disagree",
+    )
+  ) {
+    throw new ContentReadError("CONTENT_DATA_INVALID");
+  }
+  return reactions;
 }
 
 function normalizeUuid(value: string, code: ContentReadErrorCode): string {
@@ -1198,6 +1215,32 @@ function mapProjectionRow(row: ProjectionRow): ContentDetailProjection {
     throw new ContentReadError("CONTENT_DATA_INVALID");
   }
   const version = asPositiveInteger(row.version);
+  const reactionCounts = {
+    agree: asNonnegativeInteger(row.agree_count),
+    disagree: asNonnegativeInteger(row.disagree_count),
+    helpful: asNonnegativeInteger(row.helpful_count),
+  };
+  const reactionCountsByActorKind = {
+    agent: {
+      agree: asNonnegativeInteger(row.agree_agent_count),
+      disagree: asNonnegativeInteger(row.disagree_agent_count),
+      helpful: asNonnegativeInteger(row.helpful_agent_count),
+    },
+    human: {
+      agree: asNonnegativeInteger(row.agree_human_count),
+      disagree: asNonnegativeInteger(row.disagree_human_count),
+      helpful: asNonnegativeInteger(row.helpful_human_count),
+    },
+  };
+  for (const reaction of ["helpful", "agree", "disagree"] as const) {
+    if (
+      reactionCounts[reaction] !==
+      reactionCountsByActorKind.agent[reaction] +
+        reactionCountsByActorKind.human[reaction]
+    ) {
+      throw new ContentReadError("CONTENT_DATA_INVALID");
+    }
+  }
   return {
     content: {
       additionalCommunityIds,
@@ -1226,12 +1269,15 @@ function mapProjectionRow(row: ProjectionRow): ContentDetailProjection {
     countsAsOf: new Date(0),
     effectiveCommunityIds,
     inboundReferenceCount: asNonnegativeInteger(row.inbound_reference_count),
-    reactionCounts: zeroReactionCounts(),
-    reactionCountsByActorKind: zeroReactionCountsByActorKind(),
+    reactionCounts,
+    reactionCountsByActorKind,
     replyCount: asNonnegativeInteger(row.reply_count),
     resourceVersion: version,
     revision,
-    viewerState: emptyViewerState(),
+    viewerState: {
+      following: false,
+      reactions: mapReactionTypes(row.active_reactions),
+    },
   };
 }
 
@@ -1382,8 +1428,16 @@ export class PostgresContentReadService implements ContentReadService {
               and name = ${CONTENT_READ_VISIBILITY_MIGRATION_NAME}
               and checksum = ${CONTENT_READ_VISIBILITY_MIGRATION_CHECKSUM}
           )
+          and exists (
+            select 1
+            from system.schema_migrations
+            where version = ${CONTENT_REACTIONS_MIGRATION_VERSION}
+              and name = ${CONTENT_REACTIONS_MIGRATION_NAME}
+              and checksum = ${CONTENT_REACTIONS_MIGRATION_CHECKSUM}
+          )
           and to_regclass('platform.content_items') is not null
           and to_regclass('platform.content_revisions') is not null
+          and to_regclass('platform.reactions') is not null
           and to_regclass('platform.content_additional_communities') is not null
           and to_regclass('platform.content_symbols') is not null
           and to_regclass('platform.content_topics') is not null
@@ -1392,6 +1446,7 @@ export class PostgresContentReadService implements ContentReadService {
           and to_regclass('platform.mentions') is not null
           and to_regclass('platform.content_items_visible_latest_idx') is not null
           and to_regclass('platform.content_items_root_discussion_idx') is not null
+          and to_regclass('platform.reactions_content_type_created_idx') is not null
           and to_regclass('system.content_read_visibility_epochs') is not null
           and exists (
             select 1
@@ -1570,7 +1625,7 @@ export class PostgresContentReadService implements ContentReadService {
         const details = await this.#hydrateContent(
           transaction,
           pageCandidates.map((candidate) => candidate.id),
-          viewer !== null,
+          viewer,
         );
         return {
           asOf,
@@ -1654,11 +1709,7 @@ export class PostgresContentReadService implements ContentReadService {
       async (transaction) => {
         await this.#setStatementTimeout(transaction);
         const countsAsOf = await this.#databaseTime(transaction);
-        const details = await this.#hydrateContent(
-          transaction,
-          [contentId],
-          viewer !== null,
-        );
+        const details = await this.#hydrateContent(transaction, [contentId], viewer);
         return { countsAsOf, details };
       },
     );
@@ -1725,7 +1776,7 @@ export class PostgresContentReadService implements ContentReadService {
         const details = await this.#hydrateContent(
           transaction,
           [location.root_id, ...pageCandidates.map((candidate) => candidate.id)],
-          viewer !== null,
+          viewer,
         );
         const ancestors = await this.#discussionAncestors(
           transaction,
@@ -2346,11 +2397,13 @@ export class PostgresContentReadService implements ContentReadService {
   async #hydrateContent(
     sql: QuerySql,
     contentIds: readonly string[],
-    allowSuspendedCommunities: boolean,
+    viewer: ContentReadViewer,
   ): Promise<ContentDetailProjection[]> {
     if (contentIds.length === 0) {
       return [];
     }
+    const allowSuspendedCommunities = viewer !== null;
+    const viewerActorId = viewer?.agent.actorId ?? null;
     const rows = await sql<ProjectionRow[]>`
       select
         content.id::text as id,
@@ -2541,6 +2594,56 @@ export class PostgresContentReadService implements ContentReadService {
           ), '[]'::jsonb)
           else '[]'::jsonb
         end as references,
+        case
+          when content.lifecycle_state = 'published'
+            then coalesce(reaction_aggregate.helpful_count, 0)
+          else 0
+        end::integer as helpful_count,
+        case
+          when content.lifecycle_state = 'published'
+            then coalesce(reaction_aggregate.agree_count, 0)
+          else 0
+        end::integer as agree_count,
+        case
+          when content.lifecycle_state = 'published'
+            then coalesce(reaction_aggregate.disagree_count, 0)
+          else 0
+        end::integer as disagree_count,
+        case
+          when content.lifecycle_state = 'published'
+            then coalesce(reaction_aggregate.helpful_agent_count, 0)
+          else 0
+        end::integer as helpful_agent_count,
+        case
+          when content.lifecycle_state = 'published'
+            then coalesce(reaction_aggregate.agree_agent_count, 0)
+          else 0
+        end::integer as agree_agent_count,
+        case
+          when content.lifecycle_state = 'published'
+            then coalesce(reaction_aggregate.disagree_agent_count, 0)
+          else 0
+        end::integer as disagree_agent_count,
+        case
+          when content.lifecycle_state = 'published'
+            then coalesce(reaction_aggregate.helpful_human_count, 0)
+          else 0
+        end::integer as helpful_human_count,
+        case
+          when content.lifecycle_state = 'published'
+            then coalesce(reaction_aggregate.agree_human_count, 0)
+          else 0
+        end::integer as agree_human_count,
+        case
+          when content.lifecycle_state = 'published'
+            then coalesce(reaction_aggregate.disagree_human_count, 0)
+          else 0
+        end::integer as disagree_human_count,
+        case
+          when content.lifecycle_state = 'published'
+            then coalesce(reaction_aggregate.active_reactions, array[]::text[])
+          else array[]::text[]
+        end as active_reactions,
         (
           with recursive descendants as (
             select child.id, child.distribution_state
@@ -2602,6 +2705,56 @@ export class PostgresContentReadService implements ContentReadService {
       left join platform.content_revisions as revision
         on revision.id = content.current_revision_id
        and revision.content_id = content.id
+      left join lateral (
+        select
+          count(*) filter (
+            where reaction.reaction_type = 'helpful'
+          )::integer as helpful_count,
+          count(*) filter (
+            where reaction.reaction_type = 'agree'
+          )::integer as agree_count,
+          count(*) filter (
+            where reaction.reaction_type = 'disagree'
+          )::integer as disagree_count,
+          count(*) filter (
+            where reaction.reaction_type = 'helpful'
+              and reaction_actor.kind = 'agent'
+          )::integer as helpful_agent_count,
+          count(*) filter (
+            where reaction.reaction_type = 'agree'
+              and reaction_actor.kind = 'agent'
+          )::integer as agree_agent_count,
+          count(*) filter (
+            where reaction.reaction_type = 'disagree'
+              and reaction_actor.kind = 'agent'
+          )::integer as disagree_agent_count,
+          count(*) filter (
+            where reaction.reaction_type = 'helpful'
+              and reaction_actor.kind = 'human'
+          )::integer as helpful_human_count,
+          count(*) filter (
+            where reaction.reaction_type = 'agree'
+              and reaction_actor.kind = 'human'
+          )::integer as agree_human_count,
+          count(*) filter (
+            where reaction.reaction_type = 'disagree'
+              and reaction_actor.kind = 'human'
+          )::integer as disagree_human_count,
+          coalesce(
+            array_agg(
+              reaction.reaction_type order by
+                case reaction.reaction_type
+                  when 'helpful' then 1
+                  when 'agree' then 2
+                  when 'disagree' then 3
+                end
+            ) filter (where reaction.actor_id = ${viewerActorId}::uuid),
+            array[]::text[]
+          ) as active_reactions
+        from platform.reactions as reaction
+        join platform.actors as reaction_actor on reaction_actor.id = reaction.actor_id
+        where reaction.content_id = content.id
+      ) as reaction_aggregate on true
       where content.id = any(${contentIds}::uuid[])
         and content.distribution_state <> 'hidden'
         and root.distribution_state <> 'hidden'

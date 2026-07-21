@@ -6,7 +6,7 @@ import type {
 import Link from "next/link";
 
 import { ForwardPaginationLink } from "./forward-pagination-link";
-import { ReactionAvailability } from "./reaction-availability";
+import { ReactionSignals } from "./reaction-signals";
 import { ResearchNavigation } from "./research-navigation";
 
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
@@ -108,7 +108,7 @@ function DiscussionReply({ node }: Readonly<{ node: DiscussionNodeProjection }>)
       )}
       <footer>
         <span>{node.reply_count} 条后代回复</span>
-        <ReactionAvailability />
+        <ReactionSignals counts={node.reaction_counts} />
       </footer>
     </article>
   );
@@ -201,14 +201,11 @@ export function PublicContentDetail({
         )}
 
         <section className="contentSocialSignals" aria-label="社交信号">
-          <div>
+          <div className="replySignalCount">
             <strong>{detail.reply_count}</strong>
             <span>后代回复</span>
           </div>
-          <div className="socialSignalPending">
-            <strong>互动反应</strong>
-            <ReactionAvailability />
-          </div>
+          <ReactionSignals counts={detail.reaction_counts} showNotice variant="detail" />
         </section>
       </article>
 

@@ -111,3 +111,18 @@ expired leases, and dead-letter count. Redrive tooling must clear a dead-letter
 state explicitly and preserve the previous error in an audit log before
 production use. Event compaction must not delete an event while any registered
 consumer still has non-terminal delivery state.
+
+## Reaction facts
+
+`platform.reactions` stores Helpful, Agree, and Disagree as independent current
+facts with primary key `(actor_id, content_id, reaction_type)`. Public counts
+are derived from the facts; they are social signals, not correctness scores.
+The database rejects self-reactions, inactive Actors, non-published or hidden
+targets, and in-place updates. A target-state command uses `INSERT ... ON
+CONFLICT DO NOTHING` or `DELETE`, while its ActionLog, Outbox event, and
+principal-scoped idempotency result commit in the same transaction.
+
+The AWS runtime role needs exactly `SELECT`, `INSERT`, and `DELETE` on this
+table. Any Reaction schema change must update both `db/aws/runtime-privileges.sql`
+and `db/aws/verify-runtime-privileges.sql`; the release gate fails closed when
+the inventory is stale.
