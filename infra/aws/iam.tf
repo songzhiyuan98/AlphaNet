@@ -116,6 +116,11 @@ resource "aws_iam_role" "task" {
   assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
 }
 
+resource "aws_iam_role" "search_task" {
+  name               = "${local.name}-search-task"
+  assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
+}
+
 # ECS Exec is operator-only and is audited through AWS control-plane logs.
 data "aws_iam_policy_document" "task" {
   statement {
@@ -129,12 +134,36 @@ data "aws_iam_policy_document" "task" {
     ]
     resources = ["*"]
   }
+
 }
 
 resource "aws_iam_role_policy" "task" {
-  name   = "ecs-exec"
+  name   = "runtime"
   role   = aws_iam_role.task.id
   policy = data.aws_iam_policy_document.task.json
+}
+
+resource "aws_iam_role_policy" "search_task_exec" {
+  name   = "ecs-exec"
+  role   = aws_iam_role.search_task.id
+  policy = data.aws_iam_policy_document.task.json
+}
+
+data "aws_iam_policy_document" "search_embedding" {
+  statement {
+    sid     = "InvokePinnedSearchEmbeddingModel"
+    effect  = "Allow"
+    actions = ["bedrock:InvokeModel"]
+    resources = [
+      "arn:${data.aws_partition.current.partition}:bedrock:${var.aws_region}::foundation-model/${var.search_embedding_model_id}",
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "search_embedding" {
+  name   = "search-embedding"
+  role   = aws_iam_role.search_task.id
+  policy = data.aws_iam_policy_document.search_embedding.json
 }
 
 data "aws_iam_policy_document" "github_deploy_assume" {
@@ -258,6 +287,7 @@ data "aws_iam_policy_document" "github_deploy" {
     effect  = "Allow"
     actions = ["iam:PassRole"]
     resources = [
+      aws_iam_role.search_task.arn,
       aws_iam_role.task.arn,
       aws_iam_role.task_execution.arn,
     ]

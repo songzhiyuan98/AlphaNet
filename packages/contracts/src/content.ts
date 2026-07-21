@@ -15,6 +15,10 @@ const encoder = new TextEncoder();
 const utf8ByteLength = (value: string): number => encoder.encode(value).byteLength;
 const unicodeLength = (value: string): number => [...value].length;
 
+export function normalizeContentSearchQuery(value: string): string {
+  return value.normalize("NFKC").replace(/\s+/gu, " ").trim();
+}
+
 const ProjectedPostTitleSchema = z.string().superRefine((title, context) => {
   const length = unicodeLength(title);
   if (length < 5 || length > 200 || title.trim().length === 0) {
@@ -577,7 +581,7 @@ export const SearchContentItemSchema = ContentListProjectionBaseSchema.extend({
     .min(1)
     .refine(uniqueArray, "Matched fields must be unique."),
   score: z.number().finite(),
-  source_preview: z.array(SourcePreviewSchema).max(50),
+  source_preview: z.array(SourcePreviewSchema).max(3),
   references: z.array(ContentReferenceSchema).max(20),
 })
   .strict()
@@ -604,15 +608,26 @@ const searchScopeShape = {
 export const SearchModeSchema = z.enum(["hybrid", "lexical", "semantic"]);
 export const SearchSortSchema = z.enum(["relevance", "latest"]);
 
-export const SearchContentRequestSchema = z
-  .object({
-    query: z
+const SearchContentQuerySchema = z
+  .string()
+  .transform(normalizeContentSearchQuery)
+  .pipe(
+    z
       .string()
-      .min(1)
+      .min(1, "Search query cannot be blank.")
       .refine(
         (query) => unicodeLength(query) <= 4_000,
-        "Search query cannot exceed 4,000 Unicode characters.",
+        "Search query cannot exceed 4,000 normalized Unicode characters.",
+      )
+      .refine(
+        (query) => !query.includes("\u0000"),
+        "Search query cannot contain null characters.",
       ),
+  );
+
+export const SearchContentRequestSchema = z
+  .object({
+    query: SearchContentQuerySchema,
     ...searchScopeShape,
     search_mode: SearchModeSchema.optional(),
     sort: SearchSortSchema.optional(),
@@ -627,13 +642,6 @@ export const SearchContentRequestSchema = z
   })
   .strict()
   .superRefine((request, context) => {
-    if (request.query.trim().length === 0) {
-      context.addIssue({
-        code: "custom",
-        path: ["query"],
-        message: "Search query cannot be blank.",
-      });
-    }
     validateScope(request, context);
     validateTimeRange(request, context);
   });
@@ -679,6 +687,21 @@ export const SearchRankingSnapshotSchema = RankingSnapshotSchema.extend({
   index_as_of: TimestampSchema,
 }).strict();
 
+export const SemanticIndexCoverageSchema = z
+  .object({
+    complete: z.boolean(),
+    unindexed_candidate_count: z.number().int().nonnegative(),
+  })
+  .strict()
+  .superRefine((coverage, context) => {
+    if (coverage.complete !== (coverage.unindexed_candidate_count === 0)) {
+      context.addIssue({
+        code: "custom",
+        message: "Semantic index completeness must match the unindexed count.",
+      });
+    }
+  });
+
 export const SearchContentResponseSchema = z
   .object({
     items: z.array(SearchContentItemSchema),
@@ -686,10 +709,21 @@ export const SearchContentResponseSchema = z
     ranking: SearchRankingSnapshotSchema,
     counts_as_of: TimestampSchema,
     search_execution: SearchExecutionSchema,
-    omitted_since_snapshot: z.number().int().nonnegative().optional(),
+    semantic_index_coverage: SemanticIndexCoverageSchema.optional(),
     ...V1EnvelopeShape,
   })
-  .strict();
+  .strict()
+  .superRefine((response, context) => {
+    const usesSemanticIndex = response.search_execution.effective_mode !== "lexical";
+    if (usesSemanticIndex !== (response.semantic_index_coverage !== undefined)) {
+      context.addIssue({
+        code: "custom",
+        path: ["semantic_index_coverage"],
+        message:
+          "Semantic index coverage is required exactly when Search uses semantic candidates.",
+      });
+    }
+  });
 export type SearchContentResponse = z.infer<typeof SearchContentResponseSchema>;
 
 export const SourceLinkProjectionSchema = z

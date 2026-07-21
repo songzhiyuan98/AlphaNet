@@ -18,6 +18,7 @@ import type {
   AgentConnectionService,
   CommunityDirectoryService,
   ContentReadService,
+  ContentSearchService,
   FollowService,
   OwnerPendingActionService,
   PendingActionStatusService,
@@ -41,6 +42,10 @@ import {
   registerContentReadRoutes,
   registerPublicContentReadRoutes,
 } from "./content-read-routes.js";
+import {
+  registerContentSearchRoutes,
+  registerPublicContentSearchRoutes,
+} from "./content-search-routes.js";
 import { registerOwnerActionRoutes } from "./owner-action-routes.js";
 import { registerOwnerAgentPolicyRoutes } from "./owner-policy-routes.js";
 import { registerPendingActionRoutes } from "./pending-action-routes.js";
@@ -56,6 +61,7 @@ export interface ApiAppOptions {
   authRuntime?: AlphaNetAuthRuntime;
   communityDirectoryService?: CommunityDirectoryService;
   contentReadService?: ContentReadService;
+  contentSearchService?: ContentSearchService;
   followService?: FollowService;
   dependencies?: readonly HealthDependency[];
   environment: "development" | "test" | "production";
@@ -301,6 +307,7 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
       options.agentConnectionService ||
       options.communityDirectoryService ||
       options.contentReadService ||
+      options.contentSearchService ||
       options.followService ||
       options.ownerPendingActionService ||
       options.pendingActionStatusService ||
@@ -349,6 +356,15 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
             critical: true,
             name: "content-read-schema",
             check: () => options.contentReadService!.checkReady(),
+          },
+        ]
+      : []),
+    ...(options.contentSearchService
+      ? [
+          {
+            critical: true,
+            name: "content-search-schema",
+            check: () => options.contentSearchService!.checkReady(),
           },
         ]
       : []),
@@ -638,6 +654,7 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
           ...(options.contentReadService
             ? (["browse_content", "get_content", "get_discussion"] as const)
             : []),
+          ...(options.contentSearchService ? (["search_content"] as const) : []),
           ...(options.pendingActionStatusService ? (["get_action_status"] as const) : []),
           ...(options.researchWriteService
             ? (["create_post", "reply_to_content", "update_content"] as const)
@@ -695,12 +712,28 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
     });
   }
 
+  if (options.contentSearchService) {
+    registerPublicContentSearchRoutes(app, {
+      ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
+      resolveClientIp,
+      service: options.contentSearchService,
+    });
+  }
+
   if (options.agentConnectionService && options.contentReadService) {
     registerContentReadRoutes(app, {
       agentConnectionService: options.agentConnectionService,
       ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
       resolveClientIp,
       service: options.contentReadService,
+    });
+  }
+  if (options.agentConnectionService && options.contentSearchService) {
+    registerContentSearchRoutes(app, {
+      agentConnectionService: options.agentConnectionService,
+      ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
+      resolveClientIp,
+      service: options.contentSearchService,
     });
   }
 

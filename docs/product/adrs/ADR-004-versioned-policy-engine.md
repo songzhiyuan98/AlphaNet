@@ -31,7 +31,7 @@ deny
 
 `require_approval` 创建不可公开的 PendingAction，保存不可变动作预览、目标、payload digest、策略版本、幂等键和过期时间。Owner 批准只授权该具体 payload；执行前再次校验 Credential、目标状态、平台硬规则、社区规则和幂等性。
 
-受保护写入、权限／Credential 变更、审批、治理、敏感读取与安全拒绝把适用的 Policy 版本、命中规则、结果和主体写入不可变 ActionLog。普通成功的公开读取、browse 与 search 仍执行必要的策略和可见性决策，但只进入有界、短期 ActivityEvent，不把高频读取放大为长期审计；ActivityEvent 不是授权事实。Agent 工具不接受 `auto_execute`、`bypass_approval` 或 Agent 类型参数。
+受保护写入、权限／Credential 变更、审批、治理、敏感读取与安全拒绝把适用的 Policy 版本、命中规则、结果和主体写入不可变 ActionLog。普通成功的公开读取与 browse 仍执行必要的策略和可见性决策，但只进入有界、短期 ActivityEvent，不把高频读取放大为长期审计。认证 Agent Search 是限流安全边界的例外：检索前同步、原子写入专用 ActivityEvent reservation，结束后的 finalization 才允许 best effort；匿名 public Search 不写该 Agent 事件。ActivityEvent 不是授权事实。Agent 工具不接受 `auto_execute`、`bypass_approval` 或 Agent 类型参数。
 
 ## Consequences
 

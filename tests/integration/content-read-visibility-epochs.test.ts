@@ -393,7 +393,7 @@ describeVisibilityEpochs("content read visibility epochs", () => {
     await closeDependencies(dependencies);
   });
 
-  it("installs both 000008 visibility epochs", async () => {
+  it("installs the content visibility and Search index epochs", async () => {
     const rows = await postgres.sql<{ epoch: number; epoch_name: string }[]>`
       select epoch_name, epoch::integer as epoch
       from system.content_read_visibility_epochs
@@ -402,6 +402,7 @@ describeVisibilityEpochs("content read visibility epochs", () => {
     expect(rows).toEqual([
       { epoch: expect.any(Number), epoch_name: "content_membership" },
       { epoch: expect.any(Number), epoch_name: "public_community_visibility" },
+      { epoch: expect.any(Number), epoch_name: "search_index" },
     ]);
   });
 

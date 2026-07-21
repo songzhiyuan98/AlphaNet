@@ -1,6 +1,6 @@
 /// <reference lib="dom" />
 
-import type { BrowseContentResponse } from "@alphanet/contracts";
+import type { BrowseContentResponse, SearchContentResponse } from "@alphanet/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const nextHeaders = vi.hoisted(() => ({ read: vi.fn() }));
@@ -11,6 +11,7 @@ import {
   getPublicContent,
   getPublicContentById,
   getPublicDiscussion,
+  searchPublicContent,
 } from "./public-content-api";
 
 function requestUrl(input: RequestInfo | URL): string {
@@ -33,6 +34,31 @@ const emptyBrowseResponse: BrowseContentResponse = {
   counts_as_of: "2026-07-20T20:00:00.000Z",
   request_id: "req_public_content",
   schema_version: "1",
+};
+
+const emptySearchResponse: SearchContentResponse = {
+  counts_as_of: "2026-07-20T20:00:00.000Z",
+  items: [],
+  page: { has_more: false, limit: 20, next_cursor: null },
+  ranking: {
+    as_of: "2026-07-20T20:00:00.000Z",
+    expires_at: "2026-07-20T20:15:00.000Z",
+    index_as_of: "2026-07-20T19:59:00.000Z",
+    ranking_version: "content-search-v1:hybrid",
+    snapshot_id: "search-snapshot",
+  },
+  request_id: "req_public_search",
+  schema_version: "1",
+  search_execution: {
+    degradation_reason: null,
+    degraded: false,
+    effective_mode: "hybrid",
+    requested_mode: "hybrid",
+  },
+  semantic_index_coverage: {
+    complete: true,
+    unindexed_candidate_count: 0,
+  },
 };
 
 beforeEach(() => {
@@ -117,6 +143,47 @@ describe("public Content Web API", () => {
     expect(requestUrl(fetchMock.mock.calls[1]![0])).toContain(
       "/v1/public/content/content%20id/discussion?sort=latest&limit=20&cursor=discussion-cursor",
     );
+  });
+
+  it("posts a structured Content search and signs the exact POST path", async () => {
+    const fetchMock = vi.fn<typeof fetch>(() =>
+      Promise.resolve(Response.json(emptySearchResponse)),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await searchPublicContent({
+      content_types: ["post", "reply"],
+      created_after: "2026-07-01T00:00:00.000Z",
+      limit: 20,
+      query: "Which replies challenge the AMD demand thesis?",
+      scope: "global",
+      search_mode: "hybrid",
+      sort: "relevance",
+      symbols: ["AMD"],
+    });
+
+    expect(result).toEqual({ kind: "success", data: emptySearchResponse });
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(requestUrl(url)).toBe("http://localhost:4000/v1/public/content/search");
+    expect(init?.method).toBe("POST");
+    const requestBody = init?.body;
+    expect(typeof requestBody).toBe("string");
+    if (typeof requestBody !== "string") throw new Error("Expected JSON request body");
+    expect(JSON.parse(requestBody)).toEqual({
+      content_types: ["post", "reply"],
+      created_after: "2026-07-01T00:00:00.000Z",
+      limit: 20,
+      query: "Which replies challenge the AMD demand thesis?",
+      scope: "global",
+      search_mode: "hybrid",
+      sort: "relevance",
+      symbols: ["AMD"],
+    });
+    const requestHeaders = new Headers(init?.headers);
+    expect(requestHeaders.get("content-type")).toBe("application/json");
+    expect(requestHeaders.get("x-alphanet-ssr-forwarded-for")).toBe("198.51.100.25");
+    expect(requestHeaders.get("x-alphanet-ssr-signature")).toBeTruthy();
+    expect(requestHeaders.has("authorization")).toBe(false);
   });
 
   it("fails closed on an invalid response contract", async () => {

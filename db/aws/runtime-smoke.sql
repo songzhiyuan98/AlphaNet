@@ -9,6 +9,81 @@ SELECT current_user = :'runtime_role' AS connected_as_runtime
 
 BEGIN;
 
+DO $runtime_search_boundary$
+BEGIN
+  IF has_function_privilege(
+       current_user,
+       'system.redrive_content_embedding_job(uuid)',
+       'EXECUTE'
+     ) THEN
+    RAISE EXCEPTION
+      'Runtime unexpectedly has embedding dead-letter redrive authority';
+  END IF;
+
+  IF has_function_privilege(
+       current_user,
+       'system.enqueue_content_embedding_job_from_revision()',
+       'EXECUTE'
+     ) THEN
+    RAISE EXCEPTION
+      'Runtime unexpectedly has direct Revision enqueue-trigger authority';
+  END IF;
+
+  IF has_column_privilege(
+       current_user,
+       'platform.content_embedding_chunks',
+       'search_index_created_xid',
+       'INSERT'
+     )
+     OR has_column_privilege(
+       current_user,
+       'platform.content_embedding_chunks',
+       'created_at',
+       'INSERT'
+     ) THEN
+    RAISE EXCEPTION
+      'Runtime can override embedding snapshot identity';
+  END IF;
+
+  IF has_table_privilege(
+       current_user,
+       'system.content_search_candidate_snapshots',
+       'INSERT'
+     )
+     OR has_table_privilege(
+       current_user,
+       'system.content_search_candidate_snapshots',
+       'UPDATE'
+     )
+     OR has_table_privilege(
+       current_user,
+       'system.content_search_candidate_snapshots',
+       'DELETE'
+     ) THEN
+    RAISE EXCEPTION
+      'Runtime can bypass the bounded Search snapshot store function';
+  END IF;
+
+  BEGIN
+    PERFORM system.redrive_content_embedding_job(
+      pg_catalog.gen_random_uuid()
+    );
+    RAISE EXCEPTION
+      'Runtime executed the migration/ops-only embedding redrive function';
+  EXCEPTION
+    WHEN insufficient_privilege THEN NULL;
+  END;
+
+  BEGIN
+    PERFORM system.enqueue_content_embedding_job_from_revision();
+    RAISE EXCEPTION
+      'Runtime directly executed the Revision embedding enqueue trigger';
+  EXCEPTION
+    WHEN insufficient_privilege THEN NULL;
+  END;
+END;
+$runtime_search_boundary$;
+
 SELECT
   pg_catalog.gen_random_uuid()::text AS user_id,
   pg_catalog.gen_random_uuid()::text AS actor_id,
@@ -19,6 +94,11 @@ SELECT
   pg_catalog.gen_random_uuid()::text AS credential_id,
   pg_catalog.gen_random_uuid()::text AS replacement_credential_id,
   pg_catalog.gen_random_uuid()::text AS follow_id,
+  pg_catalog.gen_random_uuid()::text AS search_event_id,
+  'css_' || left(replace(pg_catalog.gen_random_uuid()::text, '-', ''), 32)
+    AS search_snapshot_id,
+  pg_catalog.gen_random_uuid()::text AS search_snapshot_content_id,
+  pg_catalog.gen_random_uuid()::text AS search_snapshot_revision_id,
   pg_catalog.gen_random_uuid()::text AS aggregate_id,
   pg_catalog.gen_random_uuid()::text AS consumer_suffix
 \gset
@@ -289,6 +369,56 @@ WHERE credential.id = :'credential_id'
 
 SET CONSTRAINTS ALL IMMEDIATE;
 
+INSERT INTO platform.agent_search_activity_events (
+  id,
+  request_id,
+  agent_id,
+  actor_id,
+  credential_id,
+  query_hmac,
+  query_key_version,
+  surface,
+  search_mode
+)
+VALUES (
+  :'search_event_id',
+  'req_' || left(replace(:'search_event_id', '-', ''), 32),
+  :'agent_id',
+  :'actor_id',
+  :'replacement_credential_id',
+  public.digest('runtime-smoke-query:' || :'search_event_id', 'sha256'),
+  1,
+  'rest',
+  'hybrid'
+);
+
+UPDATE platform.agent_search_activity_events
+SET outcome = 'succeeded',
+    result_count = 1,
+    latency_ms = 1,
+    fallback_reason_code = 'SEMANTIC_INDEX_NOT_READY'
+WHERE id = :'search_event_id'
+  AND actor_id = :'actor_id'
+  AND outcome = 'started';
+
+SELECT system.store_content_search_candidate_snapshot(
+  :'search_snapshot_id',
+  public.digest('runtime-smoke-binding:' || :'search_snapshot_id', 'sha256'),
+  jsonb_build_array(jsonb_build_object(
+    'content_id', :'search_snapshot_content_id',
+    'revision_id', :'search_snapshot_revision_id',
+    'published_at', '2026-07-21T00:00:00.000Z',
+    'score', 1.0,
+    'matched_fields', jsonb_build_array('body', 'semantic')
+  )),
+  clock_timestamp() + interval '5 minutes'
+) AS search_snapshot_stored
+\gset
+
+SELECT system.purge_expired_content_search_candidate_snapshots(1000)
+  AS expired_search_snapshot_purge_count
+\gset
+
 INSERT INTO system.outbox_events (
   aggregate_type,
   aggregate_id,
@@ -399,6 +529,30 @@ SELECT (
     FROM system.actor_follow_epochs
     WHERE actor_id = :'actor_id'
       AND epoch = 3
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM platform.agent_search_activity_events
+    WHERE id = :'search_event_id'
+      AND actor_id = :'actor_id'
+      AND outcome = 'succeeded'
+      AND result_count = 1
+      AND latency_ms = 1
+      AND fallback_reason_code = 'SEMANTIC_INDEX_NOT_READY'
+      AND finalized_at IS NOT NULL
+      AND expires_at = occurred_at + interval '30 days'
+  )
+  AND :'search_snapshot_stored'::boolean
+  AND :'expired_search_snapshot_purge_count'::integer BETWEEN 0 AND 1000
+  AND EXISTS (
+    SELECT 1
+    FROM system.content_search_candidate_snapshots
+    WHERE snapshot_id = :'search_snapshot_id'
+      AND binding_hmac = public.digest(
+        'runtime-smoke-binding:' || :'search_snapshot_id',
+        'sha256'
+      )
+      AND jsonb_array_length(candidates) = 1
   )
   AND EXISTS (
     SELECT 1

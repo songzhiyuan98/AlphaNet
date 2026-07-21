@@ -338,6 +338,174 @@ resource "aws_cloudwatch_metric_alarm" "valkey_memory" {
   }
 }
 
+locals {
+  search_metric_namespace = "AlphaNet/${title(var.environment)}/Search"
+  search_queue_log_metrics = {
+    dead_lettered_count = { metric_name = "IndexDeadLetteredCount", unit = "Count" }
+    expired_lease_count = { metric_name = "IndexExpiredLeaseCount", unit = "Count" }
+    leased_count        = { metric_name = "IndexLeasedCount", unit = "Count" }
+    oldest_ready_age_seconds = {
+      metric_name = "IndexOldestReadyAgeSeconds"
+      unit        = "Seconds"
+    }
+    ready_count = { metric_name = "IndexReadyCount", unit = "Count" }
+  }
+}
+
+# These filters consume the query-free structured events emitted by API and
+# Worker. No Search query, Content body, prompt, result, credential, or IP is
+# written to a custom metric or used as a dimension.
+resource "aws_cloudwatch_log_metric_filter" "search_queue" {
+  for_each = local.search_queue_log_metrics
+
+  name           = "${local.name}-search-${replace(each.key, "_", "-")}"
+  log_group_name = aws_cloudwatch_log_group.service["worker"].name
+  pattern        = "{ $.event = \"content_search_index_queue\" && $.${each.key} = * }"
+
+  metric_transformation {
+    name          = each.value.metric_name
+    namespace     = local.search_metric_namespace
+    value         = "$.${each.key}"
+    default_value = "0"
+    unit          = each.value.unit
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "search_api_latency" {
+  name           = "${local.name}-search-api-latency"
+  log_group_name = aws_cloudwatch_log_group.service["api"].name
+  pattern        = "{ $.event = \"content_search_request\" && $.outcome = \"succeeded\" && $.latency_ms = * }"
+
+  metric_transformation {
+    name          = "ApiLatencyMilliseconds"
+    namespace     = local.search_metric_namespace
+    value         = "$.latency_ms"
+    default_value = "0"
+    unit          = "Milliseconds"
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "search_api_error" {
+  name           = "${local.name}-search-api-errors"
+  log_group_name = aws_cloudwatch_log_group.service["api"].name
+  pattern        = "{ $.event = \"content_search_request\" && $.outcome = \"failed\" }"
+
+  metric_transformation {
+    name          = "ApiErrorCount"
+    namespace     = local.search_metric_namespace
+    value         = "1"
+    default_value = "0"
+    unit          = "Count"
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "search_api_fallback" {
+  name           = "${local.name}-search-api-fallbacks"
+  log_group_name = aws_cloudwatch_log_group.service["api"].name
+  pattern        = "{ $.event = \"content_search_request\" && $.outcome = \"succeeded\" && $.degraded = true }"
+
+  metric_transformation {
+    name          = "ApiFallbackCount"
+    namespace     = local.search_metric_namespace
+    value         = "1"
+    default_value = "0"
+    unit          = "Count"
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "search_api_rate_limited" {
+  name           = "${local.name}-search-api-rate-limited"
+  log_group_name = aws_cloudwatch_log_group.service["api"].name
+  pattern        = "{ $.event = \"content_search_request\" && $.outcome = \"rate_limited\" }"
+
+  metric_transformation {
+    name          = "ApiRateLimitedCount"
+    namespace     = local.search_metric_namespace
+    value         = "1"
+    default_value = "0"
+    unit          = "Count"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "search_index_oldest_ready" {
+  alarm_name          = "${local.name}-search-index-oldest-ready"
+  alarm_description   = "Search embedding work has remained ready for more than five minutes"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  datapoints_to_alarm = 2
+  threshold           = 300
+  period              = 60
+  statistic           = "Maximum"
+  namespace           = local.search_metric_namespace
+  metric_name         = "IndexOldestReadyAgeSeconds"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.operations.arn]
+  ok_actions          = [aws_sns_topic.operations.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "search_index_dead_lettered" {
+  alarm_name          = "${local.name}-search-index-dead-lettered"
+  alarm_description   = "One or more Search embedding jobs require operator inspection"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  threshold           = 0
+  period              = 60
+  statistic           = "Maximum"
+  namespace           = local.search_metric_namespace
+  metric_name         = "IndexDeadLetteredCount"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.operations.arn]
+  ok_actions          = [aws_sns_topic.operations.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "search_index_expired_leases" {
+  alarm_name          = "${local.name}-search-index-expired-leases"
+  alarm_description   = "Search embedding jobs have expired Worker leases"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  datapoints_to_alarm = 2
+  threshold           = 0
+  period              = 60
+  statistic           = "Maximum"
+  namespace           = local.search_metric_namespace
+  metric_name         = "IndexExpiredLeaseCount"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.operations.arn]
+  ok_actions          = [aws_sns_topic.operations.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "search_api_errors" {
+  alarm_name          = "${local.name}-search-api-errors"
+  alarm_description   = "Content Search is returning elevated application errors"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  datapoints_to_alarm = 2
+  threshold           = 10
+  period              = 300
+  statistic           = "Sum"
+  namespace           = local.search_metric_namespace
+  metric_name         = "ApiErrorCount"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.operations.arn]
+  ok_actions          = [aws_sns_topic.operations.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "search_api_latency" {
+  alarm_name          = "${local.name}-search-api-latency"
+  alarm_description   = "Content Search p95 latency is above five seconds"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  datapoints_to_alarm = 3
+  threshold           = 5000
+  period              = 300
+  extended_statistic  = "p95"
+  namespace           = local.search_metric_namespace
+  metric_name         = "ApiLatencyMilliseconds"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.operations.arn]
+  ok_actions          = [aws_sns_topic.operations.arn]
+}
+
 resource "aws_cloudwatch_dashboard" "main" {
   dashboard_name = local.name
   dashboard_body = jsonencode({
@@ -409,6 +577,43 @@ resource "aws_cloudwatch_dashboard" "main" {
           metrics = [
             ["AWS/ElastiCache", "EngineCPUUtilization", "ReplicationGroupId", aws_cloudformation_stack.valkey.outputs["ReplicationGroupId"], "Role", "Primary"],
             [".", "DatabaseMemoryUsageCountedForEvictPercentage", ".", ".", ".", ".", { yAxis = "right" }],
+          ]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 12
+        width  = 12
+        height = 6
+        properties = {
+          title  = "Content Search index queue"
+          region = var.aws_region
+          period = 60
+          metrics = [
+            [local.search_metric_namespace, "IndexReadyCount", { stat = "Maximum" }],
+            [".", "IndexLeasedCount", { stat = "Maximum" }],
+            [".", "IndexDeadLetteredCount", { stat = "Maximum" }],
+            [".", "IndexExpiredLeaseCount", { stat = "Maximum" }],
+            [".", "IndexOldestReadyAgeSeconds", { stat = "Maximum", yAxis = "right" }],
+          ]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 12
+        width  = 12
+        height = 6
+        properties = {
+          title  = "Content Search API"
+          region = var.aws_region
+          period = 300
+          metrics = [
+            [local.search_metric_namespace, "ApiLatencyMilliseconds", { stat = "p95", yAxis = "right" }],
+            [".", "ApiErrorCount", { stat = "Sum" }],
+            [".", "ApiFallbackCount", { stat = "Sum" }],
+            [".", "ApiRateLimitedCount", { stat = "Sum" }],
           ]
         }
       },

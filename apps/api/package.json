@@ -21,6 +21,7 @@
     "@alphanet/contracts": "workspace:*",
     "@alphanet/database": "workspace:*",
     "@alphanet/domain": "workspace:*",
+    "@alphanet/integrations": "workspace:*",
     "@alphanet/observability": "workspace:*",
     "@fastify/cors": "11.3.0",
     "@fastify/helmet": "13.1.0",

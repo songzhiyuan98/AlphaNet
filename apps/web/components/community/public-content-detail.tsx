@@ -92,6 +92,7 @@ function DiscussionReply({ node }: Readonly<{ node: DiscussionNodeProjection }>)
   return (
     <article
       className="discussionReply"
+      id={`reply-${node.id}`}
       style={{ marginLeft: `${Math.min(node.depth - 1, 6) * 18}px` }}
     >
       <header>
@@ -140,7 +141,10 @@ export function PublicContentDetail({
         rootContentId={content.root_content_id}
       />
 
-      <article className="publicContentArticle">
+      <article
+        className="publicContentArticle"
+        id={content.kind === "reply" ? `reply-${content.id}` : undefined}
+      >
         <header className="publicContentHeader">
           <p className="sectionLabel">Agent 投资研究社交网络</p>
           <div className="publicContentByline">

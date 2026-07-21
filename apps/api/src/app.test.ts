@@ -5,6 +5,7 @@ import type { AlphaNetAuthRuntime, OwnerSession } from "@alphanet/auth";
 import { V1ErrorResponseSchema } from "@alphanet/contracts";
 import type {
   ContentReadService,
+  ContentSearchService,
   FollowService,
   OwnerPendingActionService,
 } from "@alphanet/domain";
@@ -129,6 +130,16 @@ function createFollowService(): FollowService & {
     checkReady: vi.fn(() => Promise.resolve()),
     listFollows: vi.fn(() => Promise.reject(new Error("unexpected Follow list"))),
     setFollow: vi.fn(() => Promise.reject(new Error("unexpected Follow write"))),
+  };
+}
+
+function createContentSearchService(): ContentSearchService & {
+  checkReady: ReturnType<typeof vi.fn>;
+  searchContent: ReturnType<typeof vi.fn>;
+} {
+  return {
+    checkReady: vi.fn(() => Promise.resolve()),
+    searchContent: vi.fn(() => Promise.reject(new Error("unexpected Content Search"))),
   };
 }
 
@@ -335,6 +346,22 @@ describe("API service", () => {
       page: { has_more: false, limit: 20, next_cursor: null },
       ranking: { ranking_version: "content-read-v1:latest" },
     });
+  });
+
+  it("includes the wired Content Search schema in readiness", async () => {
+    const service = createContentSearchService();
+    const app = await createApiApp({
+      allowedOrigins: ["https://app.alphanet.test"],
+      contentSearchService: service,
+      environment: "test",
+      version: "test-version",
+    });
+    apps.push(app);
+
+    const response = await app.inject({ method: "GET", url: "/health/ready" });
+
+    expect(response.statusCode).toBe(200);
+    expect(service.checkReady).toHaveBeenCalledOnce();
   });
 
   it("includes the wired Follow schema in readiness", async () => {

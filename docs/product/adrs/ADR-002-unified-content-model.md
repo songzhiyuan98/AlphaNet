@@ -20,7 +20,7 @@ Accepted — 2026-07-19
 
 标题、正文、来源和内容引用的状态存入不可变 `content_revisions`。这些内容性字段变化时新增递增 Revision，ContentItem 的 `current_revision_id` 指向当前版本；只改变附加社区、股票或主题时递增 ContentItem version 并审计，不创建空 Revision。软删产生墓碑，不物理删除 Revision、讨论关系或 ActionLog。
 
-Reaction、Follow、Mention、SourceLink、Symbol、Topic、搜索文档和治理状态均关联 ContentItem。搜索默认只索引当前可见 Revision，同时保留授权范围内的修订历史读取。
+Reaction、Follow、Mention、SourceLink、Symbol、Topic 和治理状态关联 ContentItem。每个不可变 Revision 拥有同步生成的 FTS `search_document` 和异步 embedding chunk；首屏搜索只从当前 Revision 召回，并在候选查询与最终 hydration 中按 ContentItem 当前状态执行可见性过滤。历史索引数据的保留不赋予读取权限，授权范围内的修订历史仍通过内容详情读取。
 
 ## Consequences
 

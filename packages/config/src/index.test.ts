@@ -35,6 +35,12 @@ describe("environment parsing", () => {
 
     expect(result.WORKER_BATCH_SIZE).toBe(42);
     expect(result.RUN_ONCE).toBe(false);
+    expect(result.SEARCH_EMBEDDING_PROVIDER).toBe("disabled");
+    expect(result.SEARCH_EMBEDDING_MODEL_ID).toBe("amazon.titan-embed-text-v2:0");
+    expect(result.SEARCH_EMBEDDING_DIMENSIONS).toBe(512);
+    expect(result.SEARCH_EMBEDDING_TIMEOUT_MS).toBe(5_000);
+    expect(result.SEARCH_INDEX_BATCH_SIZE).toBe(10);
+    expect(result.SEARCH_INDEX_LEASE_SECONDS).toBe(60);
   });
 
   it("does not require Redis for the PostgreSQL polling worker", () => {
@@ -44,6 +50,35 @@ describe("environment parsing", () => {
     });
 
     expect(result.DATABASE_URL).toBe(baseEnvironment.DATABASE_URL);
+  });
+
+  it("keeps the worker lease bound aligned with the Search indexer", () => {
+    expect(
+      loadWorkerEnvironment({
+        ...baseEnvironment,
+        SEARCH_INDEX_LEASE_SECONDS: "15",
+      }).SEARCH_INDEX_LEASE_SECONDS,
+    ).toBe(15);
+    expect(() =>
+      loadWorkerEnvironment({
+        ...baseEnvironment,
+        SEARCH_INDEX_LEASE_SECONDS: "14",
+      }),
+    ).toThrow(EnvironmentValidationError);
+    expect(() =>
+      loadWorkerEnvironment({
+        ...baseEnvironment,
+        SEARCH_EMBEDDING_TIMEOUT_MS: "10000",
+        SEARCH_INDEX_LEASE_SECONDS: "15",
+      }),
+    ).toThrow(EnvironmentValidationError);
+    expect(
+      loadWorkerEnvironment({
+        ...baseEnvironment,
+        SEARCH_EMBEDDING_TIMEOUT_MS: "10000",
+        SEARCH_INDEX_LEASE_SECONDS: "16",
+      }).SEARCH_INDEX_LEASE_SECONDS,
+    ).toBe(16);
   });
 
   it("requires a versioned outbox consumer and a stable replay watermark", () => {
@@ -98,6 +133,34 @@ describe("environment parsing", () => {
     expect(result.PENDING_ACTION_ENCRYPTION_KEY).toMatch(/^[0-9a-f]{64}$/);
     expect(result.PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS).toEqual({});
     expect(result.COMMUNITY_CURSOR_SIGNING_KEY).toHaveLength(40);
+    expect(result.SEARCH_EMBEDDING_PROVIDER).toBe("disabled");
+    expect(result.SEARCH_EMBEDDING_MODEL_ID).toBe("amazon.titan-embed-text-v2:0");
+    expect(result.SEARCH_EMBEDDING_DIMENSIONS).toBe(512);
+    expect(result.SEARCH_EMBEDDING_TIMEOUT_MS).toBe(5_000);
+  });
+
+  it("loads bounded Bedrock Search configuration and rejects unsupported dimensions", () => {
+    const configured = loadApiEnvironment({
+      ...baseEnvironment,
+      SEARCH_EMBEDDING_PROVIDER: "bedrock",
+      SEARCH_EMBEDDING_TIMEOUT_MS: "2500",
+    });
+
+    expect(configured.SEARCH_EMBEDDING_PROVIDER).toBe("bedrock");
+    expect(configured.SEARCH_EMBEDDING_TIMEOUT_MS).toBe(2_500);
+
+    expect(() =>
+      loadApiEnvironment({
+        ...baseEnvironment,
+        SEARCH_EMBEDDING_DIMENSIONS: "1024",
+      }),
+    ).toThrow(EnvironmentValidationError);
+    expect(() =>
+      loadApiEnvironment({
+        ...baseEnvironment,
+        SEARCH_EMBEDDING_MODEL_ID: "amazon.titan-embed-text-v1",
+      }),
+    ).toThrow(EnvironmentValidationError);
   });
 
   it("loads a bounded previous Agent API key pepper ring", () => {

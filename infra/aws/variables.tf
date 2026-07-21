@@ -33,6 +33,17 @@ variable "aws_region" {
   }
 }
 
+variable "search_embedding_model_id" {
+  description = "Pinned Amazon Bedrock embedding model used for semantic Content Search."
+  type        = string
+  default     = "amazon.titan-embed-text-v2:0"
+
+  validation {
+    condition     = var.search_embedding_model_id == "amazon.titan-embed-text-v2:0"
+    error_message = "The MVP Search index is dimensioned for amazon.titan-embed-text-v2:0."
+  }
+}
+
 variable "vpc_cidr" {
   description = "Private address space. A /16 leaves room for in-place service growth."
   type        = string
@@ -358,7 +369,7 @@ variable "mcp_additional_allowed_hosts" {
 variable "outbox_consumer_name" {
   description = "Immutable outbox subscription name."
   type        = string
-  default     = "alphanet-worker:v1"
+  default     = "alphanet-worker:v2"
 }
 
 variable "outbox_replay_from" {

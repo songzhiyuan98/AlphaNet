@@ -213,9 +213,30 @@ describe("content browse and search requests", () => {
     expect(
       SearchContentRequestSchema.safeParse({
         ...request,
+        query: "ﬁ".repeat(2_001),
+      }).success,
+    ).toBe(false);
+    expect(
+      SearchContentRequestSchema.safeParse({
+        ...request,
         community_ids: ["com_1", "com_1"],
       }).success,
     ).toBe(false);
+  });
+
+  it("normalizes Search queries before applying the Unicode length contract", () => {
+    const request = {
+      query: `  AMD${" \n\t".repeat(2_000)}ﬁ risk  `,
+      scope: "global",
+    } as const;
+
+    expect(SearchContentRequestSchema.parse(request).query).toBe("AMD fi risk");
+    expect(
+      SearchContentRequestSchema.parse({
+        ...request,
+        query: "ﬁ".repeat(2_000),
+      }).query,
+    ).toBe("fi".repeat(2_000));
   });
 });
 
@@ -294,6 +315,14 @@ describe("canonical list projections", () => {
         score: 1,
         source_preview: [],
         references: [],
+      }).success,
+    ).toBe(false);
+    expect(
+      SearchContentItemSchema.safeParse({
+        ...replyItem,
+        source_preview: Array.from({ length: 4 }, (_value, index) => ({
+          url: `https://evidence.example/source-${index}`,
+        })),
       }).success,
     ).toBe(false);
   });

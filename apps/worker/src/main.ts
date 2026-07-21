@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
-import { setTimeout as delay } from "node:timers/promises";
 
 import { loadWorkerEnvironment } from "@alphanet/config";
 import {
@@ -9,12 +8,20 @@ import {
   PostgresOutboxRepository,
 } from "@alphanet/database";
 import {
+  BedrockTitanV2EmbeddingProvider,
   PostgresPendingActionExecutionRepository,
   PostgresResearchWriteService,
+  SearchIndexer,
 } from "@alphanet/domain";
+import { AwsBedrockInvokeModelTransport } from "@alphanet/integrations";
 import { createLogger } from "@alphanet/observability";
 
+import { ContentSearchSnapshotMaintenance } from "./content-search-snapshot-maintenance.js";
 import { PendingActionWorker } from "./pending-action-worker.js";
+import {
+  runSupervisedWorkerLoops,
+  type SupervisedWorkerLoop,
+} from "./supervised-worker-loops.js";
 import { OutboxWorker, type OutboxHandler } from "./worker.js";
 
 async function start(): Promise<void> {
@@ -26,6 +33,18 @@ async function start(): Promise<void> {
   });
   const postgres = createPostgresDependency(environment.DATABASE_URL);
   const dependencies = [postgres];
+  const bedrockTransport =
+    environment.SEARCH_EMBEDDING_PROVIDER === "bedrock"
+      ? new AwsBedrockInvokeModelTransport()
+      : null;
+  const searchEmbeddingProvider = bedrockTransport
+    ? new BedrockTitanV2EmbeddingProvider(bedrockTransport, {
+        dimensions: environment.SEARCH_EMBEDDING_DIMENSIONS,
+        modelId: environment.SEARCH_EMBEDDING_MODEL_ID,
+        normalize: true,
+        timeoutMilliseconds: environment.SEARCH_EMBEDDING_TIMEOUT_MS,
+      })
+    : null;
 
   try {
     await postgres.check();
@@ -35,7 +54,26 @@ async function start(): Promise<void> {
       postgres.sql,
       environment.OUTBOX_CONSUMER_NAME,
     );
+    const searchIndexer = searchEmbeddingProvider
+      ? new SearchIndexer(postgres.sql, searchEmbeddingProvider, {
+          embeddingModel: `${environment.SEARCH_EMBEDDING_MODEL_ID}:${environment.SEARCH_EMBEDDING_DIMENSIONS}`,
+          leaseMilliseconds: environment.SEARCH_INDEX_LEASE_SECONDS * 1_000,
+          providerTimeoutMilliseconds: environment.SEARCH_EMBEDDING_TIMEOUT_MS,
+          queryTimeoutMilliseconds: Math.min(
+            environment.SEARCH_EMBEDDING_TIMEOUT_MS,
+            10_000,
+          ),
+        })
+      : null;
     const handlers = new Map<string, OutboxHandler>();
+    if (searchIndexer) {
+      const enqueueForSearch: OutboxHandler = async (event) => ({
+        accepted: await searchIndexer.enqueueOutboxEvent(event),
+      });
+      handlers.set("content.published", enqueueForSearch);
+      handlers.set("content.reply", enqueueForSearch);
+      handlers.set("content.revised", enqueueForSearch);
+    }
     const worker = new OutboxWorker({
       batchSize: environment.WORKER_BATCH_SIZE,
       beforeClaim: () => postgres.check(),
@@ -70,27 +108,155 @@ async function start(): Promise<void> {
     );
     await researchWriter.checkReady();
     await pendingActionRepository.checkReady();
+    if (searchIndexer) {
+      await searchIndexer.checkReady();
+      await searchIndexer.backfillMissingRevisions();
+    }
     const pendingActionWorker = new PendingActionWorker({
       batchSize: environment.WORKER_BATCH_SIZE,
       executor: researchWriter,
       logger,
       repository: pendingActionRepository,
     });
+    const contentSearchSnapshotMaintenance = new ContentSearchSnapshotMaintenance({
+      logger,
+      sql: postgres.sql,
+    });
     const abortController = new AbortController();
+    let nextSearchQueueObservationAt = 0;
 
-    const runOnce = async () => {
-      // Recheck the privacy-critical PostgreSQL runtime setting before either
-      // worker can claim unpublished commands or public Outbox data.
+    const runCoreOnce = async () => {
+      // Recheck the privacy-critical PostgreSQL runtime setting before the
+      // core loop can claim unpublished commands or public Outbox data.
       await postgres.check();
-      const [outboxCount, pendingActionCount] = await Promise.all([
+      const [
+        outboxCount,
+        pendingActionCount,
+        reconciledSearchEvents,
+        purgedSearchEvents,
+        purgedCandidateSnapshots,
+      ] = await Promise.all([
         worker.runOnce(),
         pendingActionWorker.runOnce(),
+        postgres.sql<{ reconciled: number }[]>`
+          with stale as (
+            select
+              event.id,
+              least(
+                300000::numeric,
+                greatest(
+                  0::numeric,
+                  floor(extract(epoch from (
+                    statement_timestamp() - event.occurred_at
+                  )) * 1000)
+                )
+              )::integer as latency_ms
+            from platform.agent_search_activity_events as event
+            where event.outcome = 'started'
+              and event.occurred_at < statement_timestamp() - interval '5 minutes'
+              and event.expires_at > statement_timestamp()
+            order by event.occurred_at, event.id
+            for update skip locked
+            limit 1000
+          ), reconciled as (
+            update platform.agent_search_activity_events as event
+            set outcome = 'failed',
+                result_count = null,
+                latency_ms = stale.latency_ms,
+                fallback_reason_code = 'FINALIZATION_RECONCILED'
+            from stale
+            where event.id = stale.id
+              and event.outcome = 'started'
+            returning event.id
+          )
+          select count(*)::integer as reconciled from reconciled
+        `,
+        postgres.sql<{ purged: number }[]>`
+          select platform.purge_expired_agent_search_activity_events(1000) as purged
+        `,
+        contentSearchSnapshotMaintenance.runOnce(),
       ]);
-      return outboxCount + pendingActionCount;
+      return (
+        outboxCount +
+        pendingActionCount +
+        (reconciledSearchEvents[0]?.reconciled ?? 0) +
+        (purgedSearchEvents[0]?.purged ?? 0) +
+        purgedCandidateSnapshots
+      );
     };
 
+    const loops: SupervisedWorkerLoop[] = [{ name: "core", runOnce: runCoreOnce }];
+    if (searchIndexer) {
+      const indexer = searchIndexer;
+      loops.push({
+        name: "search-index",
+        runOnce: async (signal) => {
+          await postgres.check();
+          const observeSearchQueue = Date.now() >= nextSearchQueueObservationAt;
+          if (observeSearchQueue) {
+            nextSearchQueueObservationAt = Date.now() + 60_000;
+          }
+          const [searchIndexRun, searchQueueMetrics] = await Promise.all([
+            indexer.runOnce(leaseOwner, {
+              batchSize: environment.SEARCH_INDEX_BATCH_SIZE,
+              signal,
+            }),
+            observeSearchQueue
+              ? indexer.inspectQueue().catch((error: unknown) => {
+                  logger.warn(
+                    {
+                      errorName: error instanceof Error ? error.name : "UnknownError",
+                      event: "content_search_index_queue_observation",
+                      outcome: "failed",
+                    },
+                    "Search index queue observation failed",
+                  );
+                  return null;
+                })
+              : Promise.resolve(null),
+          ]);
+          if (searchQueueMetrics) {
+            logger.info(
+              {
+                dead_lettered_count: searchQueueMetrics.deadLetteredCount,
+                event: "content_search_index_queue",
+                expired_lease_count: searchQueueMetrics.expiredLeaseCount,
+                leased_count: searchQueueMetrics.leasedCount,
+                oldest_ready_age_seconds: searchQueueMetrics.oldestReadyAgeSeconds,
+                ready_count: searchQueueMetrics.readyCount,
+              },
+              "Search index queue gauges",
+            );
+          }
+          if (searchIndexRun.claimed > 0) {
+            logger.info(
+              {
+                claimed_count: searchIndexRun.claimed,
+                completed_count: searchIndexRun.completed,
+                event: "content_search_index_batch",
+                failed_count: searchIndexRun.failed,
+              },
+              "Search indexing batch completed",
+            );
+          }
+          if (searchIndexRun.failed > 0) {
+            logger.warn(
+              {
+                claimed: searchIndexRun.claimed,
+                completed: searchIndexRun.completed,
+                event: "content_search_index_batch_failure",
+                failed: searchIndexRun.failed,
+              },
+              "Search indexing batch completed with failures",
+            );
+          }
+          return searchIndexRun.claimed;
+        },
+      });
+    }
+
     const shutdown = (signal: string) => {
-      logger.info({ signal }, "stopping outbox polling");
+      logger.info({ signal }, "stopping Worker polling loops");
       abortController.abort();
     };
     process.once("SIGINT", () => {
@@ -100,26 +266,14 @@ async function start(): Promise<void> {
       shutdown("SIGTERM");
     });
 
-    if (environment.RUN_ONCE) {
-      await runOnce();
-      return;
-    }
-
-    while (!abortController.signal.aborted) {
-      const claimed = await runOnce();
-      if (claimed === 0) {
-        try {
-          await delay(environment.WORKER_POLL_INTERVAL_MS, undefined, {
-            signal: abortController.signal,
-          });
-        } catch (error) {
-          if (!abortController.signal.aborted) {
-            throw error;
-          }
-        }
-      }
-    }
+    await runSupervisedWorkerLoops({
+      abortController,
+      loops,
+      pollIntervalMilliseconds: environment.WORKER_POLL_INTERVAL_MS,
+      runOnce: environment.RUN_ONCE,
+    });
   } finally {
+    bedrockTransport?.destroy();
     await closeDependencies(dependencies);
   }
 }

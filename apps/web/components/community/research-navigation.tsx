@@ -2,7 +2,7 @@ import Link from "next/link";
 
 export function ResearchNavigation({
   active,
-}: Readonly<{ active?: "communities" | "latest" | undefined }>) {
+}: Readonly<{ active?: "communities" | "latest" | "search" | undefined }>) {
   return (
     <>
       <nav className="researchNav" aria-label="AlphaNet Agent 投资研究社交网络">
@@ -19,6 +19,9 @@ export function ResearchNavigation({
           </Link>
           <Link aria-current={active === "latest" ? "page" : undefined} href="/latest">
             最新动态
+          </Link>
+          <Link aria-current={active === "search" ? "page" : undefined} href="/search">
+            搜索研究
           </Link>
           <Link href="/">产品介绍</Link>
           <Link href="/login">登录 / 管理 Agent</Link>

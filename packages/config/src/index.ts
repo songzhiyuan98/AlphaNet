@@ -11,6 +11,8 @@ const LocalDevelopmentCommunityCursorSigningKey =
   "C4p8Vw2nR7xL9mQ3sT6yH1kD5fJ0aB8uE2zN7gS4";
 const LocalDevelopmentSsrInternalRequestSecret =
   "L8wq2Uox9sV7Gm1Xc4Kd6aJ0Ph5Rt3NyE1bZfQ7i";
+const TitanTextEmbedV2ModelId = "amazon.titan-embed-text-v2:0";
+const SearchIndexDatabaseMarginMilliseconds = 5_000;
 
 const CommonServiceEnvironmentSchema = z.object({
   NODE_ENV: NodeEnvironmentSchema.default("development"),
@@ -252,6 +254,20 @@ const PendingActionCryptoEnvironmentFields = {
   PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS: PendingActionPreviousKeyRingSchema.default({}),
 } satisfies z.ZodRawShape;
 
+const SearchEmbeddingEnvironmentFields = {
+  SEARCH_EMBEDDING_PROVIDER: z.enum(["disabled", "bedrock"]).default("disabled"),
+  SEARCH_EMBEDDING_MODEL_ID: z
+    .literal(TitanTextEmbedV2ModelId)
+    .default(TitanTextEmbedV2ModelId),
+  SEARCH_EMBEDDING_DIMENSIONS: z.coerce.number().pipe(z.literal(512)).default(512),
+  SEARCH_EMBEDDING_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .min(250)
+    .max(30_000)
+    .default(5_000),
+} satisfies z.ZodRawShape;
+
 type PendingActionCryptoValidationTarget = {
   NODE_ENV: z.infer<typeof NodeEnvironmentSchema>;
   PENDING_ACTION_ENCRYPTION_KEY: string;
@@ -483,6 +499,7 @@ export const ApiEnvironmentSchema = CommonServiceEnvironmentSchema.extend({
   ...AuthEnvironmentFields,
   ...AgentCredentialEnvironmentFields,
   ...PendingActionCryptoEnvironmentFields,
+  ...SearchEmbeddingEnvironmentFields,
   API_TRUSTED_PROXY_CIDRS: TrustedProxyListSchema,
   COMMUNITY_CURSOR_SIGNING_KEY: AuthSecretSchema.default(
     LocalDevelopmentCommunityCursorSigningKey,
@@ -634,6 +651,7 @@ export type McpEnvironment = z.infer<typeof McpEnvironmentSchema>;
 
 export const WorkerEnvironmentSchema = CommonServiceEnvironmentSchema.extend({
   ...PendingActionCryptoEnvironmentFields,
+  ...SearchEmbeddingEnvironmentFields,
   DATABASE_URL: UrlSchema,
   OUTBOX_CONSUMER_NAME: z
     .string()
@@ -648,6 +666,8 @@ export const WorkerEnvironmentSchema = CommonServiceEnvironmentSchema.extend({
     .transform((value) => new Date(value)),
   WORKER_POLL_INTERVAL_MS: z.coerce.number().int().min(100).max(60_000).default(1000),
   WORKER_BATCH_SIZE: z.coerce.number().int().min(1).max(100).default(20),
+  SEARCH_INDEX_BATCH_SIZE: z.coerce.number().int().min(1).max(100).default(10),
+  SEARCH_INDEX_LEASE_SECONDS: z.coerce.number().int().min(15).max(600).default(60),
   RUN_ONCE: z
     .enum(["true", "false"])
     .default("false")
@@ -655,6 +675,17 @@ export const WorkerEnvironmentSchema = CommonServiceEnvironmentSchema.extend({
 }).superRefine((value, context) => {
   validatePendingActionCryptoEnvironment(value, context);
   validateProductionPostgresTransport(value, context);
+  if (
+    value.SEARCH_INDEX_LEASE_SECONDS * 1_000 <=
+    value.SEARCH_EMBEDDING_TIMEOUT_MS + SearchIndexDatabaseMarginMilliseconds
+  ) {
+    context.addIssue({
+      code: "custom",
+      message:
+        "must exceed SEARCH_EMBEDDING_TIMEOUT_MS plus the 5000 ms database completion margin",
+      path: ["SEARCH_INDEX_LEASE_SECONDS"],
+    });
+  }
 });
 export type WorkerEnvironment = z.infer<typeof WorkerEnvironmentSchema>;
 

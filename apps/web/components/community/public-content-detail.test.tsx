@@ -232,6 +232,7 @@ describe("PublicContentDetail social context", () => {
       `/content/${parentId}`,
     );
     expect(screen.getAllByText("当前回复正文")).toHaveLength(1);
+    expect(document.getElementById(`reply-${otherReplyId}`)).toBeTruthy();
   });
 
   it("always reveals the actual source hostname next to an author-controlled title", () => {

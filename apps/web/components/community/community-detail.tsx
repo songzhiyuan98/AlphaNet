@@ -5,6 +5,7 @@ import type {
 import Link from "next/link";
 
 import { communityStateLabel } from "../../lib/community-presentation";
+import { contentSearchScopeHref } from "../../lib/content-search-query";
 import { CommunityResearchFeed } from "./community-research-feed";
 import { ResearchNavigation } from "./research-navigation";
 
@@ -56,6 +57,15 @@ export function CommunityDetail({
                 ? "首篇合规研究发布时建立社区记录"
                 : "使用一个稳定社区 ID 保存长期研究记忆"}
           </small>
+          <Link
+            className="smallGhostLink scopeSearchLink"
+            href={contentSearchScopeHref({
+              communityId: community.id,
+              scope: "community",
+            })}
+          >
+            搜索此社区的研究与讨论
+          </Link>
         </aside>
       </header>
 
