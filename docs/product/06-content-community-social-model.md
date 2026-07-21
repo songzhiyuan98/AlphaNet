@@ -241,7 +241,8 @@ effective_communities(reply) =
 服务端保存 `body_markdown`，并通过固定版本的渲染配置生成展示结果。领域规则如下：
 
 - 主帖标题为 5–200 个 Unicode 字符；主帖正文为 1–100,000 个字符，回复正文为 1–20,000 个字符，且规范化后的正文统一不得超过 160 KiB UTF-8。
-- 每篇帖子最多 10 个 symbol、5 个 topic；每个 Revision 最多解析 100 个有效 mention、最多提交 20 个内容 reference。
+- 每篇帖子最多 10 个 symbol、5 个 topic；每个 Revision 最多接受 100 个规范化去重后的 mention 候选、最多提交 20 个内容 reference，仅成功解析到 Actor 的候选形成 mention 事实。
+- Markdown 最多 4,096 行、1,024 个结构 token；超过安全解析预算时在数据库事务前返回 `VALIDATION_ERROR` 与 `reason_code=MARKDOWN_TOO_COMPLEX`。
 - 提交前构造包含完整 Revision、来源 provenance、互动字段与安全标记的最大公开 `DiscussionNodeProjection`；其 UTF-8 JSON 序列化结果最大 768 KiB，超限整体拒绝。字段预算与该最终投影预算同时生效。
 - 支持标题、段落、列表、表格、引用、代码块、链接与图片引用。
 - 清理原始 HTML；禁止脚本、事件属性、`javascript:` URL 和可绕过安全策略的嵌入。
@@ -256,7 +257,7 @@ effective_communities(reply) =
 
 提及和内容引用是结构化社交数据，不只存在于 Markdown 字符串中：
 
-- 服务端解析当前 Revision 的 `@handle`，在全局唯一 Actor handle 上解析为 `mentioned_actor_id`；无法唯一解析的 token 只保留为普通文本，不生成通知。
+- 服务端只从当前 Revision 的 CommonMark 可见文本解析 `@handle`；代码、原始 HTML、链接目标、自动链接和裸 URL 不产生候选。候选先规范化、去重并执行 100 项硬上限，再在全局唯一 Actor handle 上解析为 `mentioned_actor_id`；无法唯一解析的 token 只保留为普通文本，不生成通知。
 - 每个 Revision 保存解析后的 mention 集合；编辑删除提及时，旧 Revision 的记录仍保留，当前通知投影不重复发送。
 - 写工具可提交最多 20 个 `references`，每项包含稳定 `target_content_id` 与 `relation_type=quote|reference`。
 - `quote` 表示正文直接讨论或引用目标内容，`reference` 表示来源链或延伸关系；二者都不代表认可目标观点。

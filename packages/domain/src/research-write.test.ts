@@ -759,6 +759,41 @@ describe("PostgresResearchWriteService", () => {
     expect(repository.finalizeSucceeded).not.toHaveBeenCalled();
   });
 
+  it.each(["post", "reply"] as const)(
+    "invalidates a legacy approved %s whose frozen Markdown exceeds the mention bound",
+    async (kind) => {
+      const harness = new SqlHarness({ authTier: "assisted" });
+      const keyRing: PendingCommandKeyRing = {
+        currentVersion: 1,
+        keys: { 1: randomBytes(32) },
+      };
+      const bodyMarkdown = Array.from(
+        { length: 101 },
+        (_, index) => `@legacy-${index.toString(36).padStart(2, "0")}`,
+      ).join(" ");
+      const command =
+        kind === "post"
+          ? normalizeCreatePostCommand(postInput({ bodyMarkdown }))
+          : normalizeReplyCommand({ bodyMarkdown, parentContentId });
+      const fixture = approvedExecutionFixture(keyRing, command);
+      const repository = approvedExecutionRepository(harness, fixture.frozenAction);
+      const writer = new PostgresResearchWriteService(harness.sql, {
+        idFactory: idFactory(),
+        pendingActionKeyRing: keyRing,
+      });
+
+      await expect(
+        writer.executeApprovedAction(repository, fixture.claim),
+      ).rejects.toMatchObject({
+        code: "APPROVED_ACTION_CONTEXT_INVALID",
+        disposition: "invalidate",
+      } satisfies Partial<ApprovedResearchExecutionError>);
+      expect(hasSql(harness, "lower(actor.handle::text) as handle")).toBe(false);
+      expect(hasSql(harness, "insert into platform.content_items")).toBe(false);
+      expect(repository.finalizeSucceeded).not.toHaveBeenCalled();
+    },
+  );
+
   it("publishes an Owner-approved reply with its frozen discussion identity", async () => {
     const harness = new SqlHarness({ authTier: "assisted" });
     const keyRing: PendingCommandKeyRing = {
@@ -1788,6 +1823,116 @@ describe("PostgresResearchWriteService", () => {
       result: null,
     });
     expect(harness.transactionCount).toBe(0);
+  });
+
+  it.each(["autonomous", "assisted"] as const)(
+    "rejects an adversarial %s post mention set before opening a transaction",
+    async (tier) => {
+      const harness = new SqlHarness({ authTier: tier });
+      const bodyMarkdown = Array.from(
+        { length: 10_000 },
+        (_, index) => `@a${index.toString(36).padStart(3, "0")}`,
+      ).join(" ");
+
+      const result = await service(harness).createPost(
+        agentContext(tier),
+        postInput({ bodyMarkdown, idempotencyKey: `mentions-${tier}` }),
+        { requestId: `req-mentions-${tier}` },
+      );
+
+      expect(result).toMatchObject({
+        decision: tier === "assisted" ? "require_approval" : "allow",
+        status: "failed",
+        error: {
+          code: "VALIDATION_ERROR",
+          details: { field: "body_markdown" },
+        },
+        pendingAction: null,
+        result: null,
+      });
+      expect(harness.transactionCount).toBe(0);
+      expect(harness.queries).toEqual([]);
+    },
+  );
+
+  it("applies the same bounded mention validation to replies", async () => {
+    const harness = new SqlHarness();
+    const bodyMarkdown = Array.from(
+      { length: 101 },
+      (_, index) => `@reply-${index.toString(36).padStart(2, "0")}`,
+    ).join(" ");
+
+    const result = await service(harness).replyToContent(
+      agentContext("autonomous"),
+      {
+        parentContentId,
+        bodyMarkdown,
+        idempotencyKey: "reply-v1",
+      },
+      { requestId: "req-reply-mentions" },
+    );
+
+    expect(result).toMatchObject({
+      decision: "allow",
+      status: "failed",
+      error: {
+        code: "VALIDATION_ERROR",
+        details: { field: "body_markdown" },
+      },
+    });
+    expect(harness.transactionCount).toBe(0);
+    expect(harness.queries).toEqual([]);
+  });
+
+  it("never sends more than 100 canonical mention candidates to PostgreSQL", async () => {
+    const harness = new SqlHarness();
+    const bodyMarkdown = Array.from(
+      { length: 100 },
+      (_, index) => `@candidate-${index.toString(36).padStart(2, "0")}`,
+    ).join(" ");
+
+    const result = await service(harness).createPost(
+      agentContext("autonomous"),
+      postInput({ bodyMarkdown, idempotencyKey: "mentions-at-limit" }),
+      { requestId: "req-mentions-at-limit" },
+    );
+
+    expect(result.status).toBe("succeeded");
+    const lookup = harness.queries.find((query) =>
+      query.text.includes("lower(actor.handle::text) as handle"),
+    );
+    expect(lookup?.values[0]).toEqual(
+      Array.from(
+        { length: 100 },
+        (_, index) => `candidate-${index.toString(36).padStart(2, "0")}`,
+      ),
+    );
+  });
+
+  it("rejects structurally pathological Markdown before opening a transaction", async () => {
+    const harness = new SqlHarness();
+
+    const result = await service(harness).createPost(
+      agentContext("autonomous"),
+      postInput({
+        bodyMarkdown: "<x\n".repeat(4_100),
+        idempotencyKey: "markdown-complexity-v1",
+      }),
+      { requestId: "req-markdown-complexity" },
+    );
+
+    expect(result).toMatchObject({
+      status: "failed",
+      error: {
+        code: "VALIDATION_ERROR",
+        details: {
+          field: "body_markdown",
+          reason_code: "MARKDOWN_TOO_COMPLEX",
+        },
+      },
+    });
+    expect(harness.transactionCount).toBe(0);
+    expect(harness.queries).toEqual([]);
   });
 
   it("inherits all root Communities and rejects a reply when any closes discussion", async () => {

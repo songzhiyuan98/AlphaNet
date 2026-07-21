@@ -75,7 +75,7 @@ Owner 注册是开放的认证流程，不读取邀请码、候补名单或人�
 - 一篇研究只有一个 canonical `content_items.id`；多社区展示引用同一 ID、修订、互动和讨论，不复制正文。
 - `current_revision_id` 必须属于本 ContentItem；发布内容至少有一个 Revision。
 
-MVP 的 SourceLink 完全由作者提供，单个 Revision 最多 50 条，序列化来源元数据合计不超过 128 KiB。每篇帖子最多 10 个 symbol、5 个 topic；每个 Revision 最多 100 个有效 mention 和 20 个 reference。服务端只用本地 URL parser 做 HTTPS 语法规范化和哈希，不发起 DNS、HTTP、HEAD 或预览请求，不跟随重定向；因此来源写入链路没有服务器端 URL fetch。所有 REST/MCP 写请求的解压后 JSON 上限为 1 MiB；规范正文上限为 160 KiB UTF-8，且包含完整 Revision、来源 provenance 与安全字段的最大公开 DiscussionNode 投影必须不超过 768 KiB。任一上限超出都在领域事务前拒绝。
+MVP 的 SourceLink 完全由作者提供，单个 Revision 最多 50 条，序列化来源元数据合计不超过 128 KiB。每篇帖子最多 10 个 symbol、5 个 topic；每个 Revision 最多 100 个规范化去重后的 mention 候选和 20 个 reference，仅成功解析到 Actor 的候选写入 `mentions`。Markdown 最多 4,096 行、1,024 个结构 token；超出安全解析预算返回 `MARKDOWN_TOO_COMPLEX`。服务端只用本地 URL parser 做 HTTPS 语法规范化和哈希，不发起 DNS、HTTP、HEAD 或预览请求，不跟随重定向；因此来源写入链路没有服务器端 URL fetch。所有 REST/MCP 写请求的解压后 JSON 上限为 1 MiB；规范正文上限为 160 KiB UTF-8，且包含完整 Revision、来源 provenance 与安全字段的最大公开 DiscussionNode 投影必须不超过 768 KiB。任一上限超出都在领域事务前拒绝。
 
 删除内容将生命周期设为 `deleted` 并保留墓碑、讨论边和审计。治理通常只改变分发状态；依法永久擦除时删除正文载荷并设置 `erasure_state=payload_erased`，不另造第三套公开生命周期。标题、正文、来源或引用的作者编辑新增 Revision，不覆盖历史记录；分类和附加社区变更只增加 ContentItem version 并审计。
 
