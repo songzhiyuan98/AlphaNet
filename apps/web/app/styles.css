@@ -937,12 +937,53 @@ footer {
   font-size: 9px;
 }
 
-.contentSocialSignals .socialSignalPending strong {
-  font-size: 14px;
+.reactionSignals {
+  min-width: 0;
 }
 
-.reactionAvailability {
+.reactionSignalValues {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+
+.reactionSignalValue {
+  align-items: baseline;
   color: #7f887c;
+  display: inline-flex;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.reactionSignalValue strong {
+  color: #a7b0a4;
+  font-size: inherit;
+  font-weight: 700;
+}
+
+.reactionSignals--detail .reactionSignalValues {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.reactionSignals--detail .reactionSignalValue {
+  align-items: start;
+  display: grid;
+  gap: 7px;
+}
+
+.reactionSignals--detail .reactionSignalValue strong {
+  color: var(--text);
+  font-size: 24px;
+}
+
+.reactionSignalNotice {
+  color: #727b70;
+  font-size: 9px;
+  line-height: 1.6;
+  margin: 9px 0 0;
+  max-width: 520px;
 }
 
 .publicDiscussion {
@@ -3534,15 +3575,17 @@ footer {
   }
 
   .contentSocialSignals {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr;
   }
 
-  .contentSocialSignals > div:nth-child(3) {
+  .contentSocialSignals > div + div {
     border-left: 0;
+    border-top: 1px solid var(--line);
+    padding-left: 0;
   }
 
-  .contentSocialSignals > div:nth-child(n + 3) {
-    border-top: 1px solid var(--line);
+  .reactionSignals--detail .reactionSignalValues {
+    gap: 18px;
   }
 
   .publicDiscussion > header {

@@ -50,7 +50,7 @@ function validTransportIdempotencyKey(value: string | undefined): string | null 
   return value !== undefined && !value.includes(",") ? value : null;
 }
 
-function idempotencyKey(request: FastifyRequest): string | null {
+export function idempotencyKey(request: FastifyRequest): string | null {
   const distinctValues = request.raw.headersDistinct?.["idempotency-key"];
   if (distinctValues) {
     return distinctValues.length === 1

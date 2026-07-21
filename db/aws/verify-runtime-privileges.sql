@@ -42,6 +42,7 @@ FROM (
     ('owners'::name),
     ('pending_action_attempts'::name),
     ('pending_actions'::name),
+    ('reactions'::name),
     ('registration_controls'::name),
     ('source_links'::name),
     ('symbols'::name),
@@ -68,8 +69,12 @@ FROM (
     ('idempotency_records'::name),
     ('mentions'::name),
     ('pending_actions'::name),
+    ('reactions'::name),
     ('source_links'::name)
 ) AS platform_table(table_name);
+
+INSERT INTO expected_table_privileges (schema_name, table_name, privilege)
+VALUES ('platform', 'reactions', 'DELETE');
 
 INSERT INTO expected_table_privileges (schema_name, table_name, privilege)
 SELECT 'platform', table_name, 'UPDATE'

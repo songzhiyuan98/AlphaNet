@@ -13,6 +13,7 @@ repository_root="${REPOSITORY_ROOT:-$(git rev-parse --show-toplevel)}"
 readonly repository_root
 readonly full_migrations_dir="${repository_root}/db/migrations"
 readonly published_agent_v1_checksum="8d2aa4d3fe53bfda58b644460b386763350b38e7aaf666fb239ee7ba03a56528"
+readonly content_reactions_checksum="da6750692823bb082c1c417d266fd9e1c3585356fd5a25eae256fc6e7c5441bf"
 readonly suffix="${GITHUB_RUN_ID:-local}_${RANDOM}_$$"
 readonly empty_database="alphanet_migration_empty_${suffix}"
 readonly owner_database="alphanet_migration_owner_${suffix}"
@@ -752,9 +753,10 @@ for database in \
   result="$(
     PGDATABASE="${database}" psql -X -At \
       --set=ON_ERROR_STOP=1 \
-      --set=published_agent_database="${published_agent_database}" <<'SQL'
+      --set=published_agent_database="${published_agent_database}" \
+      --set=content_reactions_checksum="${content_reactions_checksum}" <<'SQL'
 SELECT
-  (SELECT count(*) FROM system.schema_migrations) = 8
+  (SELECT count(*) FROM system.schema_migrations) = 9
   AND EXISTS (
     SELECT 1
     FROM system.schema_migrations
@@ -779,11 +781,24 @@ SELECT
     WHERE version = '000008'
       AND name = 'content_read_visibility_epochs'
   )
+  AND EXISTS (
+    SELECT 1
+    FROM system.schema_migrations
+    WHERE version = '000009'
+      AND name = 'content_reactions'
+      AND checksum = :'content_reactions_checksum'
+  )
   AND to_regclass('platform.owners') IS NOT NULL
   AND to_regclass('platform.agents') IS NOT NULL
   AND to_regclass('platform.credentials') IS NOT NULL
   AND to_regclass('platform.content_items') IS NOT NULL
   AND to_regclass('platform.content_revisions') IS NOT NULL
+  AND to_regclass('platform.reactions') IS NOT NULL
+  AND to_regclass('platform.reactions_content_type_created_idx') IS NOT NULL
+  AND to_regclass('platform.reactions_actor_created_idx') IS NOT NULL
+  AND to_regclass(
+    'platform.action_logs_reaction_succeeded_agent_occurred_idx'
+  ) IS NOT NULL
   AND to_regclass('system.content_read_visibility_epochs') IS NOT NULL
   AND to_regclass('platform.idempotency_records') IS NOT NULL
   AND to_regclass('platform.pending_actions') IS NOT NULL
@@ -792,6 +807,26 @@ SELECT
   AND to_regclass('platform.pending_actions_approval_expiry_idx') IS NOT NULL
   AND to_regclass('platform.pending_actions_lease_reaper_idx') IS NOT NULL
   AND to_regclass('platform.idempotency_records_pending_action_idx') IS NOT NULL
+  AND (
+    SELECT count(*) = 1
+    FROM pg_trigger
+    WHERE tgrelid = 'platform.reactions'::regclass
+      AND tgname = 'reactions_validate_insert'
+      AND tgfoid = 'platform.validate_reaction_insert()'::regprocedure
+      AND tgtype = 7
+      AND NOT tgisinternal
+      AND tgenabled IN ('O', 'A')
+  )
+  AND (
+    SELECT count(*) = 1
+    FROM pg_trigger
+    WHERE tgrelid = 'platform.reactions'::regclass
+      AND tgname = 'reactions_prevent_update'
+      AND tgfoid = 'platform.prevent_reaction_update()'::regprocedure
+      AND tgtype = 19
+      AND NOT tgisinternal
+      AND tgenabled IN ('O', 'A')
+  )
   AND (
     SELECT count(*) = 2
     FROM information_schema.columns
@@ -960,4 +995,4 @@ SQL
   fi
 done
 
-echo "Empty, Owner-schema, and published Agent-v1 paths all reach the Content read snapshot schema."
+echo "Empty, Owner-schema, and published Agent-v1 paths all reach the Reaction-enabled content schema."

@@ -62,7 +62,8 @@
 ## 5. 数据
 
 - [ ] 审阅概念模型并生成第一版关系 Schema。
-- [ ] 为 ContentItem 树、`primary_community_id`、ContentAdditionalCommunity、Revision、Reaction 和 Follow 建立唯一约束。
+- [x] 为 ContentItem 树、`primary_community_id`、ContentAdditionalCommunity、Revision 和 Reaction 建立唯一约束。
+- [ ] 为 Follow 建立目标类型与主体唯一约束。
 - [ ] 为 Timeline、Community、Notification、ActivityEvent、ActionLog 和 Outbox 设计索引。
 - [ ] 验证一百万 ContentItem 下的查询计划。
 - [x] MVP 作者软删除为终态；稳定链接保留 tombstone 与可见后代，Revision 按可见性和法定擦除规则保留。

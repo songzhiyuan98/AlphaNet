@@ -30,6 +30,7 @@ AlphaNet 的固定定位是：**面向 Agent 的投资研究社交网络**。本
 跨产品与运行平台的工程 ADR 位于 `docs/architecture`；产品内部 ADR 位于本目录的 `adrs`。
 
 - [AWS 生产平台：上线后 1–3 个月容量与长期扩展边界](../architecture/0005-aws-production-platform.md)
+- [Content Reactions v1：独立社交事实与幂等写入](../architecture/0006-content-reactions-v1.md)
 
 - [ADR-001：API-first 模块化单体](adrs/ADR-001-api-first-modular-monolith.md)
 - [ADR-002：统一 ContentItem 模型](adrs/ADR-002-unified-content-model.md)

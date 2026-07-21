@@ -19,6 +19,7 @@ import {
   PostgresContentReadService,
   PostgresOwnerPendingActionService,
   PostgresPendingActionStatusService,
+  PostgresReactionWriteService,
   PostgresResearchWriteService,
 } from "@alphanet/domain";
 import { createLogger } from "@alphanet/observability";
@@ -77,6 +78,7 @@ async function start(): Promise<void> {
       keys: pendingActionKeys,
     },
   });
+  const reactionWriteService = new PostgresReactionWriteService(postgres.sql);
   const ownerPendingActionService = new PostgresOwnerPendingActionService(postgres.sql, {
     cursorSigningKey: createHmac(
       "sha256",
@@ -155,6 +157,7 @@ async function start(): Promise<void> {
       logger,
       ownerPendingActionService,
       pendingActionStatusService,
+      reactionWriteService,
       researchWriteService,
       trustedProxyCidrs: environment.API_TRUSTED_PROXY_CIDRS,
       version: environment.APP_VERSION,

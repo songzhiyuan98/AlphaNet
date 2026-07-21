@@ -7,7 +7,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import { CommunityDirectoryCard } from "./community-directory-card";
 import { CommunityUnavailable } from "./community-unavailable";
 import { ContentCard } from "./content-card";
-import { REACTION_AVAILABILITY_COPY } from "./reaction-availability";
 
 const timestamp = "2026-07-20T20:00:00.000Z";
 
@@ -82,14 +81,13 @@ const archivedCommunity: CommunitySearchItem = {
 afterEach(cleanup);
 
 describe("public social-network truthfulness", () => {
-  it("does not present backend reaction placeholders as live social counts", () => {
+  it("renders server-projected reaction counts as distinct social signals", () => {
     render(<ContentCard item={content} />);
 
     expect(screen.getByText("7 条后代回复")).toBeTruthy();
-    expect(screen.getByText(REACTION_AVAILABILITY_COPY)).toBeTruthy();
-    expect(screen.queryByText("18 Helpful")).toBeNull();
-    expect(screen.queryByText("12 Agree")).toBeNull();
-    expect(screen.queryByText("4 Disagree")).toBeNull();
+    expect(screen.getByLabelText("Helpful 18")).toBeTruthy();
+    expect(screen.getByLabelText("Agree 12")).toBeTruthy();
+    expect(screen.getByLabelText("Disagree 4")).toBeTruthy();
   });
 
   it("labels archived Communities as historical read-only records", () => {

@@ -2,7 +2,12 @@ import { z } from "zod";
 
 import { PolicyDecisionSchema, TimestampSchema, V1EnvelopeShape } from "./agent.ts";
 import { OpaqueIdSchema, SymbolSchema, TopicSchema } from "./community.ts";
-import { ContentReferenceSchema } from "./content.ts";
+import {
+  ContentReferenceSchema,
+  ReactionCountsSchema,
+  ReactionTypeSchema,
+  ViewerContentStateSchema,
+} from "./content.ts";
 import { V1ErrorDetailSchema } from "./v1-error.ts";
 
 const KIBIBYTE = 1_024;
@@ -418,8 +423,47 @@ export const PendingActionSummarySchema = z.union([
 ]);
 export type PendingActionSummary = z.infer<typeof PendingActionSummarySchema>;
 
+export const SetReactionPathParamsSchema = z
+  .object({
+    content_id: OpaqueIdSchema,
+    reaction: ReactionTypeSchema,
+  })
+  .strict();
+export type SetReactionPathParams = z.infer<typeof SetReactionPathParamsSchema>;
+
+export const SetReactionRequestSchema = z
+  .object({
+    active: z.boolean(),
+    idempotency_key: IdempotencyKeySchema,
+  })
+  .strict();
+export type SetReactionRequest = z.infer<typeof SetReactionRequestSchema>;
+
+export const SetReactionResultSchema = z
+  .object({
+    content_id: OpaqueIdSchema,
+    viewer_state: ViewerContentStateSchema,
+    reaction_counts: ReactionCountsSchema,
+  })
+  .strict();
+export type SetReactionResult = z.infer<typeof SetReactionResultSchema>;
+
+export const SetReactionWriteResultSchema = z
+  .object({
+    decision: PolicyDecisionSchema,
+    status: WriteStatusSchema,
+    result: SetReactionResultSchema.nullable(),
+    pending_action: z.null(),
+    error: V1ErrorDetailSchema.nullable(),
+    ...V1EnvelopeShape,
+  })
+  .strict()
+  .superRefine(validateWriteResult);
+export type SetReactionWriteResult = z.infer<typeof SetReactionWriteResultSchema>;
+
 export const UnifiedContentWriteResultSchema = z.union([
   CreatePostWriteResultSchema,
   ReplyToContentWriteResultSchema,
+  SetReactionWriteResultSchema,
 ]);
 export type UnifiedContentWriteResult = z.infer<typeof UnifiedContentWriteResultSchema>;

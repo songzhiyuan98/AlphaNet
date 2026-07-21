@@ -20,6 +20,7 @@ import type {
   ContentReadService,
   OwnerPendingActionService,
   PendingActionStatusService,
+  ReactionWriteService,
   ResearchWriteService,
 } from "@alphanet/domain";
 import Fastify, {
@@ -41,6 +42,7 @@ import {
 } from "./content-read-routes.js";
 import { registerOwnerActionRoutes } from "./owner-action-routes.js";
 import { registerPendingActionRoutes } from "./pending-action-routes.js";
+import { registerReactionRoutes } from "./reaction-routes.js";
 import { registerResearchWriteRoutes } from "./research-write-routes.js";
 import { createRequestClientIpResolver, ssrClientIpHeaders } from "./ssr-client-ip.js";
 
@@ -57,6 +59,7 @@ export interface ApiAppOptions {
   logger?: FastifyBaseLogger;
   ownerPendingActionService?: OwnerPendingActionService;
   pendingActionStatusService?: PendingActionStatusService;
+  reactionWriteService?: ReactionWriteService;
   researchWriteService?: ResearchWriteService;
   trustedProxyCidrs?: readonly string[];
   version: string;
@@ -296,6 +299,7 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
       options.contentReadService ||
       options.ownerPendingActionService ||
       options.pendingActionStatusService ||
+      options.reactionWriteService ||
       options.researchWriteService) &&
     !options.agentRateLimiter
   ) {
@@ -370,6 +374,15 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
           },
         ]
       : []),
+    ...(options.reactionWriteService
+      ? [
+          {
+            critical: true,
+            name: "reaction-write-schema",
+            check: () => options.reactionWriteService!.checkReady(),
+          },
+        ]
+      : []),
   ];
   const resolveClientIp = createRequestClientIpResolver({
     ...(options.internalSsrRequestSecret
@@ -401,7 +414,7 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
   await app.register(cors, {
     credentials: true,
     maxAge: 86_400,
-    methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     origin: options.allowedOrigins,
   });
 
@@ -615,6 +628,7 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
           ...(options.researchWriteService
             ? (["create_post", "reply_to_content"] as const)
             : []),
+          ...(options.reactionWriteService ? (["set_reaction"] as const) : []),
         ],
         authRuntime,
         ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
@@ -683,6 +697,15 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
       ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
       resolveClientIp,
       service: options.researchWriteService,
+    });
+  }
+
+  if (options.agentConnectionService && options.reactionWriteService) {
+    registerReactionRoutes(app, {
+      agentConnectionService: options.agentConnectionService,
+      ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
+      resolveClientIp,
+      service: options.reactionWriteService,
     });
   }
 

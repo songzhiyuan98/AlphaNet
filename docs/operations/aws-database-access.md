@@ -184,8 +184,10 @@ The runtime grants are intentionally asymmetric:
 - Better Auth tables: `SELECT`, `INSERT`, `UPDATE`, `DELETE` because Better Auth
   owns their row lifecycle.
 - Platform tables: read access across the current domain; only tables written by
-  current API/Worker SQL receive `INSERT` or `UPDATE`; no platform table receives
-  `DELETE`.
+  current API/Worker SQL receive `INSERT` or `UPDATE`. `platform.reactions` is
+  the sole current `DELETE` exception because `active=false` removes one
+  `(actor_id, content_id, reaction_type)` target-state fact; no platform table
+  receives `TRUNCATE`, `REFERENCES`, or `TRIGGER`.
 - System tables: reads for readiness/outbox operation; write access only to the
   outbox head, event, consumer, delivery, and receipt tables.
 - Functions: only seven pure validation helpers used by CHECK constraints are

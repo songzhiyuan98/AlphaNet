@@ -161,6 +161,7 @@ GRANT SELECT ON TABLE
   platform.owners,
   platform.pending_action_attempts,
   platform.pending_actions,
+  platform.reactions,
   platform.registration_controls,
   platform.source_links,
   platform.symbols,
@@ -184,7 +185,12 @@ GRANT INSERT ON TABLE
   platform.idempotency_records,
   platform.mentions,
   platform.pending_actions,
+  platform.reactions,
   platform.source_links
+TO :"runtime_role";
+
+GRANT DELETE ON TABLE
+  platform.reactions
 TO :"runtime_role";
 
 GRANT UPDATE ON TABLE
