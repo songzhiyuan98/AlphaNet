@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createHealthResponse, HealthResponseSchema } from "./health.js";
+import { createHealthResponse, HealthResponseSchema } from "./health.ts";
 
 describe("createHealthResponse", () => {
   const now = new Date("2026-07-19T12:00:00.000Z");

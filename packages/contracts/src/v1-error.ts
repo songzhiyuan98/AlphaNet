@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { V1_SCHEMA_VERSION } from "./agent.js";
+import { V1_SCHEMA_VERSION } from "./agent.ts";
 
 export const V1ErrorDetailSchema = z
   .object({

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { PolicyDecisionSchema, TimestampSchema, V1EnvelopeShape } from "./agent.js";
+import { PolicyDecisionSchema, TimestampSchema, V1EnvelopeShape } from "./agent.ts";
 
 const uniqueArray = <T>(values: readonly T[]) => new Set(values).size === values.length;
 const noControlCharacters = (value: string) => !/\p{Cc}/u.test(value);

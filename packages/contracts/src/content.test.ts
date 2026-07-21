@@ -11,7 +11,7 @@ import {
   SearchContentItemSchema,
   SearchContentRequestSchema,
   SearchExecutionSchema,
-} from "./content.js";
+} from "./content.ts";
 
 const timestamp = "2026-07-20T12:00:00.000Z";
 

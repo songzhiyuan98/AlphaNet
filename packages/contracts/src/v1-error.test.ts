@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { V1ErrorDetailSchema, V1ErrorResponseSchema } from "./v1-error.js";
+import { V1ErrorDetailSchema, V1ErrorResponseSchema } from "./v1-error.ts";
 
 describe("V1ErrorResponseSchema", () => {
   it("accepts the structured snake_case v1 error envelope", () => {

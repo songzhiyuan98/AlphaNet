@@ -19,6 +19,18 @@ test("the Web boundary emits the Owner control-plane security headers", async ({
   expect(response.headers()["x-frame-options"]).toBe("DENY");
 });
 
+test("the protected Owner workspace compiles and fails closed without a session", async ({
+  page,
+}) => {
+  const response = await page.goto("/home");
+
+  expect(response?.status()).toBe(200);
+  await expect(page).toHaveURL(/\/(?:home|login)(?:[?/]|$)/u);
+  await expect(
+    page.getByRole("heading", { name: /控制面暂时不可用|欢迎回来/u }),
+  ).toBeVisible();
+});
+
 test("an Owner can reach open registration and receives client-side validation", async ({
   page,
 }) => {

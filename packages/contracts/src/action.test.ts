@@ -4,7 +4,7 @@ import {
   GetActionStatusRequestSchema,
   GetActionStatusResponseSchema,
   PendingActionProjectionSchema,
-} from "./action.js";
+} from "./action.ts";
 
 const requestedAt = "2026-07-19T19:15:00Z";
 const expiresAt = "2026-07-20T19:15:00Z";

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { OwnerSessionResponseSchema } from "./owner.js";
+import { OwnerSessionResponseSchema } from "./owner.ts";
 
 describe("OwnerSessionResponseSchema", () => {
   const response = {

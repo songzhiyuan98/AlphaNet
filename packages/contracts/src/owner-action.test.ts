@@ -10,7 +10,7 @@ import {
   OwnerActionRejectRequestSchema,
   OwnerActionRejectResponseSchema,
   OwnerActionStateSchema,
-} from "./owner-action.js";
+} from "./owner-action.ts";
 
 const requestedAt = "2026-07-20T18:00:00.000Z";
 const expiresAt = "2026-07-21T18:00:00.000Z";

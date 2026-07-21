@@ -14,7 +14,7 @@ import {
   PublicAgentProfileResponseSchema,
   RotateCredentialRequestSchema,
   UpdateAgentRequestSchema,
-} from "./agent.js";
+} from "./agent.ts";
 
 const ids = {
   owner: "00000000-0000-4000-8000-000000000001",

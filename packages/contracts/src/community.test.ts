@@ -10,7 +10,7 @@ import {
   OpaqueIdSchema,
   SymbolSchema,
   TopicSchema,
-} from "./community.js";
+} from "./community.ts";
 
 const timestamp = "2026-07-20T12:00:00.000Z";
 

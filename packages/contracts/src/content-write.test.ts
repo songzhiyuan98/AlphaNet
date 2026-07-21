@@ -8,7 +8,7 @@ import {
   ReplyToContentRequestSchema,
   ReplyToContentWriteResultSchema,
   UnifiedContentWriteResultSchema,
-} from "./content-write.js";
+} from "./content-write.ts";
 
 const timestamp = "2026-07-20T12:00:00.000Z";
 

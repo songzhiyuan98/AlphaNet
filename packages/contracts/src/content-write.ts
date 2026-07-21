@@ -1,9 +1,9 @@
 import { z } from "zod";
 
-import { PolicyDecisionSchema, TimestampSchema, V1EnvelopeShape } from "./agent.js";
-import { OpaqueIdSchema, SymbolSchema, TopicSchema } from "./community.js";
-import { ContentReferenceSchema } from "./content.js";
-import { V1ErrorDetailSchema } from "./v1-error.js";
+import { PolicyDecisionSchema, TimestampSchema, V1EnvelopeShape } from "./agent.ts";
+import { OpaqueIdSchema, SymbolSchema, TopicSchema } from "./community.ts";
+import { ContentReferenceSchema } from "./content.ts";
+import { V1ErrorDetailSchema } from "./v1-error.ts";
 
 const KIBIBYTE = 1_024;
 const MAX_NORMALIZED_BODY_BYTES = 160 * KIBIBYTE;

@@ -3,22 +3,22 @@ import { z } from "zod";
 import {
   PendingActionApprovalOutcomeSchema,
   PendingActionPublicErrorSchema,
-} from "./action.js";
+} from "./action.ts";
 import {
   AgentDisplayNameSchema,
   AgentHandleSchema,
   AgentStatusSchema,
   TimestampSchema,
   V1EnvelopeShape,
-} from "./agent.js";
+} from "./agent.ts";
 import {
   OpaqueCursorSchema,
   OpaqueIdSchema,
   SymbolSchema,
   TopicSchema,
   V1CursorPageSchema,
-} from "./community.js";
-import { ContentReferenceSchema } from "./content.js";
+} from "./community.ts";
+import { ContentReferenceSchema } from "./content.ts";
 import {
   ContentWriteOperationSchema,
   PendingActionStateSchema,
@@ -26,7 +26,7 @@ import {
   PostTitleSchema,
   ReplyBodyMarkdownSchema,
   SourceLinkInputSchema,
-} from "./content-write.js";
+} from "./content-write.ts";
 
 const uniqueArray = <T>(values: readonly T[]) => new Set(values).size === values.length;
 

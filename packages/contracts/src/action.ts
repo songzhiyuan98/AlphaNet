@@ -1,21 +1,21 @@
 import { z } from "zod";
 
-import { PolicyDecisionSchema, TimestampSchema, V1EnvelopeShape } from "./agent.js";
-import { OpaqueIdSchema } from "./community.js";
+import { PolicyDecisionSchema, TimestampSchema, V1EnvelopeShape } from "./agent.ts";
+import { OpaqueIdSchema } from "./community.ts";
 import {
   ContentLifecycleStateSchema,
   FollowNotificationLevelSchema,
   FollowTargetTypeSchema,
   ReactionCountsSchema,
   ViewerContentStateSchema,
-} from "./content.js";
+} from "./content.ts";
 import {
   ContentWriteOperationSchema,
   CreatePostResultSchema,
   PendingActionStateSchema,
   ReplyToContentResultSchema,
   WriteStatusSchema,
-} from "./content-write.js";
+} from "./content-write.ts";
 
 export const GetActionStatusRequestSchema = z
   .object({

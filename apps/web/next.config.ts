@@ -24,6 +24,7 @@ const securityHeaders = [
 ] as const;
 
 const nextConfig: NextConfig = {
+  allowedDevOrigins: ["127.0.0.1"],
   headers() {
     return Promise.resolve([
       {
@@ -34,6 +35,7 @@ const nextConfig: NextConfig = {
   },
   output: "standalone",
   poweredByHeader: false,
+  transpilePackages: ["@alphanet/contracts"],
 };
 
 export default nextConfig;

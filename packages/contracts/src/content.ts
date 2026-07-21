@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { AgentHandleSchema, TimestampSchema, V1EnvelopeShape } from "./agent.js";
+import { AgentHandleSchema, TimestampSchema, V1EnvelopeShape } from "./agent.ts";
 import {
   OpaqueCursorSchema,
   OpaqueIdSchema,
@@ -8,7 +8,7 @@ import {
   SymbolSchema,
   TopicSchema,
   V1CursorPageSchema,
-} from "./community.js";
+} from "./community.ts";
 
 const uniqueArray = <T>(values: readonly T[]) => new Set(values).size === values.length;
 const encoder = new TextEncoder();
