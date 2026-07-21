@@ -291,7 +291,9 @@ describeReactionWrite("PostgresReactionWriteService", () => {
     const insertConnection = await postgres.sql.reserve();
     let mutationOpen = false;
     let insertOpen = false;
-    let insertPromise: Promise<unknown> | undefined;
+    let insertOutcomePromise:
+      | Promise<{ status: "fulfilled" } | { error: unknown; status: "rejected" }>
+      | undefined;
     try {
       await mutationConnection`begin`;
       mutationOpen = true;
@@ -303,22 +305,29 @@ describeReactionWrite("PostgresReactionWriteService", () => {
       `;
       const backendPid = backendRows[0]?.pid;
       if (!backendPid) throw new Error(`${options.label} insert PID was unavailable`);
-      insertPromise = Promise.resolve(
+      insertOutcomePromise = Promise.resolve(
         insertConnection`
           insert into platform.reactions (actor_id, content_id, reaction_type)
           values (${options.actorId}, ${options.contentId}, ${options.reaction})
         `,
+      ).then(
+        () => ({ status: "fulfilled" as const }),
+        (error: unknown) => ({ error, status: "rejected" as const }),
       );
       await waitForLock(backendPid, options.label);
       await mutationConnection`commit`;
       mutationOpen = false;
-      await expect(insertPromise).rejects.toMatchObject({ code: "55000" });
+      const insertOutcome = await insertOutcomePromise;
+      expect(insertOutcome.status).toBe("rejected");
+      if (insertOutcome.status === "rejected") {
+        expect(insertOutcome.error).toMatchObject({ code: "55000" });
+      }
       await insertConnection`rollback`;
       insertOpen = false;
     } finally {
       if (mutationOpen) await mutationConnection`rollback`;
       if (insertOpen) await insertConnection`rollback`;
-      await insertPromise?.catch(() => undefined);
+      await insertOutcomePromise;
       mutationConnection.release();
       insertConnection.release();
     }
@@ -1772,14 +1781,35 @@ describeReactionWrite("PostgresReactionWriteService", () => {
           throw new Error("Credential revocation and Reaction authorization deadlocked");
         }),
       ]);
-      expect(reaction).toMatchObject({
-        decision: "allow",
-        status: "succeeded",
-      });
+      if (reaction.status === "succeeded") {
+        expect(reaction).toMatchObject({
+          decision: "allow",
+          error: null,
+        });
+      } else {
+        expect(reaction).toMatchObject({
+          decision: "allow",
+          error: {
+            code: "AUTHORIZATION_CONTEXT_STALE",
+            retryable: false,
+          },
+          result: null,
+          status: "failed",
+        });
+      }
       expect(revoked).toMatchObject({
         id: context.credential.id,
         status: "revoked",
       });
+      const facts = await postgres.sql<{ reaction_type: string }[]>`
+        select reaction_type
+        from platform.reactions
+        where actor_id = ${context.agent.actorId}
+          and content_id = ${apiContentId}
+      `;
+      expect(facts).toEqual(
+        reaction.status === "succeeded" ? [{ reaction_type: "agree" }] : [],
+      );
     } finally {
       if (ownerTransactionOpen) await ownerLock`rollback`;
       ownerLock.release();
