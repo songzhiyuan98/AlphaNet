@@ -1,0 +1,14 @@
+aws_region                 = "us-west-2"
+project_name               = "alphanet"
+ecr_repository_prefix      = "alphanet"
+github_oidc_subjects       = ["repo:songzhiyuan98@123667992/AlphaNet@1306225890:ref:refs/heads/main"]
+account_monthly_budget_usd = 650
+cost_alert_emails          = ["ops@alphanet.example"]
+
+# Create exactly once per AWS account. If the provider already exists, set this
+# false and supply existing_github_oidc_provider_arn instead.
+create_github_oidc_provider = true
+
+tags = {
+  Owner = "AlphaNet"
+}

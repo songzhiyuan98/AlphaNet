@@ -5,8 +5,34 @@
 **/dist
 **/node_modules
 outputs
+work
 *.log
 **/*.tsbuildinfo
 .env
 .env.*
 !.env.example
+
+# Never send Terraform caches, state, plans, or real environment values to
+# BuildKit. The reviewed lock files and *.example inputs remain available.
+**/.terraform
+**/.terraform/**
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+*.auto.tfvars
+*.auto.tfvars.json
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfplan
+**/*.tfvars
+**/*.tfvars.json
+**/*.auto.tfvars
+**/*.auto.tfvars.json
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json

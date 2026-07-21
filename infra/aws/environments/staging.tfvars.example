@@ -1,0 +1,56 @@
+environment = "staging"
+aws_region  = "us-west-2"
+vpc_cidr    = "10.40.0.0/16"
+
+# Copy these two outputs from the shared stack. They are ARNs, not credentials.
+github_oidc_provider_arn = "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
+github_publish_role_arn  = "arn:aws:iam::123456789012:role/alphanet-github-publish"
+
+github_oidc_subjects  = ["repo:songzhiyuan98@123667992/AlphaNet@1306225890:ref:refs/heads/main"]
+ecr_repository_prefix = "alphanet"
+auth_email_from       = "AlphaNet <no-reply@staging.alphanet.example>"
+
+# Empty domain_name intentionally uses the generated CloudFront hostname.
+domain_name                = ""
+cloudfront_certificate_arn = ""
+alb_origin_domain_name     = "origin-staging.alphanet.example"
+alb_origin_certificate_arn = ""
+route53_zone_id            = "ZREPLACE_WITH_PUBLIC_ZONE"
+cloudfront_price_class     = "PriceClass_100"
+mcp_public_enabled         = false
+allow_direct_alb_cidrs     = []
+
+nat_gateway_mode                   = "single"
+enable_vpc_flow_logs               = true
+enable_enhanced_container_insights = false
+alb_deletion_protection            = false
+database_deletion_protection       = false
+database_skip_final_snapshot       = true
+database_backup_retention_days     = 3
+database_cloudwatch_log_exports    = []
+database_performance_insights      = false
+
+aurora_instance_count     = 1
+aurora_min_acu            = 0
+aurora_max_acu            = 4
+aurora_auto_pause_seconds = 900
+
+valkey_node_type               = "cache.t4g.micro"
+valkey_multi_az                = false
+valkey_snapshot_retention_days = 1
+
+service_desired_count = {
+  api    = 1
+  mcp    = 1
+  web    = 1
+  worker = 1
+}
+
+enable_service_autoscaling = false
+cpu_architecture           = "X86_64"
+log_retention_days         = 14
+operations_alert_emails    = []
+
+tags = {
+  Owner = "AlphaNet"
+}

@@ -33,6 +33,91 @@ jobs:
       - name: Scan history and source tree with pinned Gitleaks
         run: bash .github/scripts/scan-secrets.sh
 
+  infrastructure:
+    name: Infrastructure and workflow validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      TF_IN_AUTOMATION: "true"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Prepare Terraform provider cache
+        run: |
+          echo "TF_PLUGIN_CACHE_DIR=$RUNNER_TEMP/terraform-plugin-cache" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/terraform-plugin-cache"
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@5e8dbf3c6d9deaf4193ca7a8fb23f2ac83bb6c85 # v4.0.0
+        with:
+          terraform_version: 1.15.8
+
+      - name: Cache pinned Terraform providers
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/terraform-plugin-cache
+          key: terraform-providers-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('infra/aws/**/.terraform.lock.hcl') }}
+
+      - name: Install pinned workflow linters
+        run: |
+          mkdir -p "$TF_PLUGIN_CACHE_DIR" "$RUNNER_TEMP/actionlint"
+          archive="$RUNNER_TEMP/actionlint.tar.gz"
+          curl --fail --location --silent --show-error \
+            --output "$archive" \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $archive" |
+            sha256sum --check
+          tar -xzf "$archive" -C "$RUNNER_TEMP/actionlint" actionlint
+          sudo install -m 0755 "$RUNNER_TEMP/actionlint/actionlint" /usr/local/bin/actionlint
+
+          shellcheck_archive="$RUNNER_TEMP/shellcheck.tar.xz"
+          curl --fail --location --silent --show-error \
+            --output "$shellcheck_archive" \
+            https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz
+          echo "6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87  $shellcheck_archive" |
+            sha256sum --check
+          tar -xJf "$shellcheck_archive" -C "$RUNNER_TEMP"
+          sudo install -m 0755 \
+            "$RUNNER_TEMP/shellcheck-v0.10.0/shellcheck" \
+            /usr/local/bin/shellcheck
+
+      - name: Validate GitHub workflows and shell scripts
+        run: |
+          actionlint
+          while IFS= read -r -d '' script; do
+            case "$script" in
+              db/scripts/migrate.sh|db/scripts/seed.sh)
+                # Reviewed exception: nullglob plus the enforced migration/seed
+                # filename grammar makes newline/word splitting impossible;
+                # these scripts also remain compatible with macOS Bash 3.2.
+                shellcheck -x --exclude=SC2207 "$script"
+                ;;
+              *) shellcheck -x "$script" ;;
+            esac
+          done < <(git ls-files -z '*.sh')
+
+      - name: Format and validate all Terraform roots
+        run: |
+          terraform fmt -check -recursive infra/aws
+          for root in infra/aws/bootstrap infra/aws/shared infra/aws; do
+            terraform -chdir="$root" init -backend=false -input=false -no-color
+            terraform -chdir="$root" validate -no-color
+          done
+
+      - name: Test rendered single-node Valkey invariants
+        run: terraform -chdir=infra/aws test -no-color
+
+      - name: Scan AWS IaC for high-severity misconfiguration
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: infra/aws
+          trivyignores: .github/trivy-iac.ignore
+          hide-progress: "true"
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+
   quality:
     name: Quality
     runs-on: ubuntu-latest
@@ -60,6 +145,11 @@ jobs:
 
       - name: Run unit tests
         run: pnpm test
+
+      - name: Test AWS ECS deployment orchestration
+        run: |
+          bash .github/scripts/test-aws-ecs-deploy.sh
+          bash .github/scripts/test-resolve-manual-release.sh
 
   integration:
     name: Integration
@@ -135,6 +225,64 @@ jobs:
       - name: Run integration tests
         run: pnpm test:integration
 
+      - name: Reject invalid AWS database bootstrap secrets before connection
+        env:
+          ALPHANET_MIGRATION_PASSWORD: AlphaNetMigrationCI_0123456789abcdef
+          ALPHANET_RUNTIME_PASSWORD: AlphaNetRuntimeCI_fedcba9876543210XYZ
+        run: |
+          short_error="$RUNNER_TEMP/bootstrap-short-password.error"
+          same_error="$RUNNER_TEMP/bootstrap-same-password.error"
+
+          if env \
+            PGHOST=invalid.example \
+            PGCONNECT_TIMEOUT=1 \
+            ALPHANET_MIGRATION_PASSWORD=too-short \
+            ALPHANET_RUNTIME_PASSWORD=also-too-short \
+            bash db/scripts/aws-bootstrap-database.sh \
+            > /dev/null 2> "$short_error"; then
+            echo "::error::Bootstrap accepted short test-only passwords."
+            exit 1
+          fi
+          grep -q 'must be a 32-1024 byte secret' "$short_error"
+
+          if env \
+            PGHOST=invalid.example \
+            PGCONNECT_TIMEOUT=1 \
+            ALPHANET_RUNTIME_PASSWORD="$ALPHANET_MIGRATION_PASSWORD" \
+            bash db/scripts/aws-bootstrap-database.sh \
+            > /dev/null 2> "$same_error"; then
+            echo "::error::Bootstrap accepted identical test-only passwords."
+            exit 1
+          fi
+          grep -q 'Migration and runtime passwords must be distinct' "$same_error"
+          if grep -Eq 'psql:|could not translate host|connection' \
+            "$short_error" "$same_error"; then
+            echo "::error::Bootstrap attempted a database connection before validating secrets."
+            exit 1
+          fi
+
+      - name: Verify AWS database least-privilege release gate
+        env:
+          ALPHANET_MIGRATION_PASSWORD: AlphaNetMigrationCI_0123456789abcdef
+          ALPHANET_MIGRATION_ROLE: alphanet_migration
+          ALPHANET_RUNTIME_PASSWORD: AlphaNetRuntimeCI_fedcba9876543210XYZ
+          ALPHANET_RUNTIME_ROLE: alphanet_runtime
+        run: |
+          # These deterministic values are test-only credentials for the
+          # disposable CI PostgreSQL service, never deployment secrets.
+          bash db/scripts/aws-bootstrap-database.sh
+          PGUSER="$ALPHANET_MIGRATION_ROLE" \
+            PGPASSWORD="$ALPHANET_MIGRATION_PASSWORD" \
+            bash db/scripts/aws-migrate-release.sh
+          PGUSER="$ALPHANET_RUNTIME_ROLE" \
+            PGPASSWORD="$ALPHANET_RUNTIME_PASSWORD" \
+            bash db/scripts/aws-smoke-runtime.sh
+          PGUSER="$ALPHANET_MIGRATION_ROLE" \
+            PGPASSWORD="$ALPHANET_MIGRATION_PASSWORD" \
+            bash db/scripts/aws-test-runtime-privilege-atomicity.sh
+          ALPHANET_ALLOW_DESTRUCTIVE_ACL_TEST=1 \
+            bash db/scripts/aws-test-runtime-acl-reconciliation.sh
+
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -181,21 +329,55 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: web-e2e-diagnostics-${{ github.sha }}
+          overwrite: true
           path: |
             playwright-report
             test-results
           if-no-files-found: ignore
           retention-days: 7
 
-  container-check:
-    name: Container check (${{ matrix.target }})
-    if: github.event_name == 'pull_request'
+  container-base-cache:
+    name: Shared container dependency cache
     needs:
       - quality
       - integration
       - build
       - security
+      - infrastructure
       - web-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build shared dependency stage once
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          target: build-packages
+          platforms: linux/amd64
+          build-args: |
+            APP_VERSION=${{ github.sha }}
+          push: false
+          cache-from: type=gha,scope=alphanet-shared-build
+          cache-to: type=gha,mode=max,scope=alphanet-shared-build
+          provenance: false
+          sbom: false
+
+  container-check:
+    name: Container check (${{ matrix.target }})
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' &&
+       github.ref == 'refs/heads/main' &&
+       vars.AWS_ECR_PUBLISH_ENABLED != 'true')
+    needs:
+      - container-base-cache
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -235,18 +417,17 @@ jobs:
 
   publish:
     name: Publish (${{ matrix.target }})
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      vars.AWS_ECR_PUBLISH_ENABLED == 'true'
     needs:
-      - quality
-      - integration
-      - build
-      - security
-      - web-e2e
+      - container-base-cache
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: read
-      packages: write
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -260,14 +441,176 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Validate AWS image publishing configuration
+        env:
+          AWS_CI_PUBLISH_ROLE_ARN: ${{ vars.AWS_CI_PUBLISH_ROLE_ARN }}
+          AWS_ECR_REGISTRY: ${{ vars.AWS_ECR_REGISTRY }}
+          AWS_ECR_REPOSITORY_PREFIX: ${{ vars.AWS_ECR_REPOSITORY_PREFIX }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          missing=()
+          for variable_name in \
+            AWS_CI_PUBLISH_ROLE_ARN \
+            AWS_ECR_REGISTRY \
+            AWS_ECR_REPOSITORY_PREFIX \
+            AWS_REGION; do
+            if [[ -z "${!variable_name}" ]]; then
+              missing+=("$variable_name")
+            fi
+          done
+          if [[ "${#missing[@]}" -gt 0 ]]; then
+            echo "::error::AWS_ECR_PUBLISH_ENABLED is true but required variables are missing: ${missing[*]}"
+            exit 1
+          fi
+          account_id="${AWS_ECR_REGISTRY%%.*}"
+          expected_registry="${account_id}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          if [[ ! "$account_id" =~ ^[0-9]{12}$ ||
+                "$AWS_ECR_REGISTRY" != "$expected_registry" ]]; then
+            echo "::error::AWS_ECR_REGISTRY does not match AWS_REGION."
+            exit 1
+          fi
+
+      - name: Exchange GitHub OIDC token for ECR publish role
+        uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          mask-aws-account-id: true
+          role-session-name: alphanet-ci-${{ github.run_id }}-${{ matrix.target }}
+          role-to-assume: ${{ vars.AWS_CI_PUBLISH_ROLE_ARN }}
+
+      - name: Log in to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2.1.6
+
+      - name: Verify the authenticated ECR registry
+        env:
+          ACTUAL_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          AWS_ECR_REGISTRY: ${{ vars.AWS_ECR_REGISTRY }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          expected_registry="$AWS_ECR_REGISTRY"
+          if [[ "$ACTUAL_REGISTRY" != "$expected_registry" ]]; then
+            echo "::error::OIDC role authenticated to an unexpected ECR registry."
+            exit 1
+          fi
+
+      - name: Set up Buildx for immutable ECR reuse
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Locate an existing immutable ECR image
+        id: existing-ecr
+        env:
+          AWS_ECR_REGISTRY: ${{ vars.AWS_ECR_REGISTRY }}
+          AWS_ECR_REPOSITORY_PREFIX: ${{ vars.AWS_ECR_REPOSITORY_PREFIX }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          repository_name="${AWS_ECR_REPOSITORY_PREFIX}-${TARGET}"
+          repository="${AWS_ECR_REGISTRY}/${repository_name}"
+          tag="${repository}:sha-${GITHUB_SHA}"
+
+          if digest="$(bash .github/scripts/lookup-ecr-image-digest.sh \
+            "$repository_name" "sha-${GITHUB_SHA}")"; then
+            exists=true
+          else
+            status=$?
+            if [[ "$status" -eq 3 ]]; then
+              digest=""
+              exists=false
+            else
+              echo "::error::Unable to determine whether the immutable ECR tag exists."
+              exit "$status"
+            fi
+          fi
+
+          {
+            echo "digest=$digest"
+            echo "exists=$exists"
+            echo "repository=$repository"
+            echo "repository_name=$repository_name"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and publish image
-        id: image
+        id: image-build
+        if: steps.existing-ecr.outputs.exists != 'true'
+        continue-on-error: true
         uses: ./.github/actions/build-container
         with:
           target: ${{ matrix.target }}
           publish: "true"
-          registry-username: ${{ github.actor }}
-          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          registry: ${{ steps.ecr-login.outputs.registry }}
+          registry-login: "false"
+          repository-prefix: ${{ vars.AWS_ECR_REPOSITORY_PREFIX }}
+
+      - name: Resolve and attest immutable published image
+        id: image
+        env:
+          BUILD_DIGEST: ${{ steps.image-build.outputs.digest }}
+          BUILD_OUTCOME: ${{ steps.image-build.outcome }}
+          ECR_REPOSITORY: ${{ steps.existing-ecr.outputs.repository }}
+          ECR_REPOSITORY_NAME: ${{ steps.existing-ecr.outputs.repository_name }}
+          ECR_TAG: ${{ steps.existing-ecr.outputs.tag }}
+        run: |
+          repository="$ECR_REPOSITORY"
+          tag="$ECR_TAG"
+          digest=""
+          raw_manifest_path="$(mktemp)"
+          trap 'rm -f "$raw_manifest_path"' EXIT
+
+          for attempt in {1..5}; do
+            if digest="$(bash .github/scripts/lookup-ecr-image-digest.sh \
+              "$ECR_REPOSITORY_NAME" "sha-${GITHUB_SHA}")"; then
+              break
+            else
+              status=$?
+            fi
+            if [[ "$status" -ne 3 ]]; then
+              echo "::error::Unable to resolve the immutable ECR image."
+              exit "$status"
+            fi
+            if [[ "$attempt" -lt 5 ]]; then
+              sleep 2
+            fi
+          done
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            if [[ "$BUILD_OUTCOME" == "failure" ]]; then
+              echo "::error::Image build failed and no immutable ECR image exists for this SHA."
+            else
+              echo "::error::ECR did not return a valid immutable image digest."
+            fi
+            exit 1
+          fi
+          if [[ "$BUILD_OUTCOME" == "success" &&
+                -n "$BUILD_DIGEST" &&
+                "$BUILD_DIGEST" != "$digest" ]]; then
+            echo "::error::Published ECR digest does not match the BuildKit result."
+            exit 1
+          fi
+
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Resolved image digest is invalid."
+            exit 1
+          fi
+          docker buildx imagetools inspect \
+            "${repository}@${digest}" --raw > "$raw_manifest_path"
+          runtime_digest="$(bash .github/scripts/resolve-runtime-digest.sh \
+            "$raw_manifest_path" "$digest")"
+
+          docker pull --quiet "${repository}@${digest}" >/dev/null
+          revision="$(docker image inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            "${repository}@${digest}")"
+          if [[ "$revision" != "$GITHUB_SHA" ]]; then
+            echo "::error::Immutable image revision label does not match the release SHA."
+            exit 1
+          fi
+
+          {
+            echo "digest=$digest"
+            echo "repository=$repository"
+            echo "runtime-digest=$runtime_digest"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Smoke published runtime digest
         uses: ./.github/actions/smoke-container
@@ -288,11 +631,17 @@ jobs:
         env:
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
           IMAGE_REPOSITORY: ${{ steps.image.outputs.repository }}
+          IMAGE_RUNTIME_DIGEST: ${{ steps.image.outputs.runtime-digest }}
           IMAGE_TAG: ${{ steps.image.outputs.tag }}
           TARGET: ${{ matrix.target }}
         run: |
           if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "::error::Build did not return an immutable image digest."
+            exit 1
+          fi
+
+          if [[ ! "$IMAGE_RUNTIME_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Resolved runtime image digest is invalid."
             exit 1
           fi
 
@@ -302,11 +651,13 @@ jobs:
             --arg repository "$IMAGE_REPOSITORY" \
             --arg tag "$IMAGE_TAG" \
             --arg digest "$IMAGE_DIGEST" \
+            --arg runtime_digest "$IMAGE_RUNTIME_DIGEST" \
             '{
               target: $target,
               repository: $repository,
               tag: $tag,
               digest: $digest,
+              runtimeDigest: $runtime_digest,
               reference: ($repository + "@" + $digest)
             }' > "release-metadata/${TARGET}.json"
 
@@ -314,6 +665,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: image-metadata-${{ matrix.target }}-${{ github.sha }}
+          overwrite: true
           path: release-metadata/${{ matrix.target }}.json
           if-no-files-found: error
           retention-days: 30
@@ -326,7 +678,9 @@ jobs:
       - integration
       - build
       - security
+      - infrastructure
       - web-e2e
+      - container-base-cache
       - container-check
       - publish
     runs-on: ubuntu-latest
@@ -335,27 +689,32 @@ jobs:
       - name: Verify required CI jobs
         env:
           BUILD_RESULT: ${{ needs.build.result }}
+          BASE_CACHE_RESULT: ${{ needs.container-base-cache.result }}
           CONTAINER_CHECK_RESULT: ${{ needs.container-check.result }}
           EVENT_NAME: ${{ github.event_name }}
+          ECR_PUBLISH_ENABLED: ${{ vars.AWS_ECR_PUBLISH_ENABLED }}
+          INFRASTRUCTURE_RESULT: ${{ needs.infrastructure.result }}
           INTEGRATION_RESULT: ${{ needs.integration.result }}
           PUBLISH_RESULT: ${{ needs.publish.result }}
           QUALITY_RESULT: ${{ needs.quality.result }}
           SECURITY_RESULT: ${{ needs.security.result }}
           WEB_E2E_RESULT: ${{ needs.web-e2e.result }}
         run: |
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            container_result="$CONTAINER_CHECK_RESULT"
-            inactive_result="$PUBLISH_RESULT"
-          else
+          if [[ "$EVENT_NAME" == "push" && "$ECR_PUBLISH_ENABLED" == "true" ]]; then
             container_result="$PUBLISH_RESULT"
             inactive_result="$CONTAINER_CHECK_RESULT"
+          else
+            container_result="$CONTAINER_CHECK_RESULT"
+            inactive_result="$PUBLISH_RESULT"
           fi
 
           if [[ "$QUALITY_RESULT" != "success" ||
                 "$INTEGRATION_RESULT" != "success" ||
                 "$BUILD_RESULT" != "success" ||
                 "$SECURITY_RESULT" != "success" ||
+                "$INFRASTRUCTURE_RESULT" != "success" ||
                 "$WEB_E2E_RESULT" != "success" ||
+                "$BASE_CACHE_RESULT" != "success" ||
                 "$container_result" != "success" ||
                 "$inactive_result" != "skipped" ]]; then
             echo "::error::One or more required CI jobs failed or were cancelled."
@@ -364,7 +723,10 @@ jobs:
 
   release-manifest:
     name: Release manifest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      vars.AWS_ECR_PUBLISH_ENABLED == 'true'
     needs:
       - publish
     runs-on: ubuntu-latest
@@ -386,6 +748,10 @@ jobs:
           merge-multiple: true
 
       - name: Assemble immutable release manifest
+        env:
+          AWS_ECR_REGISTRY: ${{ vars.AWS_ECR_REGISTRY }}
+          AWS_ECR_REPOSITORY_PREFIX: ${{ vars.AWS_ECR_REPOSITORY_PREFIX }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
         run: |
           metadata_files=(release-metadata/*.json)
           if [[ "${#metadata_files[@]}" -ne 5 ]]; then
@@ -411,6 +777,7 @@ jobs:
                     repository: $image.repository,
                     tag: $image.tag,
                     digest: $image.digest,
+                    runtimeDigest: $image.runtimeDigest,
                     reference: $image.reference
                   }
                 )
@@ -418,36 +785,227 @@ jobs:
             }' "${metadata_files[@]}" > release-manifest.json
 
           bash .github/scripts/validate-release-manifest.sh \
-            release-manifest.json "$GITHUB_SHA" "$GITHUB_REPOSITORY"
+            release-manifest.json "$GITHUB_SHA" "$GITHUB_REPOSITORY" \
+            "${AWS_ECR_REGISTRY}/${AWS_ECR_REPOSITORY_PREFIX}"
           sha256sum release-manifest.json > release-manifest.sha256
 
       - name: Upload release manifest
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-manifest-${{ github.sha }}
+          overwrite: true
           path: |
             release-manifest.json
             release-manifest.sha256
           if-no-files-found: error
           retention-days: 90
 
+  aws-deploy-readiness:
+    name: AWS deployment readiness
+    if: >-
+      always() &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      vars.AWS_DEPLOY_ENABLED == 'true'
+    needs:
+      - release-manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      production_configured: ${{ steps.readiness.outputs.production_configured }}
+      staging_configured: ${{ steps.readiness.outputs.staging_configured }}
+    steps:
+      - name: Report deployment configuration
+        id: readiness
+        env:
+          AUTO_DEPLOY_PRODUCTION: ${{ vars.AUTO_DEPLOY_PRODUCTION }}
+          AWS_DEPLOY_ENABLED: ${{ vars.AWS_DEPLOY_ENABLED }}
+          AWS_ECR_PUBLISH_ENABLED: ${{ vars.AWS_ECR_PUBLISH_ENABLED }}
+          AWS_ECR_REGISTRY: ${{ vars.AWS_ECR_REGISTRY }}
+          AWS_ECR_REPOSITORY_PREFIX: ${{ vars.AWS_ECR_REPOSITORY_PREFIX }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          ENABLE_STAGING_DEPLOY: ${{ vars.ENABLE_STAGING_DEPLOY }}
+          PRODUCTION_DEPLOY_ROLE: ${{ vars.PRODUCTION_AWS_DEPLOY_ROLE_ARN }}
+          PRODUCTION_ECS_API_SERVICE: ${{ vars.PRODUCTION_ECS_API_SERVICE }}
+          PRODUCTION_ECS_API_BASELINE_TASK_DEFINITION_ARN: ${{ vars.PRODUCTION_ECS_API_BASELINE_TASK_DEFINITION_ARN }}
+          PRODUCTION_ECS_API_TASK_FAMILY: ${{ vars.PRODUCTION_ECS_API_TASK_FAMILY }}
+          PRODUCTION_ECS_CLUSTER: ${{ vars.PRODUCTION_ECS_CLUSTER }}
+          PRODUCTION_ECS_MCP_SERVICE: ${{ vars.PRODUCTION_ECS_MCP_SERVICE }}
+          PRODUCTION_ECS_MCP_BASELINE_TASK_DEFINITION_ARN: ${{ vars.PRODUCTION_ECS_MCP_BASELINE_TASK_DEFINITION_ARN }}
+          PRODUCTION_ECS_MCP_TASK_FAMILY: ${{ vars.PRODUCTION_ECS_MCP_TASK_FAMILY }}
+          PRODUCTION_ECS_MIGRATE_TASK_FAMILY: ${{ vars.PRODUCTION_ECS_MIGRATE_TASK_FAMILY }}
+          PRODUCTION_ECS_MIGRATE_BASELINE_TASK_DEFINITION_ARN: ${{ vars.PRODUCTION_ECS_MIGRATE_BASELINE_TASK_DEFINITION_ARN }}
+          PRODUCTION_ECS_RUNTIME_SMOKE_TASK_FAMILY: ${{ vars.PRODUCTION_ECS_RUNTIME_SMOKE_TASK_FAMILY }}
+          PRODUCTION_ECS_RUNTIME_SMOKE_BASELINE_TASK_DEFINITION_ARN: ${{ vars.PRODUCTION_ECS_RUNTIME_SMOKE_BASELINE_TASK_DEFINITION_ARN }}
+          PRODUCTION_ECS_SECURITY_GROUP_IDS: ${{ vars.PRODUCTION_ECS_SECURITY_GROUP_IDS }}
+          PRODUCTION_ECS_SUBNET_IDS: ${{ vars.PRODUCTION_ECS_SUBNET_IDS }}
+          PRODUCTION_ECS_WEB_SERVICE: ${{ vars.PRODUCTION_ECS_WEB_SERVICE }}
+          PRODUCTION_ECS_WEB_BASELINE_TASK_DEFINITION_ARN: ${{ vars.PRODUCTION_ECS_WEB_BASELINE_TASK_DEFINITION_ARN }}
+          PRODUCTION_ECS_WEB_TASK_FAMILY: ${{ vars.PRODUCTION_ECS_WEB_TASK_FAMILY }}
+          PRODUCTION_ECS_WORKER_SERVICE: ${{ vars.PRODUCTION_ECS_WORKER_SERVICE }}
+          PRODUCTION_ECS_WORKER_BASELINE_TASK_DEFINITION_ARN: ${{ vars.PRODUCTION_ECS_WORKER_BASELINE_TASK_DEFINITION_ARN }}
+          PRODUCTION_ECS_WORKER_TASK_FAMILY: ${{ vars.PRODUCTION_ECS_WORKER_TASK_FAMILY }}
+          PRODUCTION_PUBLIC_BASE_URL: ${{ vars.PRODUCTION_PUBLIC_BASE_URL }}
+          PRODUCTION_SMOKE_PATHS: ${{ vars.PRODUCTION_SMOKE_PATHS }}
+          STAGING_DEPLOY_ROLE: ${{ vars.STAGING_AWS_DEPLOY_ROLE_ARN }}
+          STAGING_ECS_API_SERVICE: ${{ vars.STAGING_ECS_API_SERVICE }}
+          STAGING_ECS_API_BASELINE_TASK_DEFINITION_ARN: ${{ vars.STAGING_ECS_API_BASELINE_TASK_DEFINITION_ARN }}
+          STAGING_ECS_API_TASK_FAMILY: ${{ vars.STAGING_ECS_API_TASK_FAMILY }}
+          STAGING_ECS_CLUSTER: ${{ vars.STAGING_ECS_CLUSTER }}
+          STAGING_ECS_MCP_SERVICE: ${{ vars.STAGING_ECS_MCP_SERVICE }}
+          STAGING_ECS_MCP_BASELINE_TASK_DEFINITION_ARN: ${{ vars.STAGING_ECS_MCP_BASELINE_TASK_DEFINITION_ARN }}
+          STAGING_ECS_MCP_TASK_FAMILY: ${{ vars.STAGING_ECS_MCP_TASK_FAMILY }}
+          STAGING_ECS_MIGRATE_TASK_FAMILY: ${{ vars.STAGING_ECS_MIGRATE_TASK_FAMILY }}
+          STAGING_ECS_MIGRATE_BASELINE_TASK_DEFINITION_ARN: ${{ vars.STAGING_ECS_MIGRATE_BASELINE_TASK_DEFINITION_ARN }}
+          STAGING_ECS_RUNTIME_SMOKE_TASK_FAMILY: ${{ vars.STAGING_ECS_RUNTIME_SMOKE_TASK_FAMILY }}
+          STAGING_ECS_RUNTIME_SMOKE_BASELINE_TASK_DEFINITION_ARN: ${{ vars.STAGING_ECS_RUNTIME_SMOKE_BASELINE_TASK_DEFINITION_ARN }}
+          STAGING_ECS_SECURITY_GROUP_IDS: ${{ vars.STAGING_ECS_SECURITY_GROUP_IDS }}
+          STAGING_ECS_SUBNET_IDS: ${{ vars.STAGING_ECS_SUBNET_IDS }}
+          STAGING_ECS_WEB_SERVICE: ${{ vars.STAGING_ECS_WEB_SERVICE }}
+          STAGING_ECS_WEB_BASELINE_TASK_DEFINITION_ARN: ${{ vars.STAGING_ECS_WEB_BASELINE_TASK_DEFINITION_ARN }}
+          STAGING_ECS_WEB_TASK_FAMILY: ${{ vars.STAGING_ECS_WEB_TASK_FAMILY }}
+          STAGING_ECS_WORKER_SERVICE: ${{ vars.STAGING_ECS_WORKER_SERVICE }}
+          STAGING_ECS_WORKER_BASELINE_TASK_DEFINITION_ARN: ${{ vars.STAGING_ECS_WORKER_BASELINE_TASK_DEFINITION_ARN }}
+          STAGING_ECS_WORKER_TASK_FAMILY: ${{ vars.STAGING_ECS_WORKER_TASK_FAMILY }}
+          STAGING_PUBLIC_BASE_URL: ${{ vars.STAGING_PUBLIC_BASE_URL }}
+          STAGING_SMOKE_PATHS: ${{ vars.STAGING_SMOKE_PATHS }}
+        run: |
+          global_configured=true
+          for value in \
+            "$AWS_REGION" \
+            "$AWS_ECR_REGISTRY" \
+            "$AWS_ECR_REPOSITORY_PREFIX"; do
+            if [[ -z "$value" ]]; then
+              global_configured=false
+            fi
+          done
+
+          staging_configured="$global_configured"
+          production_configured="$global_configured"
+          staging_required=(
+            STAGING_DEPLOY_ROLE
+            STAGING_ECS_CLUSTER
+            STAGING_ECS_SUBNET_IDS
+            STAGING_ECS_SECURITY_GROUP_IDS
+            STAGING_ECS_API_SERVICE
+            STAGING_ECS_API_BASELINE_TASK_DEFINITION_ARN
+            STAGING_ECS_API_TASK_FAMILY
+            STAGING_ECS_MCP_SERVICE
+            STAGING_ECS_MCP_BASELINE_TASK_DEFINITION_ARN
+            STAGING_ECS_MCP_TASK_FAMILY
+            STAGING_ECS_MIGRATE_BASELINE_TASK_DEFINITION_ARN
+            STAGING_ECS_MIGRATE_TASK_FAMILY
+            STAGING_ECS_RUNTIME_SMOKE_BASELINE_TASK_DEFINITION_ARN
+            STAGING_ECS_RUNTIME_SMOKE_TASK_FAMILY
+            STAGING_ECS_WORKER_SERVICE
+            STAGING_ECS_WORKER_BASELINE_TASK_DEFINITION_ARN
+            STAGING_ECS_WORKER_TASK_FAMILY
+            STAGING_ECS_WEB_SERVICE
+            STAGING_ECS_WEB_BASELINE_TASK_DEFINITION_ARN
+            STAGING_ECS_WEB_TASK_FAMILY
+            STAGING_PUBLIC_BASE_URL
+            STAGING_SMOKE_PATHS
+          )
+          production_required=(
+            PRODUCTION_DEPLOY_ROLE
+            PRODUCTION_ECS_CLUSTER
+            PRODUCTION_ECS_SUBNET_IDS
+            PRODUCTION_ECS_SECURITY_GROUP_IDS
+            PRODUCTION_ECS_API_SERVICE
+            PRODUCTION_ECS_API_BASELINE_TASK_DEFINITION_ARN
+            PRODUCTION_ECS_API_TASK_FAMILY
+            PRODUCTION_ECS_MCP_SERVICE
+            PRODUCTION_ECS_MCP_BASELINE_TASK_DEFINITION_ARN
+            PRODUCTION_ECS_MCP_TASK_FAMILY
+            PRODUCTION_ECS_MIGRATE_BASELINE_TASK_DEFINITION_ARN
+            PRODUCTION_ECS_MIGRATE_TASK_FAMILY
+            PRODUCTION_ECS_RUNTIME_SMOKE_BASELINE_TASK_DEFINITION_ARN
+            PRODUCTION_ECS_RUNTIME_SMOKE_TASK_FAMILY
+            PRODUCTION_ECS_WORKER_SERVICE
+            PRODUCTION_ECS_WORKER_BASELINE_TASK_DEFINITION_ARN
+            PRODUCTION_ECS_WORKER_TASK_FAMILY
+            PRODUCTION_ECS_WEB_SERVICE
+            PRODUCTION_ECS_WEB_BASELINE_TASK_DEFINITION_ARN
+            PRODUCTION_ECS_WEB_TASK_FAMILY
+            PRODUCTION_PUBLIC_BASE_URL
+            PRODUCTION_SMOKE_PATHS
+          )
+          for variable_name in "${staging_required[@]}"; do
+            if [[ -z "${!variable_name}" ]]; then
+              staging_configured=false
+            fi
+          done
+          for variable_name in "${production_required[@]}"; do
+            if [[ -z "${!variable_name}" ]]; then
+              production_configured=false
+            fi
+          done
+
+          configuration_error=false
+          if [[ "$AWS_DEPLOY_ENABLED" != "true" ]]; then
+            echo "::error::AWS deployment readiness ran without AWS_DEPLOY_ENABLED=true."
+            configuration_error=true
+          fi
+          if [[ "$AWS_ECR_PUBLISH_ENABLED" != "true" ]]; then
+            echo "::error::AWS_DEPLOY_ENABLED requires AWS_ECR_PUBLISH_ENABLED=true."
+            configuration_error=true
+          fi
+          if [[ "${{ needs.release-manifest.result }}" != "success" ]]; then
+            echo "::error::AWS deployment requires a successful immutable release manifest."
+            configuration_error=true
+          fi
+          if [[ "$ENABLE_STAGING_DEPLOY" == "true" && "$staging_configured" != "true" ]]; then
+            echo "::error::Staging deployment was requested but its AWS variables are incomplete."
+            configuration_error=true
+          fi
+          if [[ "$AUTO_DEPLOY_PRODUCTION" == "true" && "$ENABLE_STAGING_DEPLOY" != "true" ]]; then
+            echo "::error::Automatic production deployment requires staging deployment in the same workflow."
+            configuration_error=true
+          fi
+          if [[ "$AUTO_DEPLOY_PRODUCTION" == "true" && "$production_configured" != "true" ]]; then
+            echo "::error::Automatic production deployment was requested but its AWS variables are incomplete."
+            configuration_error=true
+          fi
+
+          {
+            echo "### AWS deployment readiness"
+            echo ""
+            echo "- ECR publishing enabled: \`${AWS_ECR_PUBLISH_ENABLED}\`"
+            echo "- Staging enabled: \`${ENABLE_STAGING_DEPLOY:-false}\`"
+            echo "- Staging configured: \`${staging_configured}\`"
+            echo "- Automatic production enabled: \`${AUTO_DEPLOY_PRODUCTION:-false}\`"
+            echo "- Production configured: \`${production_configured}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          {
+            echo "staging_configured=$staging_configured"
+            echo "production_configured=$production_configured"
+          } >> "$GITHUB_OUTPUT"
+          if [[ "$configuration_error" == "true" ]]; then
+            exit 1
+          fi
+
   deploy-staging:
     name: Deploy staging
     if: >-
       github.event_name == 'push' &&
       github.ref == 'refs/heads/main' &&
-      vars.ENABLE_STAGING_DEPLOY == 'true'
+      vars.AWS_DEPLOY_ENABLED == 'true' &&
+      vars.ENABLE_STAGING_DEPLOY == 'true' &&
+      needs.aws-deploy-readiness.outputs.staging_configured == 'true'
     needs:
       - required
       - release-manifest
+      - aws-deploy-readiness
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 75
     concurrency:
       group: deploy-staging
       cancel-in-progress: false
     permissions:
       actions: read
       contents: read
+      id-token: write
     steps:
       - name: Check out verified deployment tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -460,11 +1018,148 @@ jobs:
           name: release-manifest-${{ github.sha }}
           path: release
 
-      - name: Deploy exact staging digests
-        uses: ./.github/actions/invoke-deploy-hook
+      - name: Exchange GitHub OIDC token for staging deploy role
+        uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
         with:
+          aws-region: ${{ vars.AWS_REGION }}
+          mask-aws-account-id: true
+          role-duration-seconds: 7200
+          role-session-name: alphanet-staging-${{ github.run_id }}
+          role-to-assume: ${{ vars.STAGING_AWS_DEPLOY_ROLE_ARN }}
+
+      - name: Deploy exact staging digests
+        uses: ./.github/actions/deploy-ecs-release
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
           deploy-sha: ${{ github.sha }}
-          environment: staging
-          hook-token: ${{ secrets.STAGING_DEPLOY_HOOK_TOKEN }}
-          hook-url: ${{ secrets.STAGING_DEPLOY_HOOK_URL }}
+          ecs-cluster: ${{ vars.STAGING_ECS_CLUSTER }}
+          ecs-subnet-ids: ${{ vars.STAGING_ECS_SUBNET_IDS }}
+          ecs-security-group-ids: ${{ vars.STAGING_ECS_SECURITY_GROUP_IDS }}
+          ecs-assign-public-ip: ${{ vars.STAGING_ECS_ASSIGN_PUBLIC_IP || 'DISABLED' }}
+          api-service: ${{ vars.STAGING_ECS_API_SERVICE }}
+          api-baseline-task-definition-arn: ${{ vars.STAGING_ECS_API_BASELINE_TASK_DEFINITION_ARN }}
+          api-task-family: ${{ vars.STAGING_ECS_API_TASK_FAMILY }}
+          mcp-service: ${{ vars.STAGING_ECS_MCP_SERVICE }}
+          mcp-baseline-task-definition-arn: ${{ vars.STAGING_ECS_MCP_BASELINE_TASK_DEFINITION_ARN }}
+          mcp-task-family: ${{ vars.STAGING_ECS_MCP_TASK_FAMILY }}
+          migrate-baseline-task-definition-arn: ${{ vars.STAGING_ECS_MIGRATE_BASELINE_TASK_DEFINITION_ARN }}
+          migrate-task-family: ${{ vars.STAGING_ECS_MIGRATE_TASK_FAMILY }}
+          runtime-smoke-baseline-task-definition-arn: ${{ vars.STAGING_ECS_RUNTIME_SMOKE_BASELINE_TASK_DEFINITION_ARN }}
+          runtime-smoke-task-family: ${{ vars.STAGING_ECS_RUNTIME_SMOKE_TASK_FAMILY }}
+          web-service: ${{ vars.STAGING_ECS_WEB_SERVICE }}
+          web-baseline-task-definition-arn: ${{ vars.STAGING_ECS_WEB_BASELINE_TASK_DEFINITION_ARN }}
+          web-task-family: ${{ vars.STAGING_ECS_WEB_TASK_FAMILY }}
+          worker-service: ${{ vars.STAGING_ECS_WORKER_SERVICE }}
+          worker-baseline-task-definition-arn: ${{ vars.STAGING_ECS_WORKER_BASELINE_TASK_DEFINITION_ARN }}
+          worker-task-family: ${{ vars.STAGING_ECS_WORKER_TASK_FAMILY }}
+          expected-image-prefix: ${{ format('{0}/{1}', vars.AWS_ECR_REGISTRY, vars.AWS_ECR_REPOSITORY_PREFIX) }}
+          expected-repository: ${{ github.repository }}
           manifest-path: release/release-manifest.json
+          public-base-url: ${{ vars.STAGING_PUBLIC_BASE_URL }}
+          smoke-paths: ${{ vars.STAGING_SMOKE_PATHS }}
+          target-environment: staging
+
+      - name: Record successful staging deployment
+        run: |
+          bash .github/scripts/create-deployment-marker.sh \
+            staging "$GITHUB_SHA" release/release-manifest.json \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ID" automatic "" deployment-marker
+
+      - name: Upload staging deployment marker
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: deployment-marker-staging-${{ github.sha }}
+          overwrite: true
+          path: deployment-marker
+          if-no-files-found: error
+          retention-days: 90
+
+  deploy-production:
+    name: Deploy production
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      vars.AWS_DEPLOY_ENABLED == 'true' &&
+      vars.AUTO_DEPLOY_PRODUCTION == 'true' &&
+      needs.deploy-staging.result == 'success' &&
+      needs.aws-deploy-readiness.outputs.production_configured == 'true'
+    needs:
+      - deploy-staging
+      - release-manifest
+      - aws-deploy-readiness
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out verified deployment tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Download release manifest
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-manifest-${{ github.sha }}
+          path: release
+
+      - name: Exchange GitHub OIDC token for production deploy role
+        uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          mask-aws-account-id: true
+          role-duration-seconds: 7200
+          role-session-name: alphanet-production-${{ github.run_id }}
+          role-to-assume: ${{ vars.PRODUCTION_AWS_DEPLOY_ROLE_ARN }}
+
+      - name: Deploy exact production digests
+        uses: ./.github/actions/deploy-ecs-release
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          deploy-sha: ${{ github.sha }}
+          ecs-cluster: ${{ vars.PRODUCTION_ECS_CLUSTER }}
+          ecs-subnet-ids: ${{ vars.PRODUCTION_ECS_SUBNET_IDS }}
+          ecs-security-group-ids: ${{ vars.PRODUCTION_ECS_SECURITY_GROUP_IDS }}
+          ecs-assign-public-ip: ${{ vars.PRODUCTION_ECS_ASSIGN_PUBLIC_IP || 'DISABLED' }}
+          api-service: ${{ vars.PRODUCTION_ECS_API_SERVICE }}
+          api-baseline-task-definition-arn: ${{ vars.PRODUCTION_ECS_API_BASELINE_TASK_DEFINITION_ARN }}
+          api-task-family: ${{ vars.PRODUCTION_ECS_API_TASK_FAMILY }}
+          mcp-service: ${{ vars.PRODUCTION_ECS_MCP_SERVICE }}
+          mcp-baseline-task-definition-arn: ${{ vars.PRODUCTION_ECS_MCP_BASELINE_TASK_DEFINITION_ARN }}
+          mcp-task-family: ${{ vars.PRODUCTION_ECS_MCP_TASK_FAMILY }}
+          migrate-baseline-task-definition-arn: ${{ vars.PRODUCTION_ECS_MIGRATE_BASELINE_TASK_DEFINITION_ARN }}
+          migrate-task-family: ${{ vars.PRODUCTION_ECS_MIGRATE_TASK_FAMILY }}
+          runtime-smoke-baseline-task-definition-arn: ${{ vars.PRODUCTION_ECS_RUNTIME_SMOKE_BASELINE_TASK_DEFINITION_ARN }}
+          runtime-smoke-task-family: ${{ vars.PRODUCTION_ECS_RUNTIME_SMOKE_TASK_FAMILY }}
+          web-service: ${{ vars.PRODUCTION_ECS_WEB_SERVICE }}
+          web-baseline-task-definition-arn: ${{ vars.PRODUCTION_ECS_WEB_BASELINE_TASK_DEFINITION_ARN }}
+          web-task-family: ${{ vars.PRODUCTION_ECS_WEB_TASK_FAMILY }}
+          worker-service: ${{ vars.PRODUCTION_ECS_WORKER_SERVICE }}
+          worker-baseline-task-definition-arn: ${{ vars.PRODUCTION_ECS_WORKER_BASELINE_TASK_DEFINITION_ARN }}
+          worker-task-family: ${{ vars.PRODUCTION_ECS_WORKER_TASK_FAMILY }}
+          expected-image-prefix: ${{ format('{0}/{1}', vars.AWS_ECR_REGISTRY, vars.AWS_ECR_REPOSITORY_PREFIX) }}
+          expected-repository: ${{ github.repository }}
+          manifest-path: release/release-manifest.json
+          public-base-url: ${{ vars.PRODUCTION_PUBLIC_BASE_URL }}
+          smoke-paths: ${{ vars.PRODUCTION_SMOKE_PATHS }}
+          target-environment: production
+
+      - name: Record successful production deployment
+        run: |
+          bash .github/scripts/create-deployment-marker.sh \
+            production "$GITHUB_SHA" release/release-manifest.json \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ID" automatic "" deployment-marker
+
+      - name: Upload production deployment marker
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: deployment-marker-production-${{ github.sha }}
+          overwrite: true
+          path: deployment-marker
+          if-no-files-found: error
+          retention-days: 90

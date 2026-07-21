@@ -113,6 +113,16 @@ API 和 Worker 生成关联一致的 `request_id`、`trace_id`、`actor_id`、`p
 
 ## 11.8 部署与恢复
 
-目标架构中的 Web、API、MCP 和 Worker 可作为同一发布版本的独立容器部署并分别扩容；MCP 在对应能力完成前不作为可用产品入口发布。迁移采用向后兼容的 expand/migrate/contract 顺序；各已发布运行入口在滚动发布期间至少兼容前一个 Schema 版本。生产发布先运行契约、集成、端到端、权限和负载测试，再进行小流量验证。
+生产平台已锁定为 AWS，完整决策见
+[ADR-0005](../architecture/0005-aws-production-platform.md)。CloudFront／WAF 与 ALB 提供同一公开
+Origin 和按路径路由；Web、API、MCP、Worker 作为同一发布版本的独立 ECS Fargate Service
+部署并分别扩容，Migration 以一次性 ECS Task 运行。Aurora PostgreSQL 17 Serverless v2 +
+pgvector 保存事实数据，ElastiCache Valkey 保存可重建的限流与短期状态；后续搜索规模超过 PostgreSQL
+FTS／pgvector 的舒适区时，通过既有 Outbox 在同一 AWS 平台增加 OpenSearch，不替换事实库。
+
+MCP 在对应能力完成前不作为可用产品入口发布。迁移采用向后兼容的
+expand/migrate/contract 顺序；各已发布运行入口在滚动发布期间至少兼容前一个 Schema
+版本。GitHub Actions 通过 OIDC 使用短期 AWS 身份，按 Migration → API／MCP → Worker →
+Web 的顺序部署精确镜像 digest；生产发布先运行契约、集成、端到端、权限和负载测试，再进行小流量验证。
 
 PostgreSQL 启用连续归档和至少每日全量备份，目标 RPO 15 分钟、RTO 4 小时。恢复演练必须验证内容、修订、策略、PendingAction、ActionLog 与未消费 Outbox 的完整性，随后重建搜索和分析派生数据。

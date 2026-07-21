@@ -52,7 +52,7 @@ runs:
           --input-type=module \
           --eval "await import('./dist/worker.js'); await import('./dist/pending-action-worker.js')"
 
-    - name: Check packaged migration entrypoint
+    - name: Check packaged AWS database release tooling
       if: inputs.target == 'migrate'
       shell: bash
       env:
@@ -61,7 +61,31 @@ runs:
         docker run --rm \
           --entrypoint /bin/bash \
           "$IMAGE_REF" \
-          -n /opt/alphanet/db/scripts/migrate.sh
+          -ceu '
+            files=(
+              /opt/alphanet/certs/aws-rds-us-west-2-bundle.pem
+              /opt/alphanet/db/aws/bootstrap.sql
+              /opt/alphanet/db/aws/runtime-privileges.sql
+              /opt/alphanet/db/aws/runtime-privileges-and-verify.sql
+              /opt/alphanet/db/aws/runtime-smoke.sql
+              /opt/alphanet/db/aws/verify-runtime-privileges.sql
+              /opt/alphanet/db/scripts/aws-apply-runtime-privileges.sh
+              /opt/alphanet/db/scripts/aws-bootstrap-database.sh
+              /opt/alphanet/db/scripts/aws-migrate-release.sh
+              /opt/alphanet/db/scripts/aws-smoke-runtime.sh
+              /opt/alphanet/db/scripts/aws-test-runtime-acl-reconciliation.sh
+              /opt/alphanet/db/scripts/aws-test-runtime-privilege-atomicity.sh
+              /opt/alphanet/db/scripts/aws-verify-runtime-privileges.sh
+              /opt/alphanet/db/scripts/migrate.sh
+            )
+            for file in "${files[@]}"; do
+              test -r "$file"
+              test -s "$file"
+            done
+            for script in /opt/alphanet/db/scripts/*.sh; do
+              /bin/bash -n "$script"
+            done
+          '
 
     - name: Start and probe packaged Web runtime
       if: inputs.target == 'web'

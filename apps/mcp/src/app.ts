@@ -3,6 +3,7 @@ import { closeDependencies, type HealthDependency } from "@alphanet/database";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import express from "express";
 import type { Request, Response } from "express";
 import type { Logger } from "pino";
 
@@ -78,11 +79,13 @@ function createProtocolServer(version: string): McpServer {
 
 export function createMcpApp(options: McpAppOptions): McpApp {
   const dependencies = options.dependencies ?? [];
-  const app = createMcpExpressApp({
+  const app = express();
+  const protocolApp = createMcpExpressApp({
     host: options.host,
     allowedHosts: options.allowedHosts,
   });
   app.disable("x-powered-by");
+  protocolApp.disable("x-powered-by");
 
   app.get("/health/live", (_request, response) => {
     response.json(createHealthResponse("mcp", options.version));
@@ -103,7 +106,7 @@ export function createMcpApp(options: McpAppOptions): McpApp {
     response.status(criticalDependencyFailed ? 503 : 200).json(payload);
   });
 
-  app.post("/mcp", async (request, response) => {
+  protocolApp.post("/mcp", async (request, response) => {
     const protocolServer = createProtocolServer(options.version);
     const transport = new StreamableHTTPServerTransport({
       enableJsonResponse: true,
@@ -154,8 +157,13 @@ export function createMcpApp(options: McpAppOptions): McpApp {
     });
   };
 
-  app.get("/mcp", methodNotAllowed);
-  app.delete("/mcp", methodNotAllowed);
+  protocolApp.get("/mcp", methodNotAllowed);
+  protocolApp.delete("/mcp", methodNotAllowed);
+
+  // ALB target health checks use the task IP in the Host header. Keep only the
+  // health endpoints outside MCP's DNS-rebinding middleware; every protocol
+  // route remains protected by the explicit allowed-host list.
+  app.use(protocolApp);
 
   return {
     app,

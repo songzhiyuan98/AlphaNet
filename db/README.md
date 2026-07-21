@@ -33,6 +33,39 @@ records a SHA-256 checksum in `system.schema_migrations`.
 7. Run exactly one migration job during deployment. Application replicas must
    not all attempt migrations during startup.
 
+## AWS production identities
+
+AWS production uses separate migration and runtime PostgreSQL logins. The
+one-time administrator bootstrap, per-release migration/grant/verification
+gate, and rollback-only runtime DML smoke test are documented in
+`docs/operations/aws-database-access.md`. The authoritative entry points are:
+
+```text
+db/scripts/aws-bootstrap-database.sh
+db/scripts/aws-migrate-release.sh
+db/scripts/aws-smoke-runtime.sh
+```
+
+Bootstrap must run as the current database owner. Its fail-closed repair leaves
+that owner as the migration role's sole member with `ADMIN OPTION`, leaves the
+runtime role with no members, removes every role granted to either AlphaNet
+login, and removes unreviewed actual ACL grantees. The per-release reconciler
+then rebuilds every non-owner schema, table, sequence, and routine ACL from the
+reviewed inventory.
+
+Do not run production services with the migration or RDS administrator
+credential. Do not add a new runtime table/function grant without updating the
+closed privilege inventory and verifier in `db/aws`. The release gate executes
+privilege reconciliation and verification in one PostgreSQL transaction; a
+stale inventory must fail without changing the privileges used by the currently
+running application.
+
+CI exercises legacy explicit ACLs and inbound/outbound memberships against a
+disposable PostgreSQL 17 database with
+`db/scripts/aws-test-runtime-acl-reconciliation.sh`. The script is destructive,
+requires the database-owner superuser plus
+`ALPHANET_ALLOW_DESTRUCTIVE_ACL_TEST=1`, and must never run in production.
+
 ## Outbox contract
 
 A command that changes durable business state must insert its corresponding
