@@ -18,6 +18,7 @@ const ids = {
   community: "30000000-0000-4000-8000-000000000001",
   decision: "40000000-0000-4000-8000-000000000001",
   sourceContent: "50000000-0000-4000-8000-000000000001",
+  content: "60000000-0000-4000-8000-000000000001",
 } as const;
 const requestedAt = "2026-07-20T18:00:00.000Z";
 const decidedAt = "2026-07-20T18:01:00.000Z";
@@ -144,6 +145,8 @@ function detailFor(
         ],
       },
       input_digest: `sha256:${"a".repeat(64)}`,
+      idempotency_key_hint: "hmac-sha256:0123456789ab",
+      approval_reason_category: "owner_approval_required",
       decision_id: ids.decision,
       policy_version: "assisted-policy:1",
       decided_at: approved || rejected || state === "cancelled" ? decidedAt : null,
@@ -157,6 +160,47 @@ function detailFor(
       public_error: publicError,
     },
     request_id: "req-approval-detail",
+    schema_version: "1",
+  }).action;
+}
+
+function updateDetailFor(bodyMarkdown: string): OwnerActionDetail {
+  const base = detailFor();
+  return OwnerActionDetailResponseSchema.parse({
+    action: {
+      ...base,
+      operation: "update_content",
+      target: { id: ids.content, type: "content" },
+      approval_summary: "Update one published research post.",
+      preview: {
+        operation: "update_content",
+        content_id: ids.content,
+        expected_version: 7,
+        baseline: {
+          content_kind: "post",
+          resource_version: 7,
+          revision_id: ids.sourceContent,
+          title: "AMD data-center scenario review",
+          body_markdown: "The original case used the prior FX assumptions.",
+          primary_community_id: ids.community,
+          additional_community_ids: [],
+        },
+        patch: {
+          body_markdown: bodyMarkdown,
+          source_links: [
+            {
+              url: "https://example.com/revised-research",
+              title: "更新后的研究来源",
+              description: "只有 Owner 主动点击才会打开。",
+            },
+          ],
+          references: [],
+          symbols: [],
+        },
+        edit_summary: "补充汇率敏感性",
+      },
+    },
+    request_id: "req-update-approval-detail",
     schema_version: "1",
   }).action;
 }
@@ -225,6 +269,46 @@ describe("ApprovalInbox", () => {
     expect(source.getAttribute("rel")).toContain("noopener");
     expect(fetchMock.mock.calls.map(([input]) => requestUrl(input))).not.toContain(
       "https://example.com/research",
+    );
+  });
+
+  it("renders the frozen update patch without executing embedded markup", async () => {
+    const malicious = '<img src="x" onerror="alert(1)"> revised thesis';
+    const pending = updateDetailFor(malicious);
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = requestUrl(input);
+      if (url === queuePath) {
+        return Promise.resolve(Response.json(listPayload([pending])));
+      }
+      if (url === detailPath) {
+        return Promise.resolve(Response.json(detailPayload(pending)));
+      }
+      throw new Error(`Unexpected approval request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<ApprovalInbox />);
+
+    const markdown = await screen.findByTestId("approval-markdown-diff");
+    expect(markdown.textContent).toContain(malicious);
+    expect(markdown.textContent).toContain(
+      "The original case used the prior FX assumptions.",
+    );
+    expect(markdown.querySelector("img")).toBeNull();
+    expect(screen.getByTestId("approval-content-baseline-version").textContent).toBe("7");
+    expect(screen.getByTestId("approval-content-expected-version").textContent).toBe("7");
+    expect(screen.getByText("Agent 权限策略要求 Owner 审批")).toBeTruthy();
+    expect(screen.getByText("hmac-sha256:0123456789ab")).toBeTruthy();
+    expect(screen.getAllByText("更新内容").length).toBeGreaterThan(0);
+    expect(screen.getByText("补充汇率敏感性")).toBeTruthy();
+    expect(screen.getByText("将清空全部内容引用")).toBeTruthy();
+    expect(screen.queryByText("新的主题")).toBeNull();
+
+    const source = screen.getByRole("link", { name: "更新后的研究来源" });
+    expect(source.getAttribute("target")).toBe("_blank");
+    expect(source.getAttribute("rel")).toContain("noopener");
+    expect(fetchMock.mock.calls.map(([input]) => requestUrl(input))).not.toContain(
+      "https://example.com/revised-research",
     );
   });
 

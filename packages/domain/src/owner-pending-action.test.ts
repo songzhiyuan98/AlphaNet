@@ -12,7 +12,12 @@ import {
   OwnerPendingActionError,
   PostgresOwnerPendingActionService,
 } from "./owner-pending-action.js";
-import { digestResearchCommand, normalizeCreatePostCommand } from "./research-command.js";
+import {
+  digestResearchCommand,
+  freezeUpdateContentBaseline,
+  normalizeCreatePostCommand,
+  normalizeUpdateContentCommand,
+} from "./research-command.js";
 import { PENDING_ACTION_EXECUTION_MIGRATION_CHECKSUM } from "./schema-migrations.js";
 
 interface QueryCall {
@@ -70,6 +75,7 @@ const actionId = "40000000-0000-4000-8000-000000000001";
 const idempotencyId = "50000000-0000-4000-8000-000000000001";
 const decisionId = "60000000-0000-4000-8000-000000000001";
 const communityId = "70000000-0000-4000-8000-000000000001";
+const contentId = "70000000-0000-4000-8000-000000000002";
 const auditId = "80000000-0000-4000-8000-000000000001";
 const outboxEventId = "90000000-0000-4000-8000-000000000001";
 const requestedAt = new Date("2026-07-20T10:00:00.000Z");
@@ -96,6 +102,31 @@ const command = normalizeCreatePostCommand({
   ],
 });
 const inputDigest = digestResearchCommand(command);
+const updateRevisionId = "70000000-0000-4000-8000-000000000003";
+const updateCommand = freezeUpdateContentBaseline(
+  normalizeUpdateContentCommand({
+    contentId,
+    expectedVersion: 7,
+    patch: {
+      bodyMarkdown: "UGC_UPDATE_SECRET_MARKER: revised inventory thesis.",
+      sourceLinks: [],
+      references: [],
+      symbols: ["MU"],
+      topics: ["semiconductors", "inventory"],
+    },
+    editSummary: "Add inventory evidence",
+  }),
+  {
+    additionalCommunityIds: [],
+    bodyMarkdown: "UGC_UPDATE_SECRET_MARKER: original inventory thesis.",
+    contentKind: "post",
+    primaryCommunityId: communityId,
+    resourceVersion: 7,
+    revisionId: updateRevisionId,
+    title: "Original MU inventory thesis",
+  },
+);
+const updateInputDigest = digestResearchCommand(updateCommand);
 
 function service(sql: PostgresClient) {
   return new PostgresOwnerPendingActionService(sql, {
@@ -144,13 +175,19 @@ function detailRow(overrides: Readonly<Record<string, unknown>> = {}) {
     owner_id: ownerId,
     credential_id: credentialId,
     idempotency_record_id: idempotencyId,
+    idempotency_key: "owner-pending-action-test-key",
     normalized_input_ciphertext: encrypted.ciphertext,
     normalized_input_nonce: encrypted.nonce,
     normalized_input_key_version: encrypted.keyVersion,
     normalized_input_format_version: encrypted.formatVersion,
     input_digest_text: inputDigest,
     decision_id: decisionId,
+    policy_snapshot: {
+      decision: "require_approval",
+      reason: "OWNER_APPROVAL_REQUIRED",
+    },
     policy_version_text: "1",
+    expected_version_text: null,
     decided_at: null,
     decided_by_owner_id: null,
     approval_method: null,
@@ -168,6 +205,34 @@ function detailRow(overrides: Readonly<Record<string, unknown>> = {}) {
     database_now: databaseNow,
     ...overrides,
   };
+}
+
+function updateDetailRow(overrides: Readonly<Record<string, unknown>> = {}) {
+  const encrypted = encryptPendingCommand(
+    updateCommand,
+    {
+      actionId,
+      agentId,
+      credentialId,
+      inputDigest: updateInputDigest,
+      operation: "update_content",
+      ownerId,
+    },
+    keyRing,
+  );
+  return detailRow({
+    operation: "update_content",
+    target_type: "content",
+    target_id: contentId,
+    approval_summary: "Update one published research post.",
+    normalized_input_ciphertext: encrypted.ciphertext,
+    normalized_input_nonce: encrypted.nonce,
+    normalized_input_key_version: encrypted.keyVersion,
+    normalized_input_format_version: encrypted.formatVersion,
+    input_digest_text: updateInputDigest,
+    expected_version_text: "7",
+    ...overrides,
+  });
 }
 
 const rejectedDatabaseError = {
@@ -307,6 +372,29 @@ describe("PostgresOwnerPendingActionService readiness and list", () => {
     expect(readiness?.text).toContain("pending_actions_public_error");
   });
 
+  it("lists update_content as a content-targeted Owner action", async () => {
+    const row = summaryRow({
+      operation: "update_content",
+      target_type: "content",
+      target_id: contentId,
+      approval_summary: "Update one published research post.",
+    });
+    const harness = createTestSql((text) =>
+      text.includes("order by action.requested_at desc") ? [row] : [],
+    );
+
+    const page = await service(harness.sql).listActions(ownerId, {
+      operations: ["update_content"],
+    });
+
+    expect(page.items).toEqual([
+      expect.objectContaining({
+        operation: "update_content",
+        target: { id: contentId, type: "content" },
+      }),
+    ]);
+  });
+
   it("defaults to pending approval/20, keyset-orders newest first, and never selects detail secrets", async () => {
     const rows = [
       summaryRow({
@@ -419,6 +507,9 @@ describe("PostgresOwnerPendingActionService detail boundary", () => {
       requestId: "request-detail-1",
     });
     expect(view.command).toEqual(command);
+    expect(view.approvalReasonCategory).toBe("owner_approval_required");
+    expect(view.idempotencyKeyHint).toMatch(/^hmac-sha256:[0-9a-f]{12}$/u);
+    expect(view.idempotencyKeyHint).not.toContain("owner-pending-action-test-key");
     const detailIndex = harness.calls.findIndex((call) =>
       call.text.includes("for share of action"),
     );
@@ -436,6 +527,81 @@ describe("PostgresOwnerPendingActionService detail boundary", () => {
     expect(audit.text).not.toMatch(/cipher|nonce|idempotency|policy_snapshot|lease/iu);
     expect(JSON.stringify(audit.values)).not.toContain("UGC_SECRET_MARKER");
     expect(audit.text).toContain("'owner_detail_view'");
+  });
+
+  it("decrypts an update preview and binds its target and expected version column", async () => {
+    const row = updateDetailRow();
+    const harness = createTestSql((text) => {
+      if (text.startsWith("set local")) return [];
+      if (text.includes("for share of action")) return [row];
+      if (text.includes("insert into platform.action_logs")) return [];
+      return [];
+    });
+
+    const view = await service(harness.sql).getAction(ownerId, actionId, {
+      requestId: "request-update-detail",
+    });
+
+    expect(view).toMatchObject({
+      command: updateCommand,
+      expectedVersion: 7,
+      operation: "update_content",
+      target: { id: contentId, type: "content" },
+    });
+    const detail = harness.calls.find((call) =>
+      call.text.includes("for share of action"),
+    );
+    expect(detail?.text).toContain(
+      "action.expected_version::text as expected_version_text",
+    );
+    expect(JSON.stringify(harness.calls)).not.toContain("UGC_UPDATE_SECRET_MARKER");
+  });
+
+  it("fails closed when an update target or expected version contradicts ciphertext", async () => {
+    for (const row of [
+      updateDetailRow({ expected_version_text: "8" }),
+      updateDetailRow({ expected_version_text: null }),
+      updateDetailRow({ target_id: communityId }),
+      detailRow({ expected_version_text: "unsafe" }),
+    ]) {
+      const harness = createTestSql((text) => {
+        if (text.startsWith("set local")) return [];
+        if (text.includes("for share of action")) return [row];
+        if (text.includes("insert into platform.action_logs")) return [];
+        return [];
+      });
+      await expect(
+        service(harness.sql).getAction(ownerId, actionId, {
+          requestId: "request-update-mismatch",
+        }),
+      ).rejects.toSatisfy((error: unknown) => {
+        expectOwnerError(error, "OWNER_ACTION_UNAVAILABLE");
+        return true;
+      });
+    }
+  });
+
+  it("fails closed when the approval reason or idempotency hint source is corrupt", async () => {
+    for (const row of [
+      detailRow({ policy_snapshot: { decision: "allow", reason: "ALLOWED_BY_POLICY" } }),
+      detailRow({ idempotency_key: "" }),
+      detailRow({ idempotency_key: "unsafe\nkey" }),
+    ]) {
+      const harness = createTestSql((text) => {
+        if (text.startsWith("set local")) return [];
+        if (text.includes("for share of action")) return [row];
+        if (text.includes("insert into platform.action_logs")) return [];
+        return [];
+      });
+      await expect(
+        service(harness.sql).getAction(ownerId, actionId, {
+          requestId: "request-corrupt-owner-reason",
+        }),
+      ).rejects.toSatisfy((error: unknown) => {
+        expectOwnerError(error, "OWNER_ACTION_UNAVAILABLE");
+        return true;
+      });
+    }
   });
 
   it("returns ownership-safe 404 before audit or decryption", async () => {
@@ -532,6 +698,40 @@ describe("PostgresOwnerPendingActionService decisions", () => {
     // resource_id=PendingAction ID because the 000007 trigger only allows it to
     // be cleared during a terminal transition.
     expect(idempotency?.text).not.toContain("resource_id = null");
+  });
+
+  it("preserves update expected_version in an approved idempotency replay", async () => {
+    const harness = decisionHarness(updateDetailRow(), "approve");
+
+    const view = await service(harness.sql).approveAction(ownerId, actionId, {
+      expectedVersion: 1,
+      reasonCode: "owner_approved",
+      requestId: "request-approve-update",
+    });
+
+    expect(view).toMatchObject({
+      expectedVersion: 7,
+      operation: "update_content",
+      state: "approved",
+    });
+    const idempotency = harness.calls.find((call) =>
+      call.text.includes("update platform.idempotency_records as idempotency"),
+    );
+    const envelope = idempotency?.values.find(
+      (value) => typeof value === "object" && value !== null && "pending_action" in value,
+    ) as
+      | {
+          pending_action: {
+            expected_version?: number;
+            operation: string;
+          };
+        }
+      | undefined;
+    expect(envelope?.pending_action).toMatchObject({
+      expected_version: 7,
+      operation: "update_content",
+    });
+    expect(JSON.stringify(envelope)).not.toContain("UGC_UPDATE_SECRET_MARKER");
   });
 
   it("rejects atomically with exact DB/public errors, terminal retention, and camel replay error", async () => {

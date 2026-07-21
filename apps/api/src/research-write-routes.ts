@@ -3,8 +3,11 @@ import {
   CreatePostWriteResultSchema,
   ReplyToContentRequestSchema,
   ReplyToContentWriteResultSchema,
+  UpdateContentRequestSchema,
+  UpdateContentWriteResultSchema,
   type CreatePostWriteResult,
   type ReplyToContentWriteResult,
+  type UpdateContentWriteResult,
   type V1ErrorDetail,
 } from "@alphanet/contracts";
 import {
@@ -76,6 +79,41 @@ export function idempotencyKey(request: FastifyRequest): string | null {
   return validTransportIdempotencyKey(normalized);
 }
 
+function singleTransportHeader(
+  request: FastifyRequest,
+  headerName: string,
+): string | null {
+  const distinctValues = request.raw.headersDistinct?.[headerName];
+  if (distinctValues) {
+    return distinctValues.length === 1 ? (distinctValues[0] ?? null) : null;
+  }
+
+  const rawValues: string[] = [];
+  for (let index = 0; index < request.raw.rawHeaders.length; index += 2) {
+    if (request.raw.rawHeaders[index]?.toLowerCase() === headerName) {
+      const value = request.raw.rawHeaders[index + 1];
+      if (value !== undefined) rawValues.push(value);
+    }
+  }
+  if (rawValues.length > 0) {
+    return rawValues.length === 1 ? (rawValues[0] ?? null) : null;
+  }
+
+  const normalized = request.headers[headerName];
+  if (Array.isArray(normalized)) {
+    return normalized.length === 1 ? (normalized[0] ?? null) : null;
+  }
+  return normalized ?? null;
+}
+
+function ifMatchVersion(request: FastifyRequest): number | null {
+  const value = singleTransportHeader(request, "if-match");
+  const match = value?.match(/^"([1-9][0-9]*)"$/u);
+  if (!match) return null;
+  const version = Number(match[1]);
+  return Number.isSafeInteger(version) && version > 0 ? version : null;
+}
+
 function publicError(error: ResearchWriteOutcome["error"]): V1ErrorDetail | null {
   if (error === null) return null;
   return {
@@ -89,19 +127,21 @@ function publicError(error: ResearchWriteOutcome["error"]): V1ErrorDetail | null
 
 function publicPendingAction(outcome: ResearchWriteOutcome) {
   const action = outcome.pendingAction;
-  return action === null
-    ? null
-    : {
-        id: action.id,
-        operation: action.operation,
-        state: action.state,
-        expires_at: action.expiresAt.toISOString(),
-        input_digest: action.inputDigest,
-        requested_at: action.requestedAt.toISOString(),
-        decision_id: action.decisionId,
-        policy_version: action.policyVersion,
-        approval_summary: action.approvalSummary,
-      };
+  if (action === null) return null;
+  const summary = {
+    id: action.id,
+    operation: action.operation,
+    state: action.state,
+    expires_at: action.expiresAt.toISOString(),
+    input_digest: action.inputDigest,
+    requested_at: action.requestedAt.toISOString(),
+    decision_id: action.decisionId,
+    policy_version: action.policyVersion,
+    approval_summary: action.approvalSummary,
+  };
+  return action.operation === "update_content"
+    ? { ...summary, expected_version: action.expectedVersion }
+    : summary;
 }
 
 function serializeCreatePost(
@@ -155,6 +195,43 @@ function serializeReply(
   return parsed.success ? parsed.data : null;
 }
 
+function serializeUpdateContent(
+  request: FastifyRequest,
+  outcome: ResearchWriteOutcome,
+  expectedContentId: string,
+  expectedVersion: number,
+): UpdateContentWriteResult | null {
+  if (outcome.operation !== "update_content") return null;
+  if (
+    (outcome.result !== null &&
+      (outcome.result.contentId !== expectedContentId ||
+        outcome.result.resourceVersion !== expectedVersion + 1)) ||
+    (outcome.pendingAction !== null &&
+      (outcome.pendingAction.operation !== "update_content" ||
+        outcome.pendingAction.expectedVersion !== expectedVersion))
+  ) {
+    return null;
+  }
+  const result =
+    outcome.result === null || "rootContentId" in outcome.result
+      ? null
+      : {
+          content_id: outcome.result.contentId,
+          revision_id: outcome.result.revisionId,
+          resource_version: outcome.result.resourceVersion,
+        };
+  const parsed = UpdateContentWriteResultSchema.safeParse({
+    decision: outcome.decision,
+    status: outcome.status,
+    result,
+    pending_action: publicPendingAction(outcome),
+    error: publicError(outcome.error),
+    request_id: request.id,
+    schema_version: "1",
+  });
+  return parsed.success ? parsed.data : null;
+}
+
 function sendWriteError(
   request: FastifyRequest,
   reply: FastifyReply,
@@ -196,7 +273,7 @@ function sendWriteError(
 function sendOutcome(
   reply: FastifyReply,
   outcome: ResearchWriteOutcome,
-  response: CreatePostWriteResult | ReplyToContentWriteResult,
+  response: CreatePostWriteResult | ReplyToContentWriteResult | UpdateContentWriteResult,
 ): FastifyReply {
   if (outcome.status === "pending_approval" && outcome.pendingAction) {
     void reply.header("location", `/v1/actions/${outcome.pendingAction.id}`);
@@ -204,7 +281,7 @@ function sendOutcome(
     return reply.code(202).send(response);
   }
   if (outcome.status === "succeeded") {
-    return reply.code(201).send(response);
+    return reply.code(outcome.operation === "update_content" ? 200 : 201).send(response);
   }
   if (outcome.error?.retryAfterMs !== null && outcome.error?.retryAfterMs !== undefined) {
     void reply.header(
@@ -230,8 +307,10 @@ function statusForOutcomeError(code: ResearchWriteErrorCode | undefined): number
       return 404;
     case "IDEMPOTENCY_CONFLICT":
     case "IDEMPOTENCY_IN_PROGRESS":
+    case "VERSION_CONFLICT":
       return 409;
     case "COMMUNITY_RESTRICTED":
+    case "NOT_CONTENT_AUTHOR":
     case "POLICY_DENIED":
     case "REPLIES_CLOSED":
     case "SCOPE_REQUIRED":
@@ -248,7 +327,7 @@ function statusForOutcomeError(code: ResearchWriteErrorCode | undefined): number
 
 function writeAuthorizationBoundary(
   options: ResearchWriteRouteOptions,
-  operation: "create_post" | "reply_to_content",
+  operation: "create_post" | "reply_to_content" | "update_content",
 ) {
   const boundary = createAgentRequestAuthorizationBoundary({
     operation,
@@ -273,6 +352,7 @@ export function registerResearchWriteRoutes(
 ): void {
   const createPostAuthorization = writeAuthorizationBoundary(options, "create_post");
   const replyAuthorization = writeAuthorizationBoundary(options, "reply_to_content");
+  const updateAuthorization = writeAuthorizationBoundary(options, "update_content");
 
   app.post(
     "/v1/posts",
@@ -367,6 +447,88 @@ export function registerResearchWriteRoutes(
           request.log.error(
             { operation: outcome.operation, status: outcome.status },
             "Reply result violated its public response contract",
+          );
+          return sendWriteError(request, reply, new Error("projection invalid"));
+        }
+        return sendOutcome(reply, outcome, response);
+      } catch (error) {
+        return sendWriteError(request, reply, error);
+      }
+    },
+  );
+
+  app.patch(
+    "/v1/content/:contentId",
+    { onRequest: updateAuthorization.onRequest },
+    async (request, reply) => {
+      const authorization = updateAuthorization.getAuthorization(request);
+      const key = idempotencyKey(request);
+      const expectedVersion = ifMatchVersion(request);
+      const parameters = request.params as { contentId?: unknown };
+      if (
+        !key ||
+        expectedVersion === null ||
+        !isRecord(request.body) ||
+        "content_id" in request.body ||
+        "expected_version" in request.body ||
+        "idempotency_key" in request.body
+      ) {
+        return validationFailed(request, reply);
+      }
+      const body = UpdateContentRequestSchema.safeParse({
+        ...request.body,
+        content_id: parameters.contentId,
+        expected_version: expectedVersion,
+        idempotency_key: key,
+      });
+      if (!body.success) return validationFailed(request, reply);
+
+      const patch = body.data.patch;
+      try {
+        const outcome = await options.service.updateContent(
+          authorization.context,
+          {
+            contentId: body.data.content_id,
+            expectedVersion: body.data.expected_version,
+            idempotencyKey: body.data.idempotency_key,
+            patch: {
+              ...(patch.title === undefined ? {} : { title: patch.title }),
+              ...(patch.body_markdown === undefined
+                ? {}
+                : { bodyMarkdown: patch.body_markdown }),
+              ...(patch.source_links === undefined
+                ? {}
+                : { sourceLinks: patch.source_links }),
+              ...(patch.references === undefined
+                ? {}
+                : {
+                    references: patch.references.map((reference) => ({
+                      targetContentId: reference.target_content_id,
+                      relationType: reference.relation_type,
+                    })),
+                  }),
+              ...(patch.additional_community_ids === undefined
+                ? {}
+                : { additionalCommunityIds: patch.additional_community_ids }),
+              ...(patch.symbols === undefined ? {} : { symbols: patch.symbols }),
+              ...(patch.topics === undefined ? {} : { topics: patch.topics }),
+            },
+            ...(body.data.edit_summary === undefined
+              ? {}
+              : { editSummary: body.data.edit_summary }),
+          },
+          { channel: "rest", requestId: request.id },
+        );
+        const response = serializeUpdateContent(
+          request,
+          outcome,
+          body.data.content_id,
+          body.data.expected_version,
+        );
+        if (!response) {
+          request.log.error(
+            { operation: outcome.operation, status: outcome.status },
+            "Update-content result violated its public response contract",
           );
           return sendWriteError(request, reply, new Error("projection invalid"));
         }

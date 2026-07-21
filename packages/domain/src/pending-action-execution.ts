@@ -14,6 +14,7 @@ import {
   type PendingActionOperation,
   type PendingActionState,
   type ReplyToContentActionResult,
+  type UpdateContentActionResult,
 } from "./pending-action.js";
 import { PENDING_ACTION_EXECUTION_MIGRATION_CHECKSUM } from "./schema-migrations.js";
 
@@ -77,9 +78,13 @@ export interface FencedPendingAction {
   readonly credentialId: string;
   readonly decisionAuditId: string | null;
   readonly decisionId: string;
-  readonly expectedVersion: string | null;
+  readonly expectedVersion: number | null;
   readonly expiresAt: Date;
   readonly failureCount: number;
+  /** Sensitive: use only to derive a non-reversible audit digest. */
+  readonly idempotencyKey: string;
+  /** Stable internal linkage for the terminal domain-write audit. */
+  readonly idempotencyRecordId: string;
   readonly inputDigest: Buffer;
   readonly normalizedInput: {
     readonly ciphertext: Buffer;
@@ -145,7 +150,7 @@ export interface PendingActionRetryOptions {
 export interface PendingActionExecutionSuccessInput {
   correlatedOutboxEventId: string;
   resourceId: string;
-  result: CreatePostActionResult | ReplyToContentActionResult;
+  result: CreatePostActionResult | ReplyToContentActionResult | UpdateContentActionResult;
 }
 
 export interface PendingActionExecutionSuccessResult {
@@ -172,6 +177,7 @@ interface ActionProjectionRow {
   decision_id: string;
   error: unknown;
   expires_at: Date;
+  expected_version: string | null;
   failure_count: number;
   id: string;
   idempotency_record_id: string;
@@ -210,6 +216,7 @@ interface FencedActionRow extends ActionProjectionRow {
   database_now: Date;
   decision_audit_id: string | null;
   expected_version: string | null;
+  idempotency_key: string;
   input_digest: Buffer;
   normalized_input_ciphertext: Buffer;
   normalized_input_format_version: number;
@@ -266,6 +273,11 @@ type SuccessResultSnapshot =
       resource_version: number;
       revision_id: string;
       root_content_id: string;
+    })
+  | (OutboxJsonObject & {
+      content_id: string;
+      resource_version: number;
+      revision_id: string | null;
     });
 
 function assertIntegerInRange(
@@ -330,9 +342,13 @@ function snapshotSuccessInput(
   const resourceId = input.resourceId;
   assertActionId(correlatedOutboxEventId);
   assertActionId(resourceId);
-  if (claim.operation !== "create_post" && claim.operation !== "reply_to_content") {
+  if (
+    claim.operation !== "create_post" &&
+    claim.operation !== "reply_to_content" &&
+    claim.operation !== "update_content"
+  ) {
     throw new RangeError(
-      "Only create_post and reply_to_content claims can succeed here.",
+      "Only create_post, reply_to_content, and update_content claims can succeed here.",
     );
   }
   const expectedKeys =
@@ -346,8 +362,16 @@ function snapshotSuccessInput(
   if (typeof contentId !== "string" || !UUID_PATTERN.test(contentId)) {
     throw new RangeError("result.content_id must be a valid UUID.");
   }
-  if (typeof revisionId !== "string" || !UUID_PATTERN.test(revisionId)) {
-    throw new RangeError("result.revision_id must be a valid UUID.");
+  if (
+    (claim.operation === "update_content" &&
+      revisionId !== null &&
+      (typeof revisionId !== "string" || !UUID_PATTERN.test(revisionId))) ||
+    (claim.operation !== "update_content" &&
+      (typeof revisionId !== "string" || !UUID_PATTERN.test(revisionId)))
+  ) {
+    throw new RangeError(
+      "result.revision_id must be a valid UUID, or null for update_content.",
+    );
   }
   if (!Number.isSafeInteger(resourceVersion) || resourceVersion < 1) {
     throw new RangeError("result.resource_version must be a positive safe integer.");
@@ -423,6 +447,28 @@ function parseOperation(value: string): PendingActionOperation {
   return value as PendingActionOperation;
 }
 
+function parseExpectedVersion(
+  operation: PendingActionOperation,
+  value: string | null,
+): number | null {
+  const requiresExpectedVersion =
+    operation === "update_content" || operation === "delete_content";
+  if (value === null) {
+    if (requiresExpectedVersion) {
+      throw new Error("A content mutation PendingAction requires expected_version.");
+    }
+    return null;
+  }
+  if (!requiresExpectedVersion || !/^[1-9][0-9]*$/u.test(value)) {
+    throw new Error("PendingAction expected_version contradicts its operation.");
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error("PendingAction expected_version exceeds the safe integer range.");
+  }
+  return parsed;
+}
+
 function parseState(value: string): PendingActionState {
   if (!stateSet.has(value)) {
     throw new Error("PendingAction execution returned an unknown state.");
@@ -474,18 +520,20 @@ function writeStatusForState(
 
 function replayEnvelope(row: ActionProjectionRow): postgres.JSONValue {
   const state = parseState(row.state);
+  const operation = parseOperation(row.operation);
+  const expectedVersion = parseExpectedVersion(operation, row.expected_version);
   const status = writeStatusForState(state);
   const terminalState =
     state === "expired" || state === "failed" || state === "invalidated" ? state : null;
   return {
     version: 1,
-    operation: parseOperation(row.operation),
+    operation,
     decision: "require_approval",
     status,
     result: state === "succeeded" ? (row.result as postgres.JSONValue) : null,
     pending_action: {
       id: row.id,
-      operation: parseOperation(row.operation),
+      operation,
       state,
       expires_at: row.expires_at.toISOString(),
       input_digest: row.input_digest_text,
@@ -493,6 +541,7 @@ function replayEnvelope(row: ActionProjectionRow): postgres.JSONValue {
       decision_id: row.decision_id,
       policy_version: row.policy_version,
       approval_summary: row.approval_summary,
+      ...(operation === "update_content" ? { expected_version: expectedVersion } : {}),
     },
     error: terminalState === null ? null : terminalReplayError(terminalState),
   };
@@ -525,6 +574,16 @@ function mapCommittedState(row: CommittedStateRow): PendingActionCommittedState 
 }
 
 function mapFencedAction(row: FencedActionRow): FencedPendingAction {
+  const operation = parseOperation(row.operation);
+  if (
+    typeof row.idempotency_key !== "string" ||
+    row.idempotency_key.length < 1 ||
+    row.idempotency_key.length > 200 ||
+    row.idempotency_key.trim().length === 0 ||
+    /\p{Cc}/u.test(row.idempotency_key)
+  ) {
+    throw new Error("PendingAction has an invalid idempotency key.");
+  }
   return {
     actionId: row.id,
     agentId: row.agent_id,
@@ -532,9 +591,11 @@ function mapFencedAction(row: FencedActionRow): FencedPendingAction {
     credentialId: row.credential_id,
     decisionAuditId: row.decision_audit_id,
     decisionId: row.decision_id,
-    expectedVersion: row.expected_version,
+    expectedVersion: parseExpectedVersion(operation, row.expected_version),
     expiresAt: row.expires_at,
     failureCount: row.failure_count,
+    idempotencyKey: row.idempotency_key,
+    idempotencyRecordId: row.idempotency_record_id,
     inputDigest: Buffer.from(row.input_digest),
     normalizedInput: {
       ciphertext: Buffer.from(row.normalized_input_ciphertext),
@@ -542,7 +603,7 @@ function mapFencedAction(row: FencedActionRow): FencedPendingAction {
       keyVersion: row.normalized_input_key_version,
       nonce: Buffer.from(row.normalized_input_nonce),
     },
-    operation: parseOperation(row.operation),
+    operation,
     ownerId: row.owner_id,
     policyId: row.policy_id,
     policySnapshot: row.policy_snapshot,
@@ -682,6 +743,7 @@ export class PostgresPendingActionExecutionRepository {
             action.idempotency_record_id,
             action.decision_id,
             action.policy_version::text as policy_version,
+            action.expected_version::text as expected_version,
             action.approval_summary,
             'sha256:' || encode(action.input_digest, 'hex') as input_digest_text
         `;
@@ -781,7 +843,11 @@ export class PostgresPendingActionExecutionRepository {
     const leaseTokenDigest = assertClaim(claim, this.#leaseOwner);
     const snapshot = snapshotSuccessInput(claim, input);
     const expectedEventType =
-      claim.operation === "create_post" ? "content.published" : "content.reply";
+      claim.operation === "create_post"
+        ? "content.published"
+        : claim.operation === "reply_to_content"
+          ? "content.reply"
+          : "content.revised";
     const correlations = await transaction<IdRow[]>`
       select event.id
       from system.outbox_events as event
@@ -810,10 +876,15 @@ export class PostgresPendingActionExecutionRepository {
       from database_clock
       where action.id = ${claim.actionId}
         and action.state = 'executing'
+        and action.operation = ${claim.operation}
         and action.attempt_count = ${claim.attemptCount}
         and action.lease_owner = ${this.#leaseOwner}
         and action.lease_token_digest = ${leaseTokenDigest}
         and action.lease_expires_at > database_clock.now
+        and (
+          action.operation <> 'update_content'
+          or action.expected_version + 1 = ${snapshot.result.resource_version}
+        )
       returning
         action.id,
         action.owner_id,
@@ -831,12 +902,26 @@ export class PostgresPendingActionExecutionRepository {
         action.idempotency_record_id,
         action.decision_id,
         action.policy_version::text as policy_version,
+        action.expected_version::text as expected_version,
         action.approval_summary,
         'sha256:' || encode(action.input_digest, 'hex') as input_digest_text
     `;
     const row = rows[0];
     if (!row) {
       throw new PendingActionLeaseLostError(claim.actionId, claim.attemptCount);
+    }
+    const expectedVersion = parseExpectedVersion(
+      parseOperation(row.operation),
+      row.expected_version,
+    );
+    if (
+      claim.operation === "update_content" &&
+      (expectedVersion === null ||
+        snapshot.result.resource_version !== expectedVersion + 1)
+    ) {
+      throw new RangeError(
+        "An update_content result must advance expected_version by exactly one.",
+      );
     }
 
     const resolvedOutbox = await appendOutboxEvent(transaction, {
@@ -1010,6 +1095,7 @@ export class PostgresPendingActionExecutionRepository {
           action.idempotency_record_id,
           action.decision_id,
           action.policy_version::text as policy_version,
+          action.expected_version::text as expected_version,
           action.approval_summary,
           'sha256:' || encode(action.input_digest, 'hex') as input_digest_text
       `;
@@ -1208,6 +1294,7 @@ export class PostgresPendingActionExecutionRepository {
         action.idempotency_record_id,
         action.decision_id,
         action.policy_version::text as policy_version,
+        action.expected_version::text as expected_version,
         action.approval_summary,
         'sha256:' || encode(action.input_digest, 'hex') as input_digest_text
     `;
@@ -1267,6 +1354,7 @@ export class PostgresPendingActionExecutionRepository {
         action.idempotency_record_id,
         action.decision_id,
         action.policy_version::text as policy_version,
+        action.expected_version::text as expected_version,
         action.approval_summary,
         'sha256:' || encode(action.input_digest, 'hex') as input_digest_text
     `;
@@ -1341,6 +1429,7 @@ export class PostgresPendingActionExecutionRepository {
         action.idempotency_record_id,
         action.decision_id,
         action.policy_version::text as policy_version,
+        action.expected_version::text as expected_version,
         action.approval_summary,
         'sha256:' || encode(action.input_digest, 'hex') as input_digest_text
     `;
@@ -1404,6 +1493,7 @@ export class PostgresPendingActionExecutionRepository {
         action.idempotency_record_id,
         action.decision_id,
         action.policy_version::text as policy_version,
+        action.expected_version::text as expected_version,
         action.approval_summary,
         'sha256:' || encode(action.input_digest, 'hex') as input_digest_text
     `;
@@ -1447,6 +1537,7 @@ export class PostgresPendingActionExecutionRepository {
         action.normalized_input_nonce,
         action.normalized_input_key_version,
         action.normalized_input_format_version,
+        action.idempotency_key,
         action.input_digest,
         action.expected_version::text as expected_version,
         action.policy_id,
@@ -1496,6 +1587,7 @@ export class PostgresPendingActionExecutionRepository {
         action.normalized_input_nonce,
         action.normalized_input_key_version,
         action.normalized_input_format_version,
+        action.idempotency_key,
         action.input_digest,
         action.expected_version::text as expected_version,
         action.policy_id,
@@ -1540,6 +1632,8 @@ export class PostgresPendingActionExecutionRepository {
       state === "expired" ||
       state === "failed" ||
       state === "invalidated";
+    const successResponseCode =
+      parseOperation(action.operation) === "update_content" ? 200 : 201;
     let resourceId: string | null = null;
     if (state === "succeeded") {
       if (options.resourceId === undefined) {
@@ -1551,7 +1645,7 @@ export class PostgresPendingActionExecutionRepository {
       ? await transaction<IdRow[]>`
           update platform.idempotency_records as idempotency
           set status = ${status},
-              response_code = ${state === "succeeded" ? 201 : 409},
+              response_code = ${state === "succeeded" ? successResponseCode : 409},
               response_body = ${transaction.json(replayEnvelope(action))},
               resource_id = ${resourceId},
               terminal_at = ${action.terminal_at},

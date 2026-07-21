@@ -350,7 +350,46 @@ function serializeContentDetail(
     viewer_state: serializeViewerState(detail.viewerState),
     content_safety: serializeSafety(detail.contentSafety),
     counts_as_of: detail.countsAsOf.toISOString(),
+    revision_scope:
+      detail.revision === null
+        ? "none"
+        : detail.revision.id === content.currentRevisionId
+          ? "current"
+          : "historical",
+    classification_scope: "current",
+    social_state_scope: "current",
     resource_version: detail.resourceVersion,
+    ...(detail.revisionHistory === undefined
+      ? {}
+      : {
+          revision_history: detail.revisionHistory.map((revision) => ({
+            id: revision.id,
+            revision_number: revision.revisionNumber,
+            source_version: revision.sourceVersion,
+            edit_summary: revision.editSummary,
+            created_by_actor_id: revision.createdByActorId,
+            created_at: revision.createdAt.toISOString(),
+            content_hash: revision.contentHash,
+          })),
+        }),
+    ...(detail.revisionPage === undefined
+      ? {}
+      : {
+          revision_page: {
+            next_cursor: detail.revisionPage.nextCursor,
+            has_more: detail.revisionPage.hasMore,
+            limit: detail.revisionPage.limit,
+          },
+        }),
+    ...(detail.revisionOrdering === undefined
+      ? {}
+      : {
+          revision_ordering: {
+            snapshot_id: detail.revisionOrdering.snapshotId,
+            ordering_version: detail.revisionOrdering.orderingVersion,
+            as_of: detail.revisionOrdering.asOf.toISOString(),
+          },
+        }),
     request_id: request.id,
     schema_version: "1",
   });
@@ -588,17 +627,23 @@ function contentInput(
   if (!parsed.success) {
     return { error: validationFailed(request, reply, audience) } as const;
   }
-  if (
-    parsed.data.revision_id !== undefined ||
-    parsed.data.include_revision_history === true ||
-    parsed.data.revision_limit !== undefined ||
-    (parsed.data.revision_cursor !== undefined && parsed.data.revision_cursor !== null)
-  ) {
-    return {
-      error: capabilityUnavailable(request, reply, "Revision history and selection"),
-    } as const;
-  }
-  return { input: { contentId: parsed.data.content_id } } as const;
+  return {
+    input: {
+      contentId: parsed.data.content_id,
+      ...(parsed.data.revision_id === undefined
+        ? {}
+        : { revisionId: parsed.data.revision_id }),
+      ...(parsed.data.include_revision_history === undefined
+        ? {}
+        : { includeRevisionHistory: parsed.data.include_revision_history }),
+      ...(parsed.data.revision_limit === undefined
+        ? {}
+        : { revisionLimit: parsed.data.revision_limit }),
+      ...(parsed.data.revision_cursor === undefined
+        ? {}
+        : { revisionCursor: parsed.data.revision_cursor }),
+    },
+  } as const;
 }
 
 function discussionInput(

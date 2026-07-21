@@ -33,6 +33,23 @@ export interface ReplyCommandInput {
   references?: readonly ResearchContentReferenceInput[] | undefined;
 }
 
+export interface UpdateContentPatchInput {
+  title?: string | undefined;
+  bodyMarkdown?: string | undefined;
+  sourceLinks?: readonly ResearchSourceLinkInput[] | undefined;
+  references?: readonly ResearchContentReferenceInput[] | undefined;
+  additionalCommunityIds?: readonly string[] | undefined;
+  symbols?: readonly string[] | undefined;
+  topics?: readonly string[] | undefined;
+}
+
+export interface UpdateContentCommandInput {
+  contentId: string;
+  expectedVersion: number;
+  patch: UpdateContentPatchInput;
+  editSummary?: string | undefined;
+}
+
 export interface NormalizedResearchSourceLink {
   url: string;
   title?: string | undefined;
@@ -50,6 +67,7 @@ interface NormalizedResearchCommandFields {
   topics: string[];
   sourceLinks: NormalizedResearchSourceLink[];
   references: NormalizedResearchContentReference[];
+  frozenMentionActorIds?: string[] | undefined;
 }
 
 export interface NormalizedCreatePostCommand extends NormalizedResearchCommandFields {
@@ -64,17 +82,49 @@ export interface NormalizedReplyCommand extends NormalizedResearchCommandFields 
   parentContentId: string;
 }
 
+export interface NormalizedUpdateContentPatch {
+  title?: string | undefined;
+  bodyMarkdown?: string | undefined;
+  sourceLinks?: NormalizedResearchSourceLink[] | undefined;
+  references?: NormalizedResearchContentReference[] | undefined;
+  additionalCommunityIds?: string[] | undefined;
+  symbols?: string[] | undefined;
+  topics?: string[] | undefined;
+}
+
+export interface FrozenUpdateContentBaseline {
+  additionalCommunityIds: string[];
+  bodyMarkdown: string;
+  contentKind: "post" | "reply";
+  primaryCommunityId: string;
+  resourceVersion: number;
+  revisionId: string;
+  title: string | null;
+}
+
+export interface NormalizedUpdateContentCommand {
+  operation: "update_content";
+  contentId: string;
+  expectedVersion: number;
+  patch: NormalizedUpdateContentPatch;
+  editSummary?: string | undefined;
+  frozenMentionActorIds?: string[] | undefined;
+  frozenUpdateBaseline?: FrozenUpdateContentBaseline | undefined;
+}
+
 export type NormalizedResearchCommand =
-  NormalizedCreatePostCommand | NormalizedReplyCommand;
+  NormalizedCreatePostCommand | NormalizedReplyCommand | NormalizedUpdateContentCommand;
 
 export type ResearchCommandValidationErrorCode =
   | "DUPLICATE_COMMUNITY_TARGET"
   | "IDENTIFIER_INVALID"
+  | "PATCH_EMPTY"
   | "SOURCE_LINK_CONFLICT"
   | "SOURCE_URL_INVALID"
   | "SYMBOL_INVALID"
   | "TEXT_INVALID"
-  | "TOPIC_INVALID";
+  | "TOPIC_INVALID"
+  | "VERSION_INVALID";
 
 export class ResearchCommandValidationError extends Error {
   readonly code: ResearchCommandValidationErrorCode;
@@ -268,6 +318,157 @@ export function normalizeReplyCommand(input: ReplyCommandInput): NormalizedReply
   };
 }
 
+export function normalizeUpdateContentCommand(
+  input: UpdateContentCommandInput,
+): NormalizedUpdateContentCommand {
+  if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
+    throw new ResearchCommandValidationError(
+      "VERSION_INVALID",
+      "The expected content version must be a positive safe integer.",
+    );
+  }
+
+  const patch: NormalizedUpdateContentPatch = {};
+  if (input.patch.title !== undefined) {
+    patch.title = normalizeLabel(input.patch.title);
+  }
+  if (input.patch.bodyMarkdown !== undefined) {
+    patch.bodyMarkdown = normalizeText(input.patch.bodyMarkdown);
+  }
+  if (input.patch.sourceLinks !== undefined) {
+    patch.sourceLinks = normalizeSourceLinks(input.patch.sourceLinks);
+  }
+  if (input.patch.references !== undefined) {
+    patch.references = normalizeReferences(input.patch.references);
+  }
+  if (input.patch.additionalCommunityIds !== undefined) {
+    patch.additionalCommunityIds =
+      input.patch.additionalCommunityIds.map(normalizeIdentifier);
+    if (
+      new Set(patch.additionalCommunityIds).size !== patch.additionalCommunityIds.length
+    ) {
+      throw new ResearchCommandValidationError(
+        "DUPLICATE_COMMUNITY_TARGET",
+        "Additional community targets must be unique.",
+      );
+    }
+  }
+  if (input.patch.symbols !== undefined) {
+    patch.symbols = normalizeSymbols(input.patch.symbols);
+  }
+  if (input.patch.topics !== undefined) {
+    patch.topics = normalizeTopics(input.patch.topics);
+  }
+  if (Object.keys(patch).length === 0) {
+    throw new ResearchCommandValidationError(
+      "PATCH_EMPTY",
+      "An update command must contain at least one mutable field.",
+    );
+  }
+
+  let editSummary: string | undefined;
+  if (input.editSummary !== undefined) {
+    editSummary = normalizeOptionalLabel(input.editSummary);
+    if (editSummary === undefined) {
+      throw new ResearchCommandValidationError(
+        "TEXT_INVALID",
+        "An edit summary cannot be blank when provided.",
+      );
+    }
+  }
+
+  return {
+    operation: "update_content",
+    contentId: normalizeIdentifier(input.contentId),
+    expectedVersion: input.expectedVersion,
+    patch,
+    ...(editSummary === undefined ? {} : { editSummary }),
+  };
+}
+
+export function freezeResearchCommandMentionActors<T extends NormalizedResearchCommand>(
+  command: T,
+  actorIds: readonly string[],
+): T {
+  const normalizedActorIds = actorIds.map(normalizeIdentifier);
+  if (new Set(normalizedActorIds).size !== normalizedActorIds.length) {
+    throw new ResearchCommandValidationError(
+      "IDENTIFIER_INVALID",
+      "Frozen mention recipients must be unique.",
+    );
+  }
+  return {
+    ...command,
+    frozenMentionActorIds: normalizedActorIds,
+  };
+}
+
+export function freezeUpdateContentBaseline(
+  command: NormalizedUpdateContentCommand,
+  baseline: FrozenUpdateContentBaseline,
+): NormalizedUpdateContentCommand {
+  if (
+    !Number.isSafeInteger(baseline.resourceVersion) ||
+    baseline.resourceVersion < 1 ||
+    baseline.resourceVersion !== command.expectedVersion
+  ) {
+    throw new ResearchCommandValidationError(
+      "VERSION_INVALID",
+      "The frozen update baseline must match the expected content version.",
+    );
+  }
+  const revisionId = normalizeIdentifier(baseline.revisionId);
+  const primaryCommunityId = normalizeIdentifier(baseline.primaryCommunityId);
+  const additionalCommunityIds = baseline.additionalCommunityIds.map(normalizeIdentifier);
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
+      revisionId,
+    ) ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
+      primaryCommunityId,
+    ) ||
+    additionalCommunityIds.length > 4 ||
+    additionalCommunityIds.some(
+      (communityId) =>
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
+          communityId,
+        ),
+    ) ||
+    new Set([primaryCommunityId, ...additionalCommunityIds]).size !==
+      1 + additionalCommunityIds.length
+  ) {
+    throw new ResearchCommandValidationError(
+      "IDENTIFIER_INVALID",
+      "The frozen update baseline contains invalid Community or Revision identity.",
+    );
+  }
+  const bodyMarkdown = normalizeText(baseline.bodyMarkdown);
+  const title = baseline.title === null ? null : normalizeLabel(baseline.title);
+  if (
+    bodyMarkdown.trim().length === 0 ||
+    (baseline.contentKind === "post" &&
+      (title === null || [...title].length < 5 || [...title].length > 200)) ||
+    (baseline.contentKind === "reply" && title !== null)
+  ) {
+    throw new ResearchCommandValidationError(
+      "TEXT_INVALID",
+      "The frozen update baseline contradicts the content kind or text limits.",
+    );
+  }
+  return {
+    ...command,
+    frozenUpdateBaseline: {
+      additionalCommunityIds,
+      bodyMarkdown,
+      contentKind: baseline.contentKind,
+      primaryCommunityId,
+      resourceVersion: baseline.resourceVersion,
+      revisionId,
+      title,
+    },
+  };
+}
+
 function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== "object") {
     return JSON.stringify(value);
@@ -287,5 +488,8 @@ export function digestResearchCommand(command: NormalizedResearchCommand): strin
 }
 
 export function digestResearchCommandBytes(command: NormalizedResearchCommand): Buffer {
-  return createHash("sha256").update(canonicalJson(command)).digest();
+  const clientCommand: Record<string, unknown> = { ...command };
+  delete clientCommand.frozenMentionActorIds;
+  delete clientCommand.frozenUpdateBaseline;
+  return createHash("sha256").update(canonicalJson(clientCommand)).digest();
 }

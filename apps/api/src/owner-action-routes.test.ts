@@ -22,6 +22,7 @@ const ids = {
   action: "10000000-0000-4000-8000-000000000001",
   agent: "20000000-0000-4000-8000-000000000001",
   community: "30000000-0000-4000-8000-000000000001",
+  content: "30000000-0000-4000-8000-000000000002",
   decision: "40000000-0000-4000-8000-000000000001",
   owner: "50000000-0000-4000-8000-000000000001",
   policy: "60000000-0000-4000-8000-000000000001",
@@ -71,6 +72,7 @@ function pendingDetail(): OwnerPendingActionDetailView {
     target: { id: ids.community, type: "community" },
     updatedAt: requestedAt,
     version: 3,
+    approvalReasonCategory: "owner_approval_required",
     approvalOutcome: null,
     command: {
       operation: "create_post",
@@ -91,11 +93,61 @@ function pendingDetail(): OwnerPendingActionDetailView {
     decidedAt: null,
     decisionId: ids.decision,
     decisionReasonCode: null,
+    expectedVersion: null,
     inputDigest: `sha256:${"a".repeat(64)}`,
+    idempotencyKeyHint: "hmac-sha256:0123456789ab",
     policyVersion: `${ids.policy}:1`,
     publicError: null,
     terminalAt: null,
   };
+}
+
+function updateDetail(): OwnerPendingActionDetailView {
+  const view = {
+    ...pendingDetail(),
+    approvalSummary: "Update the frozen AMD research post.",
+    operation: "update_content",
+    target: { id: ids.content, type: "content" },
+    expectedVersion: 7,
+    command: {
+      operation: "update_content",
+      contentId: ids.content,
+      expectedVersion: 7,
+      patch: {
+        title: "AMD data-center scenario review — revised",
+        bodyMarkdown: "The revised case includes a new FX sensitivity check.",
+        sourceLinks: [
+          {
+            url: "https://example.com/amd-revised-source",
+            title: "Revised AMD source",
+            description: "Evidence added during independent verification.",
+          },
+        ],
+        references: [{ targetContentId: ids.sourceContent, relationType: "quote" }],
+        additionalCommunityIds: [],
+        symbols: [],
+        topics: ["semiconductors", "fx"],
+      },
+      editSummary: "Add FX sensitivity evidence",
+      frozenMentionActorIds: [ids.agent],
+      frozenUpdateBaseline: {
+        additionalCommunityIds: [],
+        bodyMarkdown: "The original case used the prior FX assumptions.",
+        contentKind: "post",
+        primaryCommunityId: ids.community,
+        resourceVersion: 7,
+        revisionId: ids.sourceContent,
+        title: "AMD data-center scenario review",
+      },
+    },
+  } satisfies OwnerPendingActionDetailView;
+  Object.assign(view.command.patch, {
+    frozenMentionActorIds: [ids.owner],
+  });
+  Object.assign(view.command.patch.sourceLinks[0]!, {
+    frozenMentionActorIds: [ids.owner],
+  });
+  return view;
 }
 
 function approvedDetail(
@@ -227,7 +279,7 @@ describe("Owner pending-action read routes", () => {
       url:
         `/v1/owner/pending-actions?agent_id=${ids.agent}` +
         "&states=pending_approval,approved" +
-        "&operations=create_post,reply_to_content" +
+        "&operations=create_post,reply_to_content,update_content" +
         "&limit=20&cursor=cursor_01",
     });
 
@@ -237,7 +289,7 @@ describe("Owner pending-action read routes", () => {
     expect(listActions).toHaveBeenCalledExactlyOnceWith(ids.owner, {
       agentId: ids.agent,
       states: ["pending_approval", "approved"],
-      operations: ["create_post", "reply_to_content"],
+      operations: ["create_post", "reply_to_content", "update_content"],
       limit: 20,
       cursor: "cursor_01",
     });
@@ -277,12 +329,57 @@ describe("Owner pending-action read routes", () => {
       symbols: ["AMD"],
       references: [{ target_content_id: ids.sourceContent, relation_type: "reference" }],
     });
-    expect(JSON.stringify(parsed)).not.toContain("idempotency_key");
+    expect(JSON.stringify(parsed)).not.toContain('"idempotency_key":');
     expect(getAction).toHaveBeenCalledOnce();
     const call = getAction.mock.calls[0];
     expect(call?.slice(0, 2)).toEqual([ids.owner, ids.action]);
     expect(typeof call?.[2].requestId).toBe("string");
     expect(call?.[2].requestId.length).toBeGreaterThan(0);
+  });
+
+  it("serializes an update preview through an explicit public-field allowlist", async () => {
+    const { app } = createApp({
+      getAction: () => Promise.resolve(updateDetail()),
+    });
+    const response = await app.inject({
+      method: "GET",
+      url: `/v1/owner/pending-actions/${ids.action}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    const parsed = OwnerActionDetailResponseSchema.parse(response.json());
+    expect(parsed.action.preview).toEqual({
+      operation: "update_content",
+      content_id: ids.content,
+      expected_version: 7,
+      baseline: {
+        content_kind: "post",
+        resource_version: 7,
+        revision_id: ids.sourceContent,
+        title: "AMD data-center scenario review",
+        body_markdown: "The original case used the prior FX assumptions.",
+        primary_community_id: ids.community,
+        additional_community_ids: [],
+      },
+      patch: {
+        title: "AMD data-center scenario review — revised",
+        body_markdown: "The revised case includes a new FX sensitivity check.",
+        source_links: [
+          {
+            url: "https://example.com/amd-revised-source",
+            title: "Revised AMD source",
+            description: "Evidence added during independent verification.",
+          },
+        ],
+        references: [{ target_content_id: ids.sourceContent, relation_type: "quote" }],
+        additional_community_ids: [],
+        symbols: [],
+        topics: ["semiconductors", "fx"],
+      },
+      edit_summary: "Add FX sensitivity evidence",
+    });
+    expect(response.body).not.toContain("frozenMentionActorIds");
+    expect(response.body).not.toContain(ids.owner);
   });
 
   it("rejects query fields on a detail request", async () => {
@@ -466,6 +563,9 @@ describe("Owner pending-action errors and response boundary", () => {
 
   it("fails closed when a detail projection violates the public contract", async () => {
     const invalid = pendingDetail();
+    if (invalid.command.operation !== "create_post") {
+      throw new Error("Expected the create-post fixture.");
+    }
     invalid.command.bodyMarkdown = "private\u0000frozen draft";
     const { app } = createApp({ getAction: () => Promise.resolve(invalid) });
     const response = await app.inject({
@@ -475,6 +575,22 @@ describe("Owner pending-action errors and response boundary", () => {
 
     expect(response.statusCode).toBe(503);
     expect(response.body).not.toContain("private");
+    expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
+      "OWNER_ACTION_UNAVAILABLE",
+    );
+  });
+
+  it("fails closed when an update preview disagrees with the frozen expected version", async () => {
+    const invalid = updateDetail();
+    invalid.expectedVersion = 8;
+    const { app } = createApp({ getAction: () => Promise.resolve(invalid) });
+    const response = await app.inject({
+      method: "GET",
+      url: `/v1/owner/pending-actions/${ids.action}`,
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.body).not.toContain("FX sensitivity evidence");
     expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
       "OWNER_ACTION_UNAVAILABLE",
     );

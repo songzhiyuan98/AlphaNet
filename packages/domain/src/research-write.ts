@@ -1,4 +1,4 @@
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
 import { appendOutboxEvent, type PostgresClient } from "@alphanet/database";
 import type postgres from "postgres";
@@ -30,12 +30,20 @@ import { PENDING_ACTION_STATES, type PendingActionState } from "./pending-action
 import {
   digestResearchCommand,
   digestResearchCommandBytes,
+  freezeResearchCommandMentionActors,
+  freezeUpdateContentBaseline,
   normalizeCreatePostCommand,
   normalizeReplyCommand,
+  normalizeUpdateContentCommand,
   ResearchCommandValidationError,
   type CreatePostCommandInput,
+  type FrozenUpdateContentBaseline,
   type NormalizedResearchCommand,
+  type NormalizedResearchContentReference,
+  type NormalizedResearchSourceLink,
+  type NormalizedUpdateContentCommand,
   type ReplyCommandInput,
+  type UpdateContentCommandInput,
 } from "./research-command.js";
 import {
   extractMarkdownMentionHandles,
@@ -44,6 +52,7 @@ import {
 } from "./markdown-mentions.js";
 import {
   AGENT_POLICY_CONTROL_MIGRATION_CHECKSUM,
+  CONTENT_REVISION_WRITE_MIGRATION_CHECKSUM,
   PENDING_ACTION_EXECUTION_MIGRATION_CHECKSUM,
 } from "./schema-migrations.js";
 
@@ -51,9 +60,21 @@ const BODY_BYTES_LIMIT = 160 * 1_024;
 const COMMAND_BYTES_LIMIT = 1_024 * 1_024;
 const DEFAULT_ACTIVE_PENDING_ACTIONS_PER_AGENT = 20;
 const DEFAULT_PROTECTED_ACTION_INTENTS_PER_HOUR = 20;
+const AGENT_CONTENT_RATE_RULE_VERSION = "agent-content-rate-v1";
+const AGENT_CONTENT_RATE_WINDOW_MS = 60 * 60 * 1_000;
+const NEW_AGENT_CONTENT_RATE_WINDOW_MS = 24 * 60 * 60 * 1_000;
+const ESTABLISHED_AGENT_POSTS_PER_HOUR = 6;
+const ESTABLISHED_AGENT_REPLIES_PER_HOUR = 30;
+const NEW_AGENT_POSTS_PER_HOUR = 2;
+const NEW_AGENT_REPLIES_PER_HOUR = 10;
 const IDEMPOTENCY_MIN_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 const MAX_PUBLIC_NODE_BYTES = 768 * 1_024;
 const SOURCE_METADATA_BYTES_LIMIT = 128 * 1_024;
+const PENDING_COMMAND_KEY_BYTES = 32;
+const ACTION_LOG_HMAC_KEY_DOMAIN =
+  "alphanet.research-write.action-log.idempotency-key-digest.key.v1";
+const ACTION_LOG_HMAC_VALUE_DOMAIN =
+  "alphanet.research-write.action-log.idempotency-key-digest.value.v1";
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PENDING_ACTION_STATE_SET = new Set<string>(PENDING_ACTION_STATES);
@@ -70,11 +91,13 @@ const RESEARCH_WRITE_ERROR_CODE_SET = new Set<string>([
   "IDEMPOTENCY_CONFLICT",
   "IDEMPOTENCY_IN_PROGRESS",
   "IDEMPOTENCY_RESULT_CORRUPT",
+  "NOT_CONTENT_AUTHOR",
   "POLICY_DENIED",
   "RATE_LIMITED",
   "REPLIES_CLOSED",
   "SCOPE_REQUIRED",
   "VALIDATION_ERROR",
+  "VERSION_CONFLICT",
 ] satisfies ResearchWriteErrorCode[]);
 
 const DEFAULT_POSTING_RULES: CommunityPostingRules = {
@@ -94,7 +117,12 @@ type TransactionSql = postgres.TransactionSql;
 
 export type ResearchWriteDecision = "allow" | "require_approval" | "deny";
 export type ResearchWriteStatus = "succeeded" | "pending_approval" | "denied" | "failed";
-export type ResearchWriteOperation = "create_post" | "reply_to_content";
+export type ResearchWriteOperation =
+  "create_post" | "reply_to_content" | "update_content";
+type NewResearchCommand = Exclude<
+  NormalizedResearchCommand,
+  NormalizedUpdateContentCommand
+>;
 
 export type ResearchWriteErrorCode =
   | "ACTION_CANCELLED"
@@ -109,11 +137,13 @@ export type ResearchWriteErrorCode =
   | "IDEMPOTENCY_CONFLICT"
   | "IDEMPOTENCY_IN_PROGRESS"
   | "IDEMPOTENCY_RESULT_CORRUPT"
+  | "NOT_CONTENT_AUTHOR"
   | "POLICY_DENIED"
   | "RATE_LIMITED"
   | "REPLIES_CLOSED"
   | "SCOPE_REQUIRED"
-  | "VALIDATION_ERROR";
+  | "VALIDATION_ERROR"
+  | "VERSION_CONFLICT";
 
 export interface ResearchWriteErrorDetail {
   code: ResearchWriteErrorCode;
@@ -168,6 +198,10 @@ export interface ReplyResearchWriteInput extends ReplyCommandInput {
   idempotencyKey: string;
 }
 
+export interface UpdateContentResearchWriteInput extends UpdateContentCommandInput {
+  idempotencyKey: string;
+}
+
 export interface ResearchWriteRequestContext {
   channel?: string | undefined;
   requestId: string;
@@ -183,6 +217,12 @@ export interface ReplyResearchResult extends CreatePostResearchResult {
   rootContentId: string;
 }
 
+export interface UpdateContentResearchResult {
+  contentId: string;
+  resourceVersion: number;
+  revisionId: string | null;
+}
+
 export interface ResearchPendingActionSummary {
   approvalSummary: string;
   decisionId: string;
@@ -190,6 +230,7 @@ export interface ResearchPendingActionSummary {
   id: string;
   inputDigest: string;
   operation: ResearchWriteOperation;
+  expectedVersion?: number | undefined;
   policyVersion: string;
   requestedAt: Date;
   state: PendingActionState;
@@ -201,7 +242,8 @@ export interface ResearchWriteOutcome {
   operation: ResearchWriteOperation;
   pendingAction: ResearchPendingActionSummary | null;
   replayed: boolean;
-  result: CreatePostResearchResult | ReplyResearchResult | null;
+  result:
+    CreatePostResearchResult | ReplyResearchResult | UpdateContentResearchResult | null;
   status: ResearchWriteStatus;
 }
 
@@ -215,6 +257,11 @@ export interface ResearchWriteService {
   replyToContent(
     context: AgentCredentialContext,
     input: ReplyResearchWriteInput,
+    request: ResearchWriteRequestContext,
+  ): Promise<ResearchWriteOutcome>;
+  updateContent(
+    context: AgentCredentialContext,
+    input: UpdateContentResearchWriteInput,
     request: ResearchWriteRequestContext,
   ): Promise<ResearchWriteOutcome>;
 }
@@ -256,8 +303,18 @@ export interface ApprovedResearchExecutionRepository {
 
 export interface ApprovedResearchExecutionResult {
   action: PendingActionCommittedState;
-  content: CreatePostResearchResult | ReplyResearchResult;
+  content: CreatePostResearchResult | ReplyResearchResult | UpdateContentResearchResult;
   resolvedOutboxEventId: string;
+}
+
+interface ApprovedResearchRateLimitCommit {
+  rateLimited: true;
+  retryAfterMs: number;
+}
+
+interface ResearchActionAuditDigests {
+  readonly idempotencyKeyDigest: string;
+  readonly inputDigest: string;
 }
 
 export interface PostgresResearchWriteOptions {
@@ -272,6 +329,7 @@ export interface PostgresResearchWriteOptions {
 
 interface AuthorizationRow {
   actor_id: string;
+  agent_activated_at: Date;
   credential_policy_ceiling: AgentPolicyTier;
   credential_policy_ceiling_defaults_version: string;
   credential_policy_ceiling_rules: unknown;
@@ -365,6 +423,12 @@ interface ResolvedWriteFacts {
   topicIds: string[];
 }
 
+interface ResearchFactsInput {
+  references: readonly NormalizedResearchContentReference[];
+  symbols: readonly string[];
+  topics: readonly string[];
+}
+
 interface PreparedRevision {
   bodyPlainText: string;
   contentHash: Buffer;
@@ -379,11 +443,122 @@ interface PersistedResearchContent {
   rootContentId: string;
 }
 
+interface UpdateTargetRow {
+  author_actor_id: string;
+  body_markdown: string;
+  current_revision_id: string;
+  current_revision_number: number;
+  depth: number;
+  distribution_state: string;
+  kind: "post" | "reply";
+  lifecycle_state: string;
+  parent_id: string | null;
+  primary_community_id: string | null;
+  root_id: string;
+  title: string | null;
+  version: number;
+}
+
+interface CurrentSourceRow {
+  description: string | null;
+  title: string | null;
+  url: string;
+}
+
+interface CurrentReferenceRow {
+  relation_type: "quote" | "reference";
+  target_content_id: string;
+}
+
+interface CurrentAdditionalCommunityRow {
+  community_id: string;
+  created_at: Date;
+}
+
+interface PreparedContentUpdate {
+  additionalCommunityIds: string[];
+  additionalCommunityCreatedAtById: ReadonlyMap<string, Date>;
+  bodyMarkdown: string;
+  changedGroups: string[];
+  classificationChanged: boolean;
+  communityIds: string[];
+  contentId: string;
+  currentBodyMarkdown: string;
+  currentCommunityIds: string[];
+  currentMentionActorIds: string[];
+  currentRevisionId: string;
+  currentRevisionNumber: number;
+  currentSources: NormalizedResearchSourceLink[];
+  currentTitle: string | null;
+  currentReferences: NormalizedResearchContentReference[];
+  currentVersion: number;
+  kind: "post" | "reply";
+  newlyAddedCommunityIds: string[];
+  primaryCommunityId: string | null;
+  references: NormalizedResearchContentReference[];
+  revisionChanged: boolean;
+  rootContentId: string;
+  sourceLinks: NormalizedResearchSourceLink[];
+  symbols: string[];
+  title: string | null;
+  topics: string[];
+}
+
+interface PersistedContentUpdate {
+  contentId: string;
+  outboxId: string;
+  result: UpdateContentResearchResult;
+  rootContentId: string;
+}
+
+function frozenUpdateBaseline(
+  prepared: PreparedContentUpdate,
+): FrozenUpdateContentBaseline {
+  const primaryCommunityId = prepared.currentCommunityIds[0];
+  if (!primaryCommunityId) {
+    throw new Error("An update baseline requires an effective primary Community.");
+  }
+  return {
+    additionalCommunityIds: prepared.currentCommunityIds.slice(1),
+    bodyMarkdown: prepared.currentBodyMarkdown,
+    contentKind: prepared.kind,
+    primaryCommunityId,
+    resourceVersion: prepared.currentVersion,
+    revisionId: prepared.currentRevisionId,
+    title: prepared.currentTitle,
+  };
+}
+
+function frozenUpdateBaselineMatches(
+  actual: FrozenUpdateContentBaseline | undefined,
+  prepared: PreparedContentUpdate,
+): boolean {
+  if (!actual) return false;
+  const expected = frozenUpdateBaseline(prepared);
+  return (
+    actual.resourceVersion === expected.resourceVersion &&
+    actual.revisionId === expected.revisionId &&
+    actual.contentKind === expected.contentKind &&
+    actual.title === expected.title &&
+    actual.bodyMarkdown === expected.bodyMarkdown &&
+    actual.primaryCommunityId === expected.primaryCommunityId &&
+    actual.additionalCommunityIds.length === expected.additionalCommunityIds.length &&
+    actual.additionalCommunityIds.every(
+      (communityId, index) => communityId === expected.additionalCommunityIds[index],
+    )
+  );
+}
+
 interface ProtectedActionIntentWindow {
   active_pending_count: number;
   active_retry_at: Date | null;
   hourly_intent_count: number;
   hourly_retry_at: Date | null;
+}
+
+interface AgentContentRateWindow {
+  succeeded_count: number;
+  retry_at: Date | null;
 }
 
 interface PersistedOutcome {
@@ -397,6 +572,7 @@ interface PersistedOutcome {
     id: string;
     input_digest: string;
     operation: ResearchWriteOperation;
+    expected_version?: number | undefined;
     policy_version: string;
     requested_at: string;
     state: PendingActionState;
@@ -404,7 +580,7 @@ interface PersistedOutcome {
   result: null | {
     content_id: string;
     resource_version: number;
-    revision_id: string;
+    revision_id: string | null;
     root_content_id?: string | undefined;
   };
   status: ResearchWriteStatus;
@@ -430,8 +606,10 @@ function statusForError(code: ResearchWriteErrorCode): number {
       return 404;
     case "IDEMPOTENCY_CONFLICT":
     case "IDEMPOTENCY_IN_PROGRESS":
+    case "VERSION_CONFLICT":
       return 409;
     case "COMMUNITY_RESTRICTED":
+    case "NOT_CONTENT_AUTHOR":
     case "POLICY_DENIED":
     case "REPLIES_CLOSED":
     case "SCOPE_REQUIRED":
@@ -533,58 +711,86 @@ function validateAuthorityContext(context: AgentCredentialContext): void {
 
 function validateCommandBudgets(command: NormalizedResearchCommand): string[] {
   const isPost = command.operation === "create_post";
-  const titleLength = isPost ? unicodeLength(command.title) : 0;
-  const bodyLength = unicodeLength(command.bodyMarkdown);
-  const bodyBytes = Buffer.byteLength(command.bodyMarkdown, "utf8");
+  const isUpdate = command.operation === "update_content";
+  const title = isPost ? command.title : isUpdate ? command.patch.title : undefined;
+  const bodyMarkdown = isUpdate ? command.patch.bodyMarkdown : command.bodyMarkdown;
+  const symbols = isUpdate ? (command.patch.symbols ?? []) : command.symbols;
+  const topics = isUpdate ? (command.patch.topics ?? []) : command.topics;
+  const sourceLinks = isUpdate ? (command.patch.sourceLinks ?? []) : command.sourceLinks;
+  const references = isUpdate ? (command.patch.references ?? []) : command.references;
+  const additionalCommunityIds = isPost
+    ? command.additionalCommunityIds
+    : isUpdate
+      ? (command.patch.additionalCommunityIds ?? [])
+      : [];
+  const titleLength = title === undefined ? 0 : unicodeLength(title);
 
-  if (isPost && (titleLength < 5 || titleLength > 200)) {
+  if (title !== undefined && (titleLength < 5 || titleLength > 200)) {
     throw new ResearchWriteError(
       "VALIDATION_ERROR",
       "Post titles must contain 5 through 200 Unicode characters.",
       { details: { field: "title" } },
     );
   }
+  if (bodyMarkdown !== undefined) {
+    const bodyLength = unicodeLength(bodyMarkdown);
+    const bodyBytes = Buffer.byteLength(bodyMarkdown, "utf8");
+    if (
+      bodyMarkdown.trim().length === 0 ||
+      bodyLength > (command.operation === "reply_to_content" ? 20_000 : 100_000) ||
+      bodyBytes > BODY_BYTES_LIMIT
+    ) {
+      throw new ResearchWriteError(
+        "VALIDATION_ERROR",
+        "The normalized Markdown body is outside the operation limits.",
+        { details: { field: "body_markdown" } },
+      );
+    }
+  }
+
   if (
-    command.bodyMarkdown.trim().length === 0 ||
-    bodyLength > (isPost ? 100_000 : 20_000) ||
-    bodyBytes > BODY_BYTES_LIMIT
+    isUpdate &&
+    command.editSummary !== undefined &&
+    (unicodeLength(command.editSummary) > 500 || /\p{Cc}/u.test(command.editSummary))
   ) {
     throw new ResearchWriteError(
       "VALIDATION_ERROR",
-      "The normalized Markdown body is outside the operation limits.",
-      { details: { field: "body_markdown" } },
+      "The edit summary must be control-free and at most 500 characters.",
+      { details: { field: "edit_summary" } },
     );
   }
 
-  let mentionHandles: string[];
-  try {
-    mentionHandles = extractMarkdownMentionHandles(command.bodyMarkdown, 100);
-  } catch (error) {
-    if (error instanceof MarkdownComplexityLimitError) {
+  let mentionHandles: string[] = [];
+  if (bodyMarkdown !== undefined) {
+    try {
+      mentionHandles = extractMarkdownMentionHandles(bodyMarkdown, 100);
+    } catch (error) {
+      if (error instanceof MarkdownComplexityLimitError) {
+        throw new ResearchWriteError(
+          "VALIDATION_ERROR",
+          "The Markdown body exceeds the safe structural complexity limit.",
+          {
+            details: {
+              field: "body_markdown",
+              reason_code: "MARKDOWN_TOO_COMPLEX",
+            },
+          },
+        );
+      }
+      if (!(error instanceof MarkdownMentionLimitError)) throw error;
       throw new ResearchWriteError(
         "VALIDATION_ERROR",
-        "The Markdown body exceeds the safe structural complexity limit.",
-        {
-          details: {
-            field: "body_markdown",
-            reason_code: "MARKDOWN_TOO_COMPLEX",
-          },
-        },
+        "A Revision cannot contain more than 100 distinct mention candidates.",
+        { details: { field: "body_markdown" } },
       );
     }
-    if (!(error instanceof MarkdownMentionLimitError)) throw error;
-    throw new ResearchWriteError(
-      "VALIDATION_ERROR",
-      "A Revision cannot contain more than 100 distinct mention candidates.",
-      { details: { field: "body_markdown" } },
-    );
   }
   if (
-    command.symbols.length > 10 ||
-    command.topics.length > 5 ||
-    command.sourceLinks.length > 50 ||
-    command.references.length > 20 ||
-    (isPost && command.additionalCommunityIds.length > 4)
+    symbols.length > 10 ||
+    topics.length > 5 ||
+    sourceLinks.length > 50 ||
+    references.length > 20 ||
+    additionalCommunityIds.length > 4
   ) {
     throw new ResearchWriteError(
       "VALIDATION_ERROR",
@@ -592,7 +798,7 @@ function validateCommandBudgets(command: NormalizedResearchCommand): string[] {
     );
   }
 
-  for (const source of command.sourceLinks) {
+  for (const source of sourceLinks) {
     if (
       Buffer.byteLength(source.url, "utf8") > 2_048 ||
       (source.title !== undefined && unicodeLength(source.title) > 300) ||
@@ -606,8 +812,7 @@ function validateCommandBudgets(command: NormalizedResearchCommand): string[] {
     }
   }
   if (
-    Buffer.byteLength(JSON.stringify(command.sourceLinks), "utf8") >
-    SOURCE_METADATA_BYTES_LIMIT
+    Buffer.byteLength(JSON.stringify(sourceLinks), "utf8") > SOURCE_METADATA_BYTES_LIMIT
   ) {
     throw new ResearchWriteError(
       "VALIDATION_ERROR",
@@ -627,10 +832,15 @@ function validateCommandBudgets(command: NormalizedResearchCommand): string[] {
     for (const id of command.additionalCommunityIds) {
       assertUuid(id, "additional_community_ids");
     }
-  } else {
+  } else if (command.operation === "reply_to_content") {
     assertUuid(command.parentContentId, "parent_content_id");
+  } else {
+    assertUuid(command.contentId, "content_id");
+    for (const id of additionalCommunityIds) {
+      assertUuid(id, "additional_community_ids");
+    }
   }
-  for (const reference of command.references) {
+  for (const reference of references) {
     assertUuid(reference.targetContentId, "references.target_content_id");
   }
   return mentionHandles;
@@ -862,6 +1072,9 @@ function serializeOutcome(outcome: ResearchWriteOutcome): PersistedOutcome {
             decision_id: outcome.pendingAction.decisionId,
             policy_version: outcome.pendingAction.policyVersion,
             approval_summary: outcome.pendingAction.approvalSummary,
+            ...(outcome.pendingAction.expectedVersion === undefined
+              ? {}
+              : { expected_version: outcome.pendingAction.expectedVersion }),
           },
     error: outcome.error,
   };
@@ -934,7 +1147,9 @@ function parsePersistedOutcome(
     throw corruptIdempotencyResult();
   }
 
-  let result: CreatePostResearchResult | ReplyResearchResult | null = null;
+  let result:
+    CreatePostResearchResult | ReplyResearchResult | UpdateContentResearchResult | null =
+    null;
   if (value.result !== null) {
     const expectedResultKeys =
       operation === "reply_to_content"
@@ -945,30 +1160,45 @@ function parsePersistedOutcome(
       !hasExactKeys(value.result, expectedResultKeys) ||
       typeof value.result.content_id !== "string" ||
       !isUuid(value.result.content_id) ||
-      typeof value.result.revision_id !== "string" ||
-      !isUuid(value.result.revision_id) ||
+      !(
+        (operation === "update_content" && value.result.revision_id === null) ||
+        (typeof value.result.revision_id === "string" && isUuid(value.result.revision_id))
+      ) ||
       typeof value.result.resource_version !== "number" ||
       !Number.isSafeInteger(value.result.resource_version) ||
       value.result.resource_version < 1
     ) {
       throw corruptIdempotencyResult();
     }
-    result =
-      operation === "reply_to_content"
-        ? typeof value.result.root_content_id === "string" &&
-          isUuid(value.result.root_content_id)
+    if (operation === "reply_to_content") {
+      result =
+        typeof value.result.root_content_id === "string" &&
+        isUuid(value.result.root_content_id) &&
+        typeof value.result.revision_id === "string"
           ? {
               contentId: value.result.content_id,
               revisionId: value.result.revision_id,
               resourceVersion: value.result.resource_version,
               rootContentId: value.result.root_content_id,
             }
-          : null
-        : {
-            contentId: value.result.content_id,
-            revisionId: value.result.revision_id,
-            resourceVersion: value.result.resource_version,
-          };
+          : null;
+    } else if (operation === "update_content") {
+      result = {
+        contentId: value.result.content_id,
+        revisionId:
+          typeof value.result.revision_id === "string" ? value.result.revision_id : null,
+        resourceVersion: value.result.resource_version,
+      };
+    } else {
+      result =
+        typeof value.result.revision_id === "string"
+          ? {
+              contentId: value.result.content_id,
+              revisionId: value.result.revision_id,
+              resourceVersion: value.result.resource_version,
+            }
+          : null;
+    }
     if (result === null) throw corruptIdempotencyResult();
   }
 
@@ -977,17 +1207,33 @@ function parsePersistedOutcome(
     const pending = value.pending_action;
     if (
       !isRecord(pending) ||
-      !hasExactKeys(pending, [
-        "id",
-        "operation",
-        "state",
-        "expires_at",
-        "input_digest",
-        "requested_at",
-        "decision_id",
-        "policy_version",
-        "approval_summary",
-      ]) ||
+      !hasExactKeys(
+        pending,
+        operation === "update_content"
+          ? [
+              "id",
+              "operation",
+              "state",
+              "expires_at",
+              "input_digest",
+              "requested_at",
+              "decision_id",
+              "policy_version",
+              "approval_summary",
+              "expected_version",
+            ]
+          : [
+              "id",
+              "operation",
+              "state",
+              "expires_at",
+              "input_digest",
+              "requested_at",
+              "decision_id",
+              "policy_version",
+              "approval_summary",
+            ],
+      ) ||
       typeof pending.id !== "string" ||
       !isUuid(pending.id) ||
       pending.operation !== operation ||
@@ -1007,7 +1253,11 @@ function parsePersistedOutcome(
       pending.approval_summary.length < 1 ||
       pending.approval_summary.length > 2_000 ||
       pending.approval_summary.trim() !== pending.approval_summary ||
-      /\p{Cc}/u.test(pending.approval_summary)
+      /\p{Cc}/u.test(pending.approval_summary) ||
+      (operation === "update_content" &&
+        (typeof pending.expected_version !== "number" ||
+          !Number.isSafeInteger(pending.expected_version) ||
+          pending.expected_version < 1))
     ) {
       throw corruptIdempotencyResult();
     }
@@ -1031,6 +1281,9 @@ function parsePersistedOutcome(
       decisionId: pending.decision_id,
       policyVersion: pending.policy_version,
       approvalSummary: pending.approval_summary,
+      ...(operation === "update_content"
+        ? { expectedVersion: pending.expected_version as number }
+        : {}),
     };
   }
 
@@ -1040,6 +1293,7 @@ function parsePersistedOutcome(
     (value.status !== "succeeded" && result !== null) ||
     (value.status === "pending_approval" && (pendingAction === null || error !== null)) ||
     ((value.status === "denied" || value.status === "failed") && error === null) ||
+    error?.code === "RATE_LIMITED" ||
     (value.decision !== "require_approval" && pendingAction !== null)
   ) {
     throw corruptIdempotencyResult();
@@ -1093,15 +1347,24 @@ function plainTextFromMarkdown(markdown: string): string {
   return plain.length > 0 ? plain : markdown.trim();
 }
 
-function prepareRevision(command: NormalizedResearchCommand): PreparedRevision {
-  const title = command.operation === "create_post" ? command.title : null;
-  const bodyPlainText = plainTextFromMarkdown(command.bodyMarkdown);
+function prepareRevisionFields(input: {
+  bodyMarkdown: string;
+  references: readonly NormalizedResearchContentReference[];
+  sourceLinks: readonly NormalizedResearchSourceLink[];
+  symbols: readonly string[];
+  title: string | null;
+  topics: readonly string[];
+}): PreparedRevision {
+  const bodyPlainText = plainTextFromMarkdown(input.bodyMarkdown);
   const contentHash = createHash("sha256")
-    .update(JSON.stringify({ body_markdown: command.bodyMarkdown, title }), "utf8")
+    .update(
+      JSON.stringify({ body_markdown: input.bodyMarkdown, title: input.title }),
+      "utf8",
+    )
     .digest();
   const publicNodeBytes = Buffer.byteLength(
     JSON.stringify({
-      body_markdown: command.bodyMarkdown,
+      body_markdown: input.bodyMarkdown,
       body_plain_text: bodyPlainText,
       content_safety: {
         execute_embedded_commands: false,
@@ -1109,11 +1372,11 @@ function prepareRevision(command: NormalizedResearchCommand): PreparedRevision {
         untrusted_user_generated_content: true,
         verify_financial_claims_independently: true,
       },
-      references: command.references,
-      source_links: command.sourceLinks,
-      symbols: command.symbols,
-      title,
-      topics: command.topics,
+      references: input.references,
+      source_links: input.sourceLinks,
+      symbols: input.symbols,
+      title: input.title,
+      topics: input.topics,
     }),
     "utf8",
   );
@@ -1126,8 +1389,21 @@ function prepareRevision(command: NormalizedResearchCommand): PreparedRevision {
   return { bodyPlainText, contentHash, publicNodeBytes };
 }
 
+function prepareRevision(command: NewResearchCommand): PreparedRevision {
+  return prepareRevisionFields({
+    bodyMarkdown: command.bodyMarkdown,
+    references: command.references,
+    sourceLinks: command.sourceLinks,
+    symbols: command.symbols,
+    title: command.operation === "create_post" ? command.title : null,
+    topics: command.topics,
+  });
+}
+
 export class PostgresResearchWriteService implements ResearchWriteService {
   readonly #activePendingActionsPerAgent: number;
+  readonly #actionLogHmacKeys = new Map<number, Buffer>();
+  readonly #actionLogHmacKeyVersion: number;
   readonly #clock: () => Date;
   readonly #idFactory: () => string;
   readonly #idempotencyRetentionMs: number;
@@ -1158,6 +1434,35 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     if (!options.pendingActionKeyRing) {
       throw new TypeError("A PendingAction encryption key ring is required.");
     }
+    const currentKeyVersion = options.pendingActionKeyRing.currentVersion;
+    if (
+      !Number.isSafeInteger(currentKeyVersion) ||
+      currentKeyVersion < 1 ||
+      currentKeyVersion > 2_147_483_647
+    ) {
+      throw new TypeError("The PendingAction current key version is invalid.");
+    }
+    for (const [versionText, material] of Object.entries(
+      options.pendingActionKeyRing.keys,
+    )) {
+      const version = Number(versionText);
+      if (
+        !/^[1-9][0-9]*$/u.test(versionText) ||
+        !Number.isSafeInteger(version) ||
+        version > 2_147_483_647 ||
+        !(material instanceof Uint8Array) ||
+        material.byteLength !== PENDING_COMMAND_KEY_BYTES
+      ) {
+        throw new TypeError("A PendingAction key-ring entry is invalid.");
+      }
+      const purposeKey = createHmac("sha256", Buffer.from(material))
+        .update(ACTION_LOG_HMAC_KEY_DOMAIN, "utf8")
+        .digest();
+      this.#actionLogHmacKeys.set(version, purposeKey);
+    }
+    if (!this.#actionLogHmacKeys.has(currentKeyVersion)) {
+      throw new TypeError("The PendingAction current key material is unavailable.");
+    }
     if (
       !Number.isSafeInteger(protectedActionIntentsPerHour) ||
       protectedActionIntentsPerHour < 1 ||
@@ -1177,6 +1482,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       );
     }
     this.#activePendingActionsPerAgent = activePendingActionsPerAgent;
+    this.#actionLogHmacKeyVersion = currentKeyVersion;
     this.#sql = sql;
     this.#clock = options.clock ?? (() => new Date());
     this.#idFactory = options.idFactory ?? randomUUID;
@@ -1214,6 +1520,13 @@ export class PostgresResearchWriteService implements ResearchWriteService {
           )
           and exists (
             select 1
+            from system.schema_migrations
+            where version = '000012'
+              and name = 'content_revision_write'
+              and checksum = ${CONTENT_REVISION_WRITE_MIGRATION_CHECKSUM}
+          )
+          and exists (
+            select 1
             from pg_catalog.pg_attribute
             where attrelid = to_regclass('platform.credentials')
               and attname = 'policy_ceiling_rules'
@@ -1240,6 +1553,13 @@ export class PostgresResearchWriteService implements ResearchWriteService {
             where tgrelid = to_regclass('platform.content_revisions')
               and tgname = 'content_revisions_prevent_mutation'
               and not tgisinternal
+          )
+          and exists (
+            select 1
+            from pg_catalog.pg_trigger
+            where tgrelid = to_regclass('platform.content_revisions')
+              and tgname = 'content_revisions_validate_current_pointer'
+              and not tgisinternal
           ) as ready
       `;
     });
@@ -1253,175 +1573,426 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     claim: PendingActionExecutionClaim,
   ): Promise<ApprovedResearchExecutionResult> {
     try {
-      return await repository.withFencedClaim(
-        claim,
-        async (transaction, frozenAction) => {
-          await transaction`set local statement_timeout = '10s'`;
-          if (
-            (frozenAction.operation !== "create_post" &&
-              frozenAction.operation !== "reply_to_content") ||
-            frozenAction.operation !== claim.operation ||
-            frozenAction.expectedVersion !== null
-          ) {
-            throw new ApprovedResearchExecutionError("APPROVED_ACTION_CONTEXT_INVALID");
-          }
+      const result = await repository.withFencedClaim<
+        ApprovedResearchExecutionResult | ApprovedResearchRateLimitCommit
+      >(claim, async (transaction, frozenAction) => {
+        await transaction`set local statement_timeout = '10s'`;
+        if (
+          (frozenAction.operation !== "create_post" &&
+            frozenAction.operation !== "reply_to_content" &&
+            frozenAction.operation !== "update_content") ||
+          frozenAction.operation !== claim.operation ||
+          (frozenAction.operation === "update_content"
+            ? frozenAction.expectedVersion === null
+            : frozenAction.expectedVersion !== null)
+        ) {
+          throw new ApprovedResearchExecutionError("APPROVED_ACTION_CONTEXT_INVALID");
+        }
 
-          const originalPolicy = frozenAction.policySnapshot;
-          const decisionAuditId =
-            typeof frozenAction.decisionAuditId === "string" &&
-            isUuid(frozenAction.decisionAuditId)
-              ? frozenAction.decisionAuditId
-              : null;
-          const originalDecisionId =
-            isRecord(originalPolicy) &&
-            originalPolicy.decision === "require_approval" &&
-            typeof originalPolicy.decision_id === "string" &&
-            originalPolicy.decision_id === frozenAction.decisionId &&
-            originalPolicy.policy_id === frozenAction.policyId &&
-            typeof originalPolicy.policy_version === "string" &&
-            originalPolicy.policy_version === frozenAction.policyVersion &&
-            isUuid(frozenAction.decisionId) &&
-            decisionAuditId !== null
-              ? frozenAction.decisionId
-              : null;
-          if (
-            originalDecisionId === null ||
-            decisionAuditId === null ||
-            !isRecord(originalPolicy)
-          ) {
-            throw new ApprovedResearchExecutionError("APPROVED_ACTION_CONTEXT_INVALID");
-          }
+        const originalPolicy = frozenAction.policySnapshot;
+        const decisionAuditId =
+          typeof frozenAction.decisionAuditId === "string" &&
+          isUuid(frozenAction.decisionAuditId)
+            ? frozenAction.decisionAuditId
+            : null;
+        const originalDecisionId =
+          isRecord(originalPolicy) &&
+          originalPolicy.decision === "require_approval" &&
+          typeof originalPolicy.decision_id === "string" &&
+          originalPolicy.decision_id === frozenAction.decisionId &&
+          originalPolicy.policy_id === frozenAction.policyId &&
+          typeof originalPolicy.policy_version === "string" &&
+          originalPolicy.policy_version === frozenAction.policyVersion &&
+          isUuid(frozenAction.decisionId) &&
+          decisionAuditId !== null
+            ? frozenAction.decisionId
+            : null;
+        if (
+          originalDecisionId === null ||
+          decisionAuditId === null ||
+          !isRecord(originalPolicy)
+        ) {
+          throw new ApprovedResearchExecutionError("APPROVED_ACTION_CONTEXT_INVALID");
+        }
 
-          const inputDigest = `sha256:${frozenAction.inputDigest.toString("hex")}`;
-          const command = decryptPendingCommand(
-            frozenAction.normalizedInput,
-            {
-              actionId: frozenAction.actionId,
-              agentId: frozenAction.agentId,
-              credentialId: frozenAction.credentialId,
-              inputDigest,
-              operation: frozenAction.operation,
-              ownerId: frozenAction.ownerId,
-            },
-            this.#keyRing,
-          );
-          const mentionHandles = validateCommandBudgets(command);
-          if (
-            !sameDigest(digestResearchCommandBytes(command), frozenAction.inputDigest) ||
-            command.operation !== frozenAction.operation ||
-            frozenAction.targetId !== intendedTargetId(command) ||
-            frozenAction.targetType !==
-              (command.operation === "create_post" ? "community" : "content")
-          ) {
-            throw new ApprovedResearchExecutionError("APPROVED_ACTION_CONTEXT_INVALID");
-          }
+        const inputDigest = `sha256:${frozenAction.inputDigest.toString("hex")}`;
+        const command = decryptPendingCommand(
+          frozenAction.normalizedInput,
+          {
+            actionId: frozenAction.actionId,
+            agentId: frozenAction.agentId,
+            credentialId: frozenAction.credentialId,
+            inputDigest,
+            operation: frozenAction.operation,
+            ownerId: frozenAction.ownerId,
+          },
+          this.#keyRing,
+        );
+        validateCommandBudgets(command);
+        if (
+          !sameDigest(digestResearchCommandBytes(command), frozenAction.inputDigest) ||
+          command.operation !== frozenAction.operation ||
+          frozenAction.targetId !== intendedTargetId(command) ||
+          frozenAction.targetType !==
+            (command.operation === "create_post" ? "community" : "content") ||
+          (command.operation === "update_content" &&
+            frozenAction.expectedVersion !== command.expectedVersion)
+        ) {
+          throw new ApprovedResearchExecutionError("APPROVED_ACTION_CONTEXT_INVALID");
+        }
+        const auditDigests = this.#actionAuditDigests(
+          frozenAction.inputDigest,
+          frozenAction.idempotencyKey,
+          frozenAction.normalizedInput.keyVersion,
+        );
 
-          const clocks = await transaction<{ database_now: Date }[]>`
+        const clocks = await transaction<{ database_now: Date }[]>`
             select clock_timestamp() as database_now
           `;
-          const now = clocks[0]?.database_now;
-          if (!(now instanceof Date) || Number.isNaN(now.valueOf())) {
-            throw new Error("The database did not return a valid execution clock.");
-          }
+        const now = clocks[0]?.database_now;
+        if (!(now instanceof Date) || Number.isNaN(now.valueOf())) {
+          throw new Error("The database did not return a valid execution clock.");
+        }
 
-          const authorization = await this.#loadApprovedAuthorization(
-            transaction,
-            frozenAction,
+        const authorization = await this.#loadApprovedAuthorization(
+          transaction,
+          frozenAction,
+        );
+        const evaluation = evaluateAgentOperation({
+          credentialPolicyCeiling: authorization.credential_policy_ceiling,
+          credentialPolicyCeilingDefaultsVersion:
+            authorization.credential_policy_ceiling_defaults_version,
+          credentialPolicyCeilingRules: authorization.credential_policy_ceiling_rules,
+          credentialPolicyCeilingSchemaVersion:
+            authorization.credential_policy_ceiling_schema_version,
+          operation: command.operation,
+          policyDefaultsVersion: authorization.defaults_version,
+          policyRules: authorization.policy_rules,
+          policySchemaVersion: authorization.policy_schema_version,
+          policyTier: authorization.policy_tier,
+          scopes: authorization.credential_scopes,
+        });
+        if (!evaluation.scopeSatisfied || evaluation.decision === "deny") {
+          throw new ApprovedResearchExecutionError("APPROVED_ACTION_CONTEXT_INVALID");
+        }
+
+        try {
+          return await transaction.savepoint(
+            "approved_research_mutation",
+            async (transaction) => {
+              if (command.operation === "update_content") {
+                const prepared = await this.#loadContentUpdateTarget(
+                  transaction,
+                  command,
+                  authorization.actor_id,
+                );
+                if (
+                  !frozenUpdateBaselineMatches(command.frozenUpdateBaseline, prepared)
+                ) {
+                  throw new ApprovedResearchExecutionError(
+                    "APPROVED_ACTION_CONTEXT_INVALID",
+                  );
+                }
+                let admissions = await this.#inspectCommunities(
+                  transaction,
+                  prepared.communityIds,
+                );
+                this.#enforceCommunityRules(
+                  admissions,
+                  prepared.kind === "post" ? "investment-research" : "discussion",
+                  prepared.sourceLinks.length > 0,
+                  prepared.kind === "reply",
+                  false,
+                );
+                this.#enforceNewCommunityPlacementCapacity(
+                  admissions,
+                  prepared.newlyAddedCommunityIds,
+                );
+                await this.#materializeCatalogCommunities(transaction, admissions);
+                admissions = await this.#inspectCommunities(
+                  transaction,
+                  prepared.communityIds,
+                );
+                if (
+                  admissions.some(
+                    (admission) => admission.materialization !== "materialized",
+                  )
+                ) {
+                  throw new ResearchWriteError(
+                    "COMMUNITY_NOT_FOUND",
+                    "The catalog Community could not be materialized safely.",
+                  );
+                }
+                this.#enforceCommunityRules(
+                  admissions,
+                  prepared.kind === "post" ? "investment-research" : "discussion",
+                  prepared.sourceLinks.length > 0,
+                  prepared.kind === "reply",
+                  false,
+                );
+                this.#enforceNewCommunityPlacementCapacity(
+                  admissions,
+                  prepared.newlyAddedCommunityIds,
+                );
+                await this.#enforcePostRates(
+                  transaction,
+                  authorization.actor_id,
+                  this.#newCommunityAdmissions(
+                    admissions,
+                    prepared.newlyAddedCommunityIds,
+                  ),
+                  now,
+                );
+                const facts = await this.#resolveWriteFacts(
+                  transaction,
+                  {
+                    references: command.patch.references ?? [],
+                    symbols: command.patch.symbols ?? [],
+                    topics: command.patch.topics ?? [],
+                  },
+                  [],
+                );
+                facts.mentionActorIds = [...(command.frozenMentionActorIds ?? [])];
+                await this.#enforceUpdateRates(
+                  transaction,
+                  authorization.actor_id,
+                  prepared.contentId,
+                  now,
+                );
+                const persisted = await this.#persistContentUpdate(transaction, {
+                  actorId: authorization.actor_id,
+                  command,
+                  facts,
+                  now,
+                  prepared,
+                });
+                await this.#writeActionLog(transaction, {
+                  action: actionName(command.operation),
+                  actorId: authorization.actor_id,
+                  after: {
+                    changed_groups: prepared.changedGroups,
+                    content_id: persisted.contentId,
+                    idempotency_record_id: frozenAction.idempotencyRecordId,
+                    pending_action_id: frozenAction.actionId,
+                    resource_version: persisted.result.resourceVersion,
+                    revision_id: persisted.result.revisionId,
+                    root_content_id: persisted.rootContentId,
+                  },
+                  auditDigests,
+                  agentId: frozenAction.agentId,
+                  approvalMethod: "owner_approval",
+                  approvedByOwnerId: frozenAction.ownerId,
+                  auditId: this.#newId("audit_id"),
+                  authenticationAssurance: "owner_approval_record",
+                  channel: "worker",
+                  credentialId: frozenAction.credentialId,
+                  decision: "require_approval",
+                  decisionId: originalDecisionId,
+                  errorCode: null,
+                  evaluation,
+                  outcome: "succeeded",
+                  occurredAt: now,
+                  outboxId: persisted.outboxId,
+                  ownerId: frozenAction.ownerId,
+                  policy: authorization,
+                  policySnapshotOverride: approvedExecutionPolicySnapshot(
+                    originalPolicy,
+                    authorization,
+                    evaluation,
+                    originalDecisionId,
+                    decisionAuditId,
+                  ),
+                  requestId:
+                    `worker:pending-action:${frozenAction.actionId}:` +
+                    `attempt:${frozenAction.attemptCount}`,
+                  targetId: persisted.contentId,
+                  targetType: "content",
+                });
+                const terminal = await repository.finalizeSucceeded(transaction, claim, {
+                  correlatedOutboxEventId: persisted.outboxId,
+                  resourceId: persisted.contentId,
+                  result: {
+                    content_id: persisted.result.contentId,
+                    resource_version: persisted.result.resourceVersion,
+                    revision_id: persisted.result.revisionId,
+                  },
+                });
+                return {
+                  action: terminal.action,
+                  content: persisted.result,
+                  resolvedOutboxEventId: terminal.resolvedOutboxEventId,
+                };
+              }
+
+              let replyTarget: ReplyTarget | null = null;
+              if (command.operation === "create_post") {
+                const targetIds = [
+                  command.primaryCommunityId,
+                  ...command.additionalCommunityIds,
+                ];
+                let admissions = await this.#inspectCommunities(transaction, targetIds);
+                this.#enforceCommunityRules(
+                  admissions,
+                  "investment-research",
+                  command.sourceLinks.length > 0,
+                  false,
+                );
+                await this.#materializeCatalogCommunities(transaction, admissions);
+                admissions = await this.#inspectCommunities(transaction, targetIds);
+                if (
+                  admissions.some(
+                    (admission) => admission.materialization !== "materialized",
+                  )
+                ) {
+                  throw new ResearchWriteError(
+                    "COMMUNITY_NOT_FOUND",
+                    "The catalog Community could not be materialized safely.",
+                  );
+                }
+                this.#enforceCommunityRules(
+                  admissions,
+                  "investment-research",
+                  command.sourceLinks.length > 0,
+                  false,
+                );
+                await this.#enforcePostRates(
+                  transaction,
+                  authorization.actor_id,
+                  admissions,
+                  now,
+                );
+                await this.#enforceAgentContentRate(
+                  transaction,
+                  authorization,
+                  frozenAction.agentId,
+                  "create_post",
+                  now,
+                );
+              } else {
+                replyTarget = await this.#loadReplyTarget(
+                  transaction,
+                  command.parentContentId,
+                );
+                const admissions = await this.#inspectCommunities(
+                  transaction,
+                  replyTarget.communityIds,
+                );
+                this.#enforceCommunityRules(
+                  admissions,
+                  "discussion",
+                  command.sourceLinks.length > 0,
+                  true,
+                );
+                await this.#enforceAgentContentRate(
+                  transaction,
+                  authorization,
+                  frozenAction.agentId,
+                  "reply_to_content",
+                  now,
+                );
+              }
+
+              const facts = await this.#resolveWriteFacts(transaction, command, []);
+              facts.mentionActorIds = [...(command.frozenMentionActorIds ?? [])];
+              const preparedRevision = prepareRevision(command);
+              const persisted = await this.#insertResearchContent(transaction, {
+                authorization,
+                command,
+                facts,
+                now,
+                preparedRevision,
+                replyTarget,
+              });
+              await this.#writeActionLog(transaction, {
+                action: actionName(command.operation),
+                actorId: authorization.actor_id,
+                after: {
+                  content_id: persisted.contentId,
+                  idempotency_record_id: frozenAction.idempotencyRecordId,
+                  pending_action_id: frozenAction.actionId,
+                  resource_version: 1,
+                  revision_id: persisted.revisionId,
+                  root_content_id: persisted.rootContentId,
+                },
+                auditDigests,
+                agentId: frozenAction.agentId,
+                approvalMethod: "owner_approval",
+                approvedByOwnerId: frozenAction.ownerId,
+                auditId: this.#newId("audit_id"),
+                authenticationAssurance: "owner_approval_record",
+                channel: "worker",
+                credentialId: frozenAction.credentialId,
+                decision: "require_approval",
+                decisionId: originalDecisionId,
+                errorCode: null,
+                evaluation,
+                outcome: "succeeded",
+                occurredAt: now,
+                outboxId: persisted.outboxId,
+                ownerId: frozenAction.ownerId,
+                policy: authorization,
+                policySnapshotOverride: approvedExecutionPolicySnapshot(
+                  originalPolicy,
+                  authorization,
+                  evaluation,
+                  originalDecisionId,
+                  decisionAuditId,
+                ),
+                requestId:
+                  `worker:pending-action:${frozenAction.actionId}:` +
+                  `attempt:${frozenAction.attemptCount}`,
+                targetId: persisted.contentId,
+                targetType: "content",
+              });
+
+              const terminal = await repository.finalizeSucceeded(transaction, claim, {
+                correlatedOutboxEventId: persisted.outboxId,
+                resourceId: persisted.contentId,
+                result:
+                  command.operation === "create_post"
+                    ? {
+                        content_id: persisted.result.contentId,
+                        resource_version: persisted.result.resourceVersion,
+                        revision_id: persisted.result.revisionId,
+                      }
+                    : {
+                        content_id: persisted.result.contentId,
+                        resource_version: persisted.result.resourceVersion,
+                        revision_id: persisted.result.revisionId,
+                        root_content_id: (persisted.result as ReplyResearchResult)
+                          .rootContentId,
+                      },
+              });
+              return {
+                action: terminal.action,
+                content: persisted.result,
+                resolvedOutboxEventId: terminal.resolvedOutboxEventId,
+              };
+            },
           );
-          const evaluation = evaluateAgentOperation({
-            credentialPolicyCeiling: authorization.credential_policy_ceiling,
-            credentialPolicyCeilingDefaultsVersion:
-              authorization.credential_policy_ceiling_defaults_version,
-            credentialPolicyCeilingRules: authorization.credential_policy_ceiling_rules,
-            credentialPolicyCeilingSchemaVersion:
-              authorization.credential_policy_ceiling_schema_version,
-            operation: command.operation,
-            policyDefaultsVersion: authorization.defaults_version,
-            policyRules: authorization.policy_rules,
-            policySchemaVersion: authorization.policy_schema_version,
-            policyTier: authorization.policy_tier,
-            scopes: authorization.credential_scopes,
-          });
-          if (!evaluation.scopeSatisfied || evaluation.decision === "deny") {
-            throw new ApprovedResearchExecutionError("APPROVED_ACTION_CONTEXT_INVALID");
+        } catch (error) {
+          if (!(error instanceof ResearchWriteError) || error.code !== "RATE_LIMITED") {
+            throw error;
           }
-
-          let replyTarget: ReplyTarget | null = null;
-          if (command.operation === "create_post") {
-            const targetIds = [
-              command.primaryCommunityId,
-              ...command.additionalCommunityIds,
-            ];
-            let admissions = await this.#inspectCommunities(transaction, targetIds);
-            this.#enforceCommunityRules(
-              admissions,
-              "investment-research",
-              command.sourceLinks.length > 0,
-              false,
-            );
-            await this.#materializeCatalogCommunities(transaction, admissions);
-            admissions = await this.#inspectCommunities(transaction, targetIds);
-            if (
-              admissions.some((admission) => admission.materialization !== "materialized")
-            ) {
-              throw new ResearchWriteError(
-                "COMMUNITY_NOT_FOUND",
-                "The catalog Community could not be materialized safely.",
-              );
-            }
-            this.#enforceCommunityRules(
-              admissions,
-              "investment-research",
-              command.sourceLinks.length > 0,
-              false,
-            );
-            await this.#enforcePostRates(
-              transaction,
-              authorization.actor_id,
-              admissions,
-              now,
-            );
-          } else {
-            replyTarget = await this.#loadReplyTarget(
-              transaction,
-              command.parentContentId,
-            );
-            const admissions = await this.#inspectCommunities(
-              transaction,
-              replyTarget.communityIds,
-            );
-            this.#enforceCommunityRules(
-              admissions,
-              "discussion",
-              command.sourceLinks.length > 0,
-              true,
-            );
+          const retryAfterMs = error.retryAfterMs;
+          if (
+            !error.retryable ||
+            retryAfterMs === null ||
+            !Number.isSafeInteger(retryAfterMs) ||
+            retryAfterMs < 1
+          ) {
+            throw new Error("An approved RATE_LIMITED result requires retry_after_ms.");
           }
-
-          const facts = await this.#resolveWriteFacts(
-            transaction,
-            command,
-            mentionHandles,
-          );
-          const preparedRevision = prepareRevision(command);
-          const persisted = await this.#insertResearchContent(transaction, {
-            authorization,
-            command,
-            facts,
-            now,
-            preparedRevision,
-            replyTarget,
-          });
           await this.#writeActionLog(transaction, {
             action: actionName(command.operation),
             actorId: authorization.actor_id,
             after: {
-              content_id: persisted.contentId,
+              error_code: error.code,
+              ...(error.details ?? {}),
               pending_action_id: frozenAction.actionId,
-              resource_version: 1,
-              revision_id: persisted.revisionId,
-              root_content_id: persisted.rootContentId,
+              retry_after_ms: retryAfterMs,
             },
+            auditDigests,
             agentId: frozenAction.agentId,
             approvalMethod: "owner_approval",
             approvedByOwnerId: frozenAction.ownerId,
@@ -1431,11 +2002,11 @@ export class PostgresResearchWriteService implements ResearchWriteService {
             credentialId: frozenAction.credentialId,
             decision: "require_approval",
             decisionId: originalDecisionId,
-            errorCode: null,
+            errorCode: error.code,
             evaluation,
-            outcome: "succeeded",
+            outcome: "denied",
             occurredAt: now,
-            outboxId: persisted.outboxId,
+            outboxId: null,
             ownerId: frozenAction.ownerId,
             policy: authorization,
             policySnapshotOverride: approvedExecutionPolicySnapshot(
@@ -1445,38 +2016,22 @@ export class PostgresResearchWriteService implements ResearchWriteService {
               originalDecisionId,
               decisionAuditId,
             ),
+            reasonCode: "rate_limited",
             requestId:
               `worker:pending-action:${frozenAction.actionId}:` +
               `attempt:${frozenAction.attemptCount}`,
-            targetId: persisted.contentId,
-            targetType: "content",
+            targetId: intendedTargetId(command),
+            targetType: command.operation === "create_post" ? "community" : "content",
           });
-
-          const terminal = await repository.finalizeSucceeded(transaction, claim, {
-            correlatedOutboxEventId: persisted.outboxId,
-            resourceId: persisted.contentId,
-            result:
-              command.operation === "create_post"
-                ? {
-                    content_id: persisted.result.contentId,
-                    resource_version: persisted.result.resourceVersion,
-                    revision_id: persisted.result.revisionId,
-                  }
-                : {
-                    content_id: persisted.result.contentId,
-                    resource_version: persisted.result.resourceVersion,
-                    revision_id: persisted.result.revisionId,
-                    root_content_id: (persisted.result as ReplyResearchResult)
-                      .rootContentId,
-                  },
-          });
-          return {
-            action: terminal.action,
-            content: persisted.result,
-            resolvedOutboxEventId: terminal.resolvedOutboxEventId,
-          };
-        },
-      );
+          return { rateLimited: true, retryAfterMs };
+        }
+      });
+      if ("rateLimited" in result) {
+        throw new ApprovedResearchExecutionError("APPROVED_ACTION_RATE_LIMITED", {
+          retryAfterMs: result.retryAfterMs,
+        });
+      }
+      return result;
     } catch (error) {
       if (error instanceof ApprovedResearchExecutionError) throw error;
       if (error instanceof PendingCommandCodecError) {
@@ -1517,6 +2072,20 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       context,
       "reply_to_content",
       () => normalizeReplyCommand(input),
+      input.idempotencyKey,
+      request,
+    );
+  }
+
+  async updateContent(
+    context: AgentCredentialContext,
+    input: UpdateContentResearchWriteInput,
+    request: ResearchWriteRequestContext,
+  ): Promise<ResearchWriteOutcome> {
+    return this.#dispatch(
+      context,
+      "update_content",
+      () => normalizeUpdateContentCommand(input),
       input.idempotencyKey,
       request,
     );
@@ -1579,6 +2148,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
 
     const digestBytes = digestResearchCommandBytes(command);
     const digestText = digestResearchCommand(command);
+    const auditDigests = this.#actionAuditDigests(digestBytes, idempotencyKey);
     const principalScopeKey = `credential:${context.credential.id}`;
 
     return this.#sql.begin(async (transaction) => {
@@ -1664,6 +2234,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
           action: actionName(command.operation),
           actorId: authorization.actor_id,
           after: { reason: evaluation.reason },
+          auditDigests,
           agentId: context.agent.id,
           auditId: this.#newId("audit_id"),
           channel,
@@ -1700,6 +2271,25 @@ export class PostgresResearchWriteService implements ResearchWriteService {
           context.agent.id,
           now,
         );
+      }
+
+      if (command.operation === "update_content") {
+        return this.#writeContentUpdate(transaction, {
+          authorization,
+          channel,
+          command,
+          context,
+          decisionId,
+          digestBytes,
+          digestText,
+          auditDigests,
+          evaluation,
+          idempotencyKey,
+          mentionHandles,
+          now,
+          principalScopeKey,
+          requestId: request.requestId,
+        });
       }
 
       let replyTarget: ReplyTarget | null = null;
@@ -1758,6 +2348,13 @@ export class PostgresResearchWriteService implements ResearchWriteService {
                   admissions,
                   now,
                 );
+                await this.#enforceAgentContentRate(
+                  admissionTransaction,
+                  authorization,
+                  context.agent.id,
+                  "create_post",
+                  now,
+                );
               }
               return null;
             }
@@ -1776,10 +2373,35 @@ export class PostgresResearchWriteService implements ResearchWriteService {
               command.sourceLinks.length > 0,
               true,
             );
+            if (evaluation.decision === "allow") {
+              await this.#enforceAgentContentRate(
+                admissionTransaction,
+                authorization,
+                context.agent.id,
+                "reply_to_content",
+                now,
+              );
+            }
             return inspectedReplyTarget;
           },
         );
       } catch (error) {
+        if (error instanceof ResearchWriteError && error.code === "RATE_LIMITED") {
+          const outcome = rateLimitedOutcome(command.operation, error);
+          await this.#commitTransientContentRateLimit(transaction, {
+            authorization,
+            channel,
+            command,
+            context,
+            decisionId,
+            error,
+            evaluation,
+            auditDigests,
+            now,
+            requestId: request.requestId,
+          });
+          return outcome;
+        }
         if (error instanceof ResearchWriteError && isPlatformRuleDenial(error)) {
           return this.#commitPlatformRuleDenial(transaction, {
             authorization,
@@ -1790,6 +2412,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
             digestBytes,
             error,
             evaluation,
+            auditDigests,
             idempotencyKey,
             now,
             principalScopeKey,
@@ -1824,9 +2447,11 @@ export class PostgresResearchWriteService implements ResearchWriteService {
           decisionId,
           digestBytes,
           digestText,
+          auditDigests,
           evaluation,
           idempotencyId,
           idempotencyKey,
+          mentionActorIds: facts.mentionActorIds,
           now,
           principalScopeKey,
           requestId: request.requestId,
@@ -1840,6 +2465,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         context,
         decisionId,
         evaluation,
+        auditDigests,
         facts,
         idempotencyId,
         now,
@@ -1848,6 +2474,285 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         requestId: request.requestId,
       });
     });
+  }
+
+  async #writeContentUpdate(
+    transaction: TransactionSql,
+    input: {
+      authorization: AuthorizationRow;
+      auditDigests: ResearchActionAuditDigests;
+      channel: string;
+      command: NormalizedUpdateContentCommand;
+      context: AgentCredentialContext;
+      decisionId: string;
+      digestBytes: Buffer;
+      digestText: string;
+      evaluation: AgentOperationEvaluation;
+      idempotencyKey: string;
+      mentionHandles: string[];
+      now: Date;
+      principalScopeKey: string;
+      requestId: string;
+    },
+  ): Promise<ResearchWriteOutcome> {
+    const idempotencyId = this.#newId("idempotency_record_id");
+    await this.#insertIdempotency(transaction, {
+      actorId: input.authorization.actor_id,
+      agentId: input.context.agent.id,
+      credentialId: input.context.credential.id,
+      digestBytes: input.digestBytes,
+      id: idempotencyId,
+      idempotencyKey: input.idempotencyKey,
+      now: input.now,
+      operation: input.command.operation,
+      ownerId: input.context.owner.id,
+      principalScopeKey: input.principalScopeKey,
+    });
+
+    try {
+      return await transaction.savepoint(
+        "content_update_mutation",
+        async (mutationTransaction) => {
+          const prepared = await this.#loadContentUpdateTarget(
+            mutationTransaction,
+            input.command,
+            input.authorization.actor_id,
+          );
+          let admissions = await this.#inspectCommunities(
+            mutationTransaction,
+            prepared.communityIds,
+          );
+          this.#enforceCommunityRules(
+            admissions,
+            prepared.kind === "post" ? "investment-research" : "discussion",
+            prepared.sourceLinks.length > 0,
+            prepared.kind === "reply",
+            false,
+          );
+          this.#enforceNewCommunityPlacementCapacity(
+            admissions,
+            prepared.newlyAddedCommunityIds,
+          );
+          if (input.evaluation.decision === "allow") {
+            await this.#materializeCatalogCommunities(mutationTransaction, admissions);
+            admissions = await this.#inspectCommunities(
+              mutationTransaction,
+              prepared.communityIds,
+            );
+            if (
+              admissions.some((admission) => admission.materialization !== "materialized")
+            ) {
+              throw new ResearchWriteError(
+                "COMMUNITY_NOT_FOUND",
+                "The catalog Community could not be materialized safely.",
+              );
+            }
+            this.#enforceCommunityRules(
+              admissions,
+              prepared.kind === "post" ? "investment-research" : "discussion",
+              prepared.sourceLinks.length > 0,
+              prepared.kind === "reply",
+              false,
+            );
+            this.#enforceNewCommunityPlacementCapacity(
+              admissions,
+              prepared.newlyAddedCommunityIds,
+            );
+            await this.#enforcePostRates(
+              mutationTransaction,
+              input.authorization.actor_id,
+              this.#newCommunityAdmissions(admissions, prepared.newlyAddedCommunityIds),
+              input.now,
+            );
+          }
+
+          const facts = await this.#resolveWriteFacts(
+            mutationTransaction,
+            {
+              references: input.command.patch.references ?? [],
+              symbols: input.command.patch.symbols ?? [],
+              topics: input.command.patch.topics ?? [],
+            },
+            input.command.patch.bodyMarkdown === undefined ? [] : input.mentionHandles,
+          );
+          if (
+            prepared.revisionChanged &&
+            input.command.patch.bodyMarkdown === undefined
+          ) {
+            facts.mentionActorIds = [...prepared.currentMentionActorIds];
+          }
+
+          if (input.evaluation.decision === "require_approval") {
+            return this.#createPendingAction(mutationTransaction, {
+              authorization: input.authorization,
+              channel: input.channel,
+              command: input.command,
+              context: input.context,
+              decisionId: input.decisionId,
+              digestBytes: input.digestBytes,
+              digestText: input.digestText,
+              auditDigests: input.auditDigests,
+              evaluation: input.evaluation,
+              idempotencyId,
+              idempotencyKey: input.idempotencyKey,
+              mentionActorIds: facts.mentionActorIds,
+              now: input.now,
+              principalScopeKey: input.principalScopeKey,
+              requestId: input.requestId,
+              updateBaseline: frozenUpdateBaseline(prepared),
+            });
+          }
+
+          await this.#enforceUpdateRates(
+            mutationTransaction,
+            input.authorization.actor_id,
+            prepared.contentId,
+            input.now,
+          );
+          const persisted = await this.#persistContentUpdate(mutationTransaction, {
+            actorId: input.authorization.actor_id,
+            command: input.command,
+            facts,
+            now: input.now,
+            prepared,
+          });
+          await this.#writeActionLog(mutationTransaction, {
+            action: actionName(input.command.operation),
+            actorId: input.authorization.actor_id,
+            after: {
+              changed_groups: prepared.changedGroups,
+              content_id: persisted.contentId,
+              idempotency_record_id: idempotencyId,
+              resource_version: persisted.result.resourceVersion,
+              revision_id: persisted.result.revisionId,
+              root_content_id: persisted.rootContentId,
+            },
+            auditDigests: input.auditDigests,
+            agentId: input.context.agent.id,
+            auditId: this.#newId("audit_id"),
+            channel: input.channel,
+            credentialId: input.context.credential.id,
+            decision: "allow",
+            decisionId: input.decisionId,
+            errorCode: null,
+            evaluation: input.evaluation,
+            outcome: "succeeded",
+            occurredAt: input.now,
+            outboxId: persisted.outboxId,
+            ownerId: input.context.owner.id,
+            policy: input.authorization,
+            requestId: input.requestId,
+            targetId: persisted.contentId,
+            targetType: "content",
+          });
+          const outcome: ResearchWriteOutcome = {
+            decision: "allow",
+            error: null,
+            operation: "update_content",
+            pendingAction: null,
+            replayed: false,
+            result: persisted.result,
+            status: "succeeded",
+          };
+          await this.#finalizeIdempotency(
+            mutationTransaction,
+            idempotencyId,
+            "succeeded",
+            200,
+            outcome,
+            persisted.contentId,
+            input.now,
+          );
+          return outcome;
+        },
+      );
+    } catch (error) {
+      if (!(error instanceof ResearchWriteError)) throw error;
+      // The savepoint has already rolled back catalog materialization and every
+      // other mutation. A quota denial is transient: retain an immutable audit
+      // entry, but remove the provisional idempotency row so the same key and
+      // digest can be evaluated again after retry_after_ms.
+      if (error.code === "RATE_LIMITED") {
+        const outcome = rateLimitedOutcome("update_content", error);
+        await this.#commitTransientUpdateRateLimit(transaction, {
+          authorization: input.authorization,
+          channel: input.channel,
+          command: input.command,
+          context: input.context,
+          decisionId: input.decisionId,
+          evaluation: input.evaluation,
+          idempotencyId,
+          auditDigests: input.auditDigests,
+          now: input.now,
+          outcome,
+          requestId: input.requestId,
+        });
+        return outcome;
+      }
+      const outcome = isPlatformRuleDenial(error)
+        ? platformRuleDeniedOutcome("update_content", error)
+        : expectedErrorOutcome("update_content", input.evaluation, error);
+      await this.#writeActionLog(transaction, {
+        action: actionName(input.command.operation),
+        actorId: input.authorization.actor_id,
+        after: {
+          content_id: input.command.contentId,
+          error_code: error.code,
+          expected_version: input.command.expectedVersion,
+        },
+        auditDigests: input.auditDigests,
+        agentId: input.context.agent.id,
+        auditId: this.#newId("audit_id"),
+        channel: input.channel,
+        credentialId: input.context.credential.id,
+        decision: outcome.decision,
+        decisionId: input.decisionId,
+        errorCode: error.code,
+        evaluation: input.evaluation,
+        outcome: outcome.status === "denied" ? "denied" : "failed",
+        occurredAt: input.now,
+        outboxId: null,
+        ownerId: input.context.owner.id,
+        policy: input.authorization,
+        reasonCode: error.code.toLocaleLowerCase("en-US"),
+        requestId: input.requestId,
+        targetId: input.command.contentId,
+        targetType: "content",
+      });
+      await this.#finalizeIdempotency(
+        transaction,
+        idempotencyId,
+        outcome.status === "denied" ? "denied" : "failed",
+        error.statusCode,
+        outcome,
+        null,
+        input.now,
+      );
+      return outcome;
+    }
+  }
+
+  #actionAuditDigests(
+    inputDigest: Buffer,
+    idempotencyKey: string,
+    keyVersion: number = this.#actionLogHmacKeyVersion,
+  ): ResearchActionAuditDigests {
+    if (inputDigest.byteLength !== 32) {
+      throw new Error("A research ActionLog requires a SHA-256 input digest.");
+    }
+    const purposeKey = this.#actionLogHmacKeys.get(keyVersion);
+    if (!purposeKey) {
+      throw new Error("The ActionLog idempotency digest key version is unavailable.");
+    }
+    const digest = createHmac("sha256", purposeKey)
+      .update(ACTION_LOG_HMAC_VALUE_DOMAIN, "utf8")
+      .update(Buffer.from([0]))
+      .update(idempotencyKey, "utf8")
+      .digest("hex");
+    return {
+      idempotencyKeyDigest: `hmac-sha256:v${keyVersion}:${digest}`,
+      inputDigest: `sha256:${inputDigest.toString("hex")}`,
+    };
   }
 
   #newId(field: string): string {
@@ -1877,6 +2782,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     const rows = await transaction<AuthorizationRow[]>`
       select
         actor.id as actor_id,
+        agent.activated_at as agent_activated_at,
         credential.scopes as credential_scopes,
         credential.policy_ceiling as credential_policy_ceiling,
         credential.policy_ceiling_defaults_version
@@ -1916,6 +2822,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         and owner.email_verified_at is not null
         and owner.deleted_at is null
         and agent.status = 'active'
+        and agent.activated_at is not null
         and agent.deleted_at is null
         and actor.status = 'active'
         and actor.deleted_at is null
@@ -1923,7 +2830,11 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       for share of credential, agent, actor, owner, policy
     `;
     const row = rows[0];
-    if (!row) {
+    if (
+      !row ||
+      !(row.agent_activated_at instanceof Date) ||
+      Number.isNaN(row.agent_activated_at.valueOf())
+    ) {
       throw new ResearchWriteError(
         "AUTHORIZATION_CONTEXT_STALE",
         "The authenticated Agent authority context is no longer valid.",
@@ -1939,6 +2850,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     const rows = await transaction<AuthorizationRow[]>`
       select
         actor.id as actor_id,
+        agent.activated_at as agent_activated_at,
         credential.scopes as credential_scopes,
         credential.policy_ceiling as credential_policy_ceiling,
         credential.policy_ceiling_defaults_version
@@ -1975,6 +2887,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         and owner.email_verified_at is not null
         and owner.deleted_at is null
         and agent.status = 'active'
+        and agent.activated_at is not null
         and agent.deleted_at is null
         and actor.status = 'active'
         and actor.deleted_at is null
@@ -1982,7 +2895,11 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       for share of credential, agent, actor, owner, policy
     `;
     const row = rows[0];
-    if (!row) {
+    if (
+      !row ||
+      !(row.agent_activated_at instanceof Date) ||
+      Number.isNaN(row.agent_activated_at.valueOf())
+    ) {
       throw new ResearchWriteError(
         "AUTHORIZATION_CONTEXT_STALE",
         "The approved Agent authority is no longer valid.",
@@ -2077,6 +2994,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     transaction: TransactionSql,
     input: {
       authorization: AuthorizationRow;
+      auditDigests: ResearchActionAuditDigests;
       channel: string;
       command: NormalizedResearchCommand;
       context: AgentCredentialContext;
@@ -2111,6 +3029,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         error_code: input.error.code,
         ...(input.error.details ?? {}),
       },
+      auditDigests: input.auditDigests,
       agentId: input.context.agent.id,
       auditId: this.#newId("audit_id"),
       channel: input.channel,
@@ -2139,6 +3058,123 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       input.now,
     );
     return outcome;
+  }
+
+  async #commitTransientContentRateLimit(
+    transaction: TransactionSql,
+    input: {
+      authorization: AuthorizationRow;
+      auditDigests: ResearchActionAuditDigests;
+      channel: string;
+      command: NewResearchCommand;
+      context: AgentCredentialContext;
+      decisionId: string;
+      error: ResearchWriteError;
+      evaluation: AgentOperationEvaluation;
+      now: Date;
+      requestId: string;
+    },
+  ): Promise<void> {
+    if (
+      input.error.code !== "RATE_LIMITED" ||
+      !input.error.retryable ||
+      input.error.retryAfterMs === null
+    ) {
+      throw new Error("A transient content denial requires RATE_LIMITED.");
+    }
+    await this.#writeActionLog(transaction, {
+      action: actionName(input.command.operation),
+      actorId: input.authorization.actor_id,
+      after: {
+        error_code: input.error.code,
+        ...(input.error.details ?? {}),
+        retry_after_ms: input.error.retryAfterMs,
+      },
+      auditDigests: input.auditDigests,
+      agentId: input.context.agent.id,
+      auditId: this.#newId("audit_id"),
+      channel: input.channel,
+      credentialId: input.context.credential.id,
+      decision: "deny",
+      decisionId: input.decisionId,
+      errorCode: input.error.code,
+      evaluation: input.evaluation,
+      outcome: "denied",
+      occurredAt: input.now,
+      outboxId: null,
+      ownerId: input.context.owner.id,
+      policy: input.authorization,
+      reasonCode: "rate_limited",
+      requestId: input.requestId,
+      targetId: intendedTargetId(input.command),
+      targetType: input.command.operation === "create_post" ? "community" : "content",
+    });
+  }
+
+  async #commitTransientUpdateRateLimit(
+    transaction: TransactionSql,
+    input: {
+      authorization: AuthorizationRow;
+      auditDigests: ResearchActionAuditDigests;
+      channel: string;
+      command: NormalizedUpdateContentCommand;
+      context: AgentCredentialContext;
+      decisionId: string;
+      evaluation: AgentOperationEvaluation;
+      idempotencyId: string;
+      now: Date;
+      outcome: ResearchWriteOutcome;
+      requestId: string;
+    },
+  ): Promise<void> {
+    const error = input.outcome.error;
+    if (
+      input.outcome.decision !== "deny" ||
+      input.outcome.status !== "denied" ||
+      error?.code !== "RATE_LIMITED" ||
+      error.retryAfterMs === null
+    ) {
+      throw new Error("A transient content-update denial requires RATE_LIMITED.");
+    }
+    const deleted = await transaction<{ id: string }[]>`
+      delete from platform.idempotency_records
+      where id = ${input.idempotencyId}
+        and status = 'in_progress'
+      returning id
+    `;
+    if (deleted.length !== 1) {
+      throw new Error(
+        "The transient content-update denial could not release its idempotency reservation.",
+      );
+    }
+    await this.#writeActionLog(transaction, {
+      action: actionName(input.command.operation),
+      actorId: input.authorization.actor_id,
+      after: {
+        content_id: input.command.contentId,
+        error_code: error.code,
+        expected_version: input.command.expectedVersion,
+        retry_after_ms: error.retryAfterMs,
+      },
+      auditDigests: input.auditDigests,
+      agentId: input.context.agent.id,
+      auditId: this.#newId("audit_id"),
+      channel: input.channel,
+      credentialId: input.context.credential.id,
+      decision: "deny",
+      decisionId: input.decisionId,
+      errorCode: error.code,
+      evaluation: input.evaluation,
+      outcome: "denied",
+      occurredAt: input.now,
+      outboxId: null,
+      ownerId: input.context.owner.id,
+      policy: input.authorization,
+      reasonCode: "rate_limited",
+      requestId: input.requestId,
+      targetId: input.command.contentId,
+      targetType: "content",
+    });
   }
 
   async #inspectCommunities(
@@ -2273,6 +3309,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     requiredContentType: "investment-research" | "discussion",
     hasSources: boolean,
     isReply: boolean,
+    enforceNewPostCapacity = true,
   ): void {
     for (const admission of admissions) {
       if (admission.state !== "active") {
@@ -2313,7 +3350,42 @@ export class PostgresResearchWriteService implements ResearchWriteService {
           { details: { community_id: admission.id } },
         );
       }
-      if (!isReply && admission.rules.maxPostsPerHour === 0) {
+      if (!isReply && enforceNewPostCapacity && admission.rules.maxPostsPerHour === 0) {
+        throw new ResearchWriteError(
+          "COMMUNITY_RESTRICTED",
+          "The Community is not accepting new posts.",
+          { details: { community_id: admission.id } },
+        );
+      }
+    }
+  }
+
+  #newCommunityAdmissions(
+    admissions: readonly CommunityAdmission[],
+    newlyAddedCommunityIds: readonly string[],
+  ): CommunityAdmission[] {
+    if (newlyAddedCommunityIds.length === 0) return [];
+    const admissionsById = new Map(
+      admissions.map((admission) => [admission.id.toLocaleLowerCase("en-US"), admission]),
+    );
+    return newlyAddedCommunityIds.map((communityId) => {
+      const admission = admissionsById.get(communityId.toLocaleLowerCase("en-US"));
+      if (!admission) {
+        throw new Error("A new Community placement escaped admission inspection.");
+      }
+      return admission;
+    });
+  }
+
+  #enforceNewCommunityPlacementCapacity(
+    admissions: readonly CommunityAdmission[],
+    newlyAddedCommunityIds: readonly string[],
+  ): void {
+    for (const admission of this.#newCommunityAdmissions(
+      admissions,
+      newlyAddedCommunityIds,
+    )) {
+      if (admission.rules.maxPostsPerHour === 0) {
         throw new ResearchWriteError(
           "COMMUNITY_RESTRICTED",
           "The Community is not accepting new posts.",
@@ -2363,20 +3435,22 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       const communityId = admission.id.toLocaleLowerCase("en-US");
       const rows = await transaction<{ admitted_count: number; retry_at: Date | null }[]>`
         with admitted as (
-          select content.created_at as admitted_at
+          select content.published_at as admitted_at
           from platform.content_items as content
           where content.author_actor_id = ${actorId}
             and content.kind = 'post'
-            and (
-              content.primary_community_id = ${communityId}
-              or exists (
-                select 1
-                from platform.content_additional_communities as additional
-                where additional.content_id = content.id
-                  and additional.community_id = ${communityId}
-              )
-            )
-            and content.created_at > ${now} - interval '1 hour'
+            and content.primary_community_id = ${communityId}
+            and content.published_at > ${now} - interval '1 hour'
+
+          union all
+
+          select additional.created_at as admitted_at
+          from platform.content_additional_communities as additional
+          join platform.content_items as content on content.id = additional.content_id
+          where content.author_actor_id = ${actorId}
+            and content.kind = 'post'
+            and additional.community_id = ${communityId}
+            and additional.created_at > ${now} - interval '1 hour'
         )
         select
           count(*)::integer as admitted_count,
@@ -2399,6 +3473,73 @@ export class PostgresResearchWriteService implements ResearchWriteService {
           },
         );
       }
+    }
+  }
+
+  async #enforceAgentContentRate(
+    transaction: TransactionSql,
+    authorization: AuthorizationRow,
+    agentId: string,
+    operation: "create_post" | "reply_to_content",
+    now: Date,
+  ): Promise<void> {
+    const lockKey = `alphanet:agent-content-rate:${agentId}:${operation}`;
+    await transaction`
+      select pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(${lockKey}, 0)
+      )
+    `;
+
+    const windowStart = new Date(now.valueOf() - AGENT_CONTENT_RATE_WINDOW_MS);
+    const action = actionName(operation);
+    const rows = await transaction<AgentContentRateWindow[]>`
+      select
+        count(*)::integer as succeeded_count,
+        min(log.occurred_at) + interval '1 hour' as retry_at
+      from platform.action_logs as log
+      where log.agent_id = ${agentId}
+        and log.action = ${action}
+        and log.outcome = 'succeeded'
+        and log.occurred_at >= ${windowStart}
+    `;
+    const window = rows[0];
+    if (
+      !window ||
+      !Number.isInteger(window.succeeded_count) ||
+      window.succeeded_count < 0
+    ) {
+      throw new Error("Agent content quota projection returned invalid data.");
+    }
+
+    const isNewAgent =
+      now.valueOf() - authorization.agent_activated_at.valueOf() <
+      NEW_AGENT_CONTENT_RATE_WINDOW_MS;
+    const limit =
+      operation === "create_post"
+        ? isNewAgent
+          ? NEW_AGENT_POSTS_PER_HOUR
+          : ESTABLISHED_AGENT_POSTS_PER_HOUR
+        : isNewAgent
+          ? NEW_AGENT_REPLIES_PER_HOUR
+          : ESTABLISHED_AGENT_REPLIES_PER_HOUR;
+    if (window.succeeded_count >= limit) {
+      const retryAt =
+        window.retry_at?.valueOf() ?? now.valueOf() + AGENT_CONTENT_RATE_WINDOW_MS;
+      throw new ResearchWriteError(
+        "RATE_LIMITED",
+        `The Agent ${operation === "create_post" ? "post" : "reply"} limit for this rolling hour has been reached.`,
+        {
+          details: {
+            limit,
+            limit_dimension:
+              operation === "create_post" ? "agent_post_hour" : "agent_reply_hour",
+            new_agent_window: isNewAgent,
+            rule_version: AGENT_CONTENT_RATE_RULE_VERSION,
+          },
+          retryable: true,
+          retryAfterMs: Math.max(1, retryAt - now.valueOf()),
+        },
+      );
     }
   }
 
@@ -2539,9 +3680,603 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     };
   }
 
+  async #loadContentUpdateTarget(
+    transaction: TransactionSql,
+    command: NormalizedUpdateContentCommand,
+    actorId: string,
+  ): Promise<PreparedContentUpdate> {
+    const rows = await transaction<UpdateTargetRow[]>`
+      select
+        content.author_actor_id,
+        content.version::integer as version,
+        content.kind,
+        content.root_id,
+        content.parent_id,
+        content.depth,
+        content.primary_community_id,
+        content.current_revision_id,
+        content.lifecycle_state,
+        content.distribution_state,
+        revision.revision_number::integer as current_revision_number,
+        revision.title,
+        revision.body_markdown
+      from platform.content_items as content
+      join platform.content_revisions as revision
+        on revision.id = content.current_revision_id
+       and revision.content_id = content.id
+      where content.id = ${command.contentId}
+      limit 1
+      for update of content
+    `;
+    const row = rows[0];
+    if (
+      !row ||
+      row.lifecycle_state !== "published" ||
+      row.distribution_state === "hidden"
+    ) {
+      throw new ResearchWriteError(
+        "CONTENT_NOT_FOUND",
+        "The ContentItem is unavailable.",
+      );
+    }
+    if (row.author_actor_id !== actorId) {
+      throw new ResearchWriteError(
+        "NOT_CONTENT_AUTHOR",
+        "Only the publishing Agent can update this ContentItem.",
+      );
+    }
+    if (row.version !== command.expectedVersion) {
+      throw new ResearchWriteError(
+        "VERSION_CONFLICT",
+        "The ContentItem changed after the requested base version.",
+        {
+          details: {
+            current_version: row.version,
+            expected_version: command.expectedVersion,
+          },
+        },
+      );
+    }
+
+    if (
+      row.kind === "reply" &&
+      (command.patch.title !== undefined ||
+        command.patch.additionalCommunityIds !== undefined ||
+        command.patch.symbols !== undefined ||
+        command.patch.topics !== undefined)
+    ) {
+      throw new ResearchWriteError(
+        "VALIDATION_ERROR",
+        "Replies can update only body, sources, and references.",
+        { details: { reason_code: "REPLY_FIELD_IMMUTABLE" } },
+      );
+    }
+
+    const additionalRows = await transaction<CurrentAdditionalCommunityRow[]>`
+      select additional.community_id, additional.created_at
+      from platform.content_additional_communities as additional
+      where additional.content_id = ${row.kind === "post" ? row.root_id : command.contentId}
+      order by additional.position
+    `;
+    const symbolRows = await transaction<{ value: string }[]>`
+      select symbol.ticker::text as value
+      from platform.content_symbols as content_symbol
+      join platform.symbols as symbol on symbol.id = content_symbol.symbol_id
+      where content_symbol.content_id = ${command.contentId}
+      order by content_symbol.position
+    `;
+    const topicRows = await transaction<{ value: string }[]>`
+      select topic.slug::text as value
+      from platform.content_topics as content_topic
+      join platform.topics as topic on topic.id = content_topic.topic_id
+      where content_topic.content_id = ${command.contentId}
+      order by content_topic.position
+    `;
+    const sourceRows = await transaction<CurrentSourceRow[]>`
+      select source.url, source.title, source.description
+      from platform.source_links as source
+      where source.content_id = ${command.contentId}
+        and source.removed_revision_id is null
+      order by source.position
+    `;
+    const referenceRows = await transaction<CurrentReferenceRow[]>`
+      select
+        relation.to_content_id as target_content_id,
+        relation.relation_type
+      from platform.content_relations as relation
+      where relation.from_content_id = ${command.contentId}
+        and relation.removed_revision_id is null
+      order by relation.position
+    `;
+    const mentionRows = await transaction<{ mentioned_actor_id: string }[]>`
+      select mention.mentioned_actor_id
+      from platform.mentions as mention
+      where mention.revision_id = ${row.current_revision_id}
+      order by mention.position
+    `;
+
+    const currentSources = sourceRows.map((source) => ({
+      url: source.url,
+      ...(source.title === null ? {} : { title: source.title }),
+      ...(source.description === null ? {} : { description: source.description }),
+    }));
+    const currentReferences = referenceRows.map((reference) => ({
+      targetContentId: reference.target_content_id,
+      relationType: reference.relation_type,
+    }));
+    const currentAdditionalCommunityIds = additionalRows.map(
+      (additional) => additional.community_id,
+    );
+    const currentSymbols = symbolRows.map((symbol) => symbol.value);
+    const currentTopics = topicRows.map((topic) => topic.value);
+    const additionalCommunityIds =
+      command.patch.additionalCommunityIds ?? currentAdditionalCommunityIds;
+    const symbols = command.patch.symbols ?? currentSymbols;
+    const topics = command.patch.topics ?? currentTopics;
+    const sourceLinks = command.patch.sourceLinks ?? currentSources;
+    const references = command.patch.references ?? currentReferences;
+    const title = command.patch.title ?? row.title;
+    const bodyMarkdown = command.patch.bodyMarkdown ?? row.body_markdown;
+
+    if (references.some((reference) => reference.targetContentId === command.contentId)) {
+      throw new ResearchWriteError(
+        "VALIDATION_ERROR",
+        "Content cannot reference itself.",
+        { details: { field: "references", reason_code: "SELF_REFERENCE" } },
+      );
+    }
+
+    if (row.kind === "post") {
+      if (title === null || unicodeLength(title) < 5 || unicodeLength(title) > 200) {
+        throw new ResearchWriteError(
+          "VALIDATION_ERROR",
+          "Post titles must contain 5 through 200 Unicode characters.",
+          { details: { field: "title" } },
+        );
+      }
+      if (
+        row.primary_community_id === null ||
+        additionalCommunityIds.includes(row.primary_community_id)
+      ) {
+        throw new ResearchWriteError(
+          "VALIDATION_ERROR",
+          "The primary Community cannot be changed or duplicated as additional.",
+          { details: { field: "additional_community_ids" } },
+        );
+      }
+    }
+    const bodyLimit = row.kind === "post" ? 100_000 : 20_000;
+    if (
+      bodyMarkdown.trim().length === 0 ||
+      unicodeLength(bodyMarkdown) > bodyLimit ||
+      Buffer.byteLength(bodyMarkdown, "utf8") > BODY_BYTES_LIMIT
+    ) {
+      throw new ResearchWriteError(
+        "VALIDATION_ERROR",
+        "The normalized Markdown body is outside the content-kind limit.",
+        { details: { field: "body_markdown" } },
+      );
+    }
+
+    const equal = (left: unknown, right: unknown): boolean =>
+      JSON.stringify(left) === JSON.stringify(right);
+    const changedGroups: string[] = [];
+    if (title !== row.title) changedGroups.push("title");
+    if (bodyMarkdown !== row.body_markdown) changedGroups.push("body_markdown");
+    if (!equal(sourceLinks, currentSources)) changedGroups.push("source_links");
+    if (!equal(references, currentReferences)) changedGroups.push("references");
+    if (!equal(additionalCommunityIds, currentAdditionalCommunityIds)) {
+      changedGroups.push("additional_community_ids");
+    }
+    if (!equal(symbols, currentSymbols)) changedGroups.push("symbols");
+    if (!equal(topics, currentTopics)) changedGroups.push("topics");
+    if (changedGroups.length === 0) {
+      throw new ResearchWriteError(
+        "VALIDATION_ERROR",
+        "The update patch does not make a material change.",
+        { details: { reason_code: "NO_MATERIAL_CHANGE" } },
+      );
+    }
+    const revisionChanged = changedGroups.some((group) =>
+      ["title", "body_markdown", "source_links", "references"].includes(group),
+    );
+    if (!revisionChanged && command.editSummary !== undefined) {
+      throw new ResearchWriteError(
+        "VALIDATION_ERROR",
+        "An edit summary requires a new immutable Revision.",
+        { details: { field: "edit_summary" } },
+      );
+    }
+
+    let communityIds: string[];
+    if (row.kind === "post") {
+      communityIds = [row.primary_community_id!, ...additionalCommunityIds];
+    } else {
+      const roots = await transaction<{ primary_community_id: string }[]>`
+        select root.primary_community_id
+        from platform.content_items as root
+        where root.id = ${row.root_id}
+          and root.kind = 'post'
+          and root.lifecycle_state = 'published'
+          and root.distribution_state <> 'hidden'
+        limit 1
+        for share
+      `;
+      const root = roots[0];
+      if (!root) {
+        throw new ResearchWriteError(
+          "CONTENT_NOT_FOUND",
+          "The reply discussion root is unavailable.",
+        );
+      }
+      const rootAdditional = await transaction<{ community_id: string }[]>`
+        select additional.community_id
+        from platform.content_additional_communities as additional
+        where additional.content_id = ${row.root_id}
+        order by additional.position
+      `;
+      communityIds = [
+        root.primary_community_id,
+        ...rootAdditional.map((item) => item.community_id),
+      ];
+    }
+
+    return {
+      additionalCommunityIds,
+      additionalCommunityCreatedAtById: new Map(
+        additionalRows.map((additional) => [
+          additional.community_id,
+          additional.created_at,
+        ]),
+      ),
+      bodyMarkdown,
+      changedGroups,
+      classificationChanged: changedGroups.some((group) =>
+        ["additional_community_ids", "symbols", "topics"].includes(group),
+      ),
+      communityIds,
+      contentId: command.contentId,
+      currentBodyMarkdown: row.body_markdown,
+      currentCommunityIds:
+        row.kind === "post"
+          ? [row.primary_community_id!, ...currentAdditionalCommunityIds]
+          : [...communityIds],
+      currentMentionActorIds: mentionRows.map((mention) => mention.mentioned_actor_id),
+      currentReferences,
+      currentRevisionId: row.current_revision_id,
+      currentRevisionNumber: row.current_revision_number,
+      currentSources,
+      currentTitle: row.title,
+      currentVersion: row.version,
+      kind: row.kind,
+      newlyAddedCommunityIds: additionalCommunityIds.filter(
+        (communityId) => !currentAdditionalCommunityIds.includes(communityId),
+      ),
+      primaryCommunityId: row.primary_community_id,
+      references,
+      revisionChanged,
+      rootContentId: row.root_id,
+      sourceLinks,
+      symbols,
+      title,
+      topics,
+    };
+  }
+
+  async #enforceUpdateRates(
+    transaction: TransactionSql,
+    actorId: string,
+    contentId: string,
+    now: Date,
+  ): Promise<void> {
+    const lockKeys = [
+      `alphanet:content-update-rate:actor:${actorId}`,
+      `alphanet:content-update-rate:content:${contentId}`,
+    ].sort();
+    for (const lockKey of lockKeys) {
+      await transaction`
+        select pg_catalog.pg_advisory_xact_lock(
+          pg_catalog.hashtextextended(${lockKey}, 0)
+        )
+      `;
+    }
+    const rows = await transaction<
+      {
+        actor_count: number;
+        actor_retry_at: Date | null;
+        content_count: number;
+        content_retry_at: Date | null;
+      }[]
+    >`
+      select
+        count(*) filter (where log.actor_id = ${actorId})::integer as actor_count,
+        min(log.occurred_at) filter (where log.actor_id = ${actorId})
+          + interval '1 hour' as actor_retry_at,
+        count(*) filter (where log.target_id = ${contentId})::integer as content_count,
+        min(log.occurred_at) filter (where log.target_id = ${contentId})
+          + interval '1 hour' as content_retry_at
+      from platform.action_logs as log
+      where log.event_class = 'domain_write'
+        and log.action = 'content.update_content'
+        and log.outcome = 'succeeded'
+        and log.occurred_at > ${now} - interval '1 hour'
+        and (log.actor_id = ${actorId} or log.target_id = ${contentId})
+    `;
+    const window = rows[0];
+    if (!window) throw new Error("Content-update quota query returned no aggregate row.");
+    const actorLimited = window.actor_count >= 30;
+    const contentLimited = window.content_count >= 10;
+    if (actorLimited || contentLimited) {
+      const retryAt = actorLimited ? window.actor_retry_at : window.content_retry_at;
+      throw new ResearchWriteError(
+        "RATE_LIMITED",
+        "The content update rate limit has been reached.",
+        {
+          details: {
+            limit: actorLimited ? 30 : 10,
+            limit_dimension: actorLimited ? "agent_updates" : "content_updates",
+          },
+          retryable: true,
+          retryAfterMs: Math.max(
+            1,
+            (retryAt?.valueOf() ?? now.valueOf() + 60_000) - now.valueOf(),
+          ),
+        },
+      );
+    }
+  }
+
+  async #persistContentUpdate(
+    transaction: TransactionSql,
+    input: {
+      actorId: string;
+      command: NormalizedUpdateContentCommand;
+      facts: ResolvedWriteFacts;
+      now: Date;
+      prepared: PreparedContentUpdate;
+    },
+  ): Promise<PersistedContentUpdate> {
+    const newVersion = input.prepared.currentVersion + 1;
+    const revisionId = input.prepared.revisionChanged ? this.#newId("revision_id") : null;
+    const revisionNumber = input.prepared.currentRevisionNumber + 1;
+
+    if (revisionId !== null) {
+      const revision = prepareRevisionFields({
+        bodyMarkdown: input.prepared.bodyMarkdown,
+        references: input.prepared.references,
+        sourceLinks: input.prepared.sourceLinks,
+        symbols: input.prepared.symbols,
+        title: input.prepared.title,
+        topics: input.prepared.topics,
+      });
+      await transaction`
+        insert into platform.content_revisions (
+          id,
+          content_id,
+          revision_number,
+          title,
+          body_markdown,
+          body_plain_text,
+          edit_summary,
+          created_by_actor_id,
+          created_at,
+          source_version,
+          content_hash,
+          public_node_serialized_bytes
+        )
+        values (
+          ${revisionId},
+          ${input.prepared.contentId},
+          ${revisionNumber},
+          ${input.prepared.title},
+          ${input.prepared.bodyMarkdown},
+          ${revision.bodyPlainText},
+          ${input.command.editSummary ?? null},
+          ${input.actorId},
+          ${input.now},
+          ${newVersion},
+          ${revision.contentHash},
+          ${revision.publicNodeBytes}
+        )
+      `;
+
+      if (input.prepared.changedGroups.includes("source_links")) {
+        await transaction`
+          update platform.source_links
+          set removed_revision_id = ${revisionId}
+          where content_id = ${input.prepared.contentId}
+            and removed_revision_id is null
+        `;
+        for (const [index, source] of input.prepared.sourceLinks.entries()) {
+          await transaction`
+            insert into platform.source_links (
+              id,
+              content_id,
+              position,
+              url,
+              normalized_url_hash,
+              title,
+              description,
+              added_revision_id,
+              added_by_actor_id,
+              added_at
+            )
+            values (
+              ${this.#newId("source_link_id")},
+              ${input.prepared.contentId},
+              ${index + 1},
+              ${source.url},
+              ${createHash("sha256").update(source.url, "utf8").digest()},
+              ${source.title ?? null},
+              ${source.description ?? null},
+              ${revisionId},
+              ${input.actorId},
+              ${input.now}
+            )
+          `;
+        }
+      }
+
+      if (input.prepared.changedGroups.includes("references")) {
+        await transaction`
+          update platform.content_relations
+          set removed_revision_id = ${revisionId}
+          where from_content_id = ${input.prepared.contentId}
+            and removed_revision_id is null
+        `;
+        for (const [index, reference] of input.prepared.references.entries()) {
+          await transaction`
+            insert into platform.content_relations (
+              id,
+              from_content_id,
+              to_content_id,
+              position,
+              relation_type,
+              added_revision_id,
+              created_at
+            )
+            values (
+              ${this.#newId("content_relation_id")},
+              ${input.prepared.contentId},
+              ${reference.targetContentId},
+              ${index + 1},
+              ${reference.relationType},
+              ${revisionId},
+              ${input.now}
+            )
+          `;
+        }
+      }
+
+      for (const [index, mentionedActorId] of input.facts.mentionActorIds.entries()) {
+        await transaction`
+          insert into platform.mentions (
+            revision_id,
+            content_id,
+            revision_number,
+            mentioned_actor_id,
+            position,
+            created_at
+          )
+          values (
+            ${revisionId},
+            ${input.prepared.contentId},
+            ${revisionNumber},
+            ${mentionedActorId},
+            ${index + 1},
+            ${input.now}
+          )
+        `;
+      }
+    }
+
+    if (input.prepared.changedGroups.includes("additional_community_ids")) {
+      await transaction`
+        delete from platform.content_additional_communities
+        where content_id = ${input.prepared.contentId}
+      `;
+      for (const [
+        index,
+        communityId,
+      ] of input.prepared.additionalCommunityIds.entries()) {
+        await transaction`
+          insert into platform.content_additional_communities (
+            content_id,
+            community_id,
+            position,
+            created_at
+          )
+          values (
+            ${input.prepared.contentId},
+            ${communityId},
+            ${index + 1},
+            ${input.prepared.additionalCommunityCreatedAtById.get(communityId) ?? input.now}
+          )
+        `;
+      }
+    }
+    if (input.prepared.changedGroups.includes("symbols")) {
+      await transaction`
+        delete from platform.content_symbols
+        where content_id = ${input.prepared.contentId}
+      `;
+      for (const [index, symbolId] of input.facts.symbolIds.entries()) {
+        await transaction`
+          insert into platform.content_symbols (
+            content_id,
+            symbol_id,
+            position,
+            created_at
+          )
+          values (${input.prepared.contentId}, ${symbolId}, ${index + 1}, ${input.now})
+        `;
+      }
+    }
+    if (input.prepared.changedGroups.includes("topics")) {
+      await transaction`
+        delete from platform.content_topics
+        where content_id = ${input.prepared.contentId}
+      `;
+      for (const [index, topicId] of input.facts.topicIds.entries()) {
+        await transaction`
+          insert into platform.content_topics (
+            content_id,
+            topic_id,
+            position,
+            created_at
+          )
+          values (${input.prepared.contentId}, ${topicId}, ${index + 1}, ${input.now})
+        `;
+      }
+    }
+
+    const updated = await transaction<{ id: string }[]>`
+      update platform.content_items
+      set version = ${newVersion},
+          current_revision_id = ${revisionId ?? input.prepared.currentRevisionId}
+      where id = ${input.prepared.contentId}
+        and author_actor_id = ${input.actorId}
+        and version = ${input.prepared.currentVersion}
+        and lifecycle_state = 'published'
+      returning id
+    `;
+    if (!updated[0]) {
+      throw new ResearchWriteError(
+        "VERSION_CONFLICT",
+        "The ContentItem changed before the update could commit.",
+      );
+    }
+
+    const { id: outboxId } = await appendOutboxEvent(transaction, {
+      aggregateId: input.prepared.contentId,
+      aggregateType: "content",
+      eventType: "content.revised",
+      eventVersion: 1,
+      occurredAt: input.now,
+      payload: {
+        actor_id: input.actorId,
+        changed_groups: input.prepared.changedGroups,
+        content_id: input.prepared.contentId,
+        resource_version: newVersion,
+        revision_id: revisionId,
+        root_content_id: input.prepared.rootContentId,
+      },
+    });
+    return {
+      contentId: input.prepared.contentId,
+      outboxId,
+      result: {
+        contentId: input.prepared.contentId,
+        resourceVersion: newVersion,
+        revisionId,
+      },
+      rootContentId: input.prepared.rootContentId,
+    };
+  }
+
   async #resolveWriteFacts(
     transaction: TransactionSql,
-    command: NormalizedResearchCommand,
+    command: ResearchFactsInput,
     handles: string[],
   ): Promise<ResolvedWriteFacts> {
     const symbolIds: string[] = [];
@@ -2549,7 +4284,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       const rows = await transaction<ClassificationRow[]>`
         select symbol.id, symbol.ticker::text as value
         from platform.symbols as symbol
-        where symbol.ticker::text = any(${transaction.array(command.symbols)}::text[])
+        where symbol.ticker::text = any(${transaction.array([...command.symbols])}::text[])
           and symbol.status = 'active'
         order by symbol.ticker::text, symbol.exchange, symbol.id
         for share
@@ -2580,7 +4315,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       const rows = await transaction<ClassificationRow[]>`
         select topic.id, topic.slug::text as value
         from platform.topics as topic
-        where topic.slug::text = any(${transaction.array(command.topics)}::text[])
+        where topic.slug::text = any(${transaction.array([...command.topics])}::text[])
           and topic.deleted_at is null
         order by topic.slug::text, topic.id
         for share
@@ -2642,6 +4377,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     transaction: TransactionSql,
     input: {
       authorization: AuthorizationRow;
+      auditDigests: ResearchActionAuditDigests;
       channel: string;
       command: NormalizedResearchCommand;
       context: AgentCredentialContext;
@@ -2651,9 +4387,11 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       evaluation: AgentOperationEvaluation;
       idempotencyId: string;
       idempotencyKey: string;
+      mentionActorIds: string[];
       now: Date;
       principalScopeKey: string;
       requestId: string;
+      updateBaseline?: FrozenUpdateContentBaseline | undefined;
     },
   ): Promise<ResearchWriteOutcome> {
     const actionId = this.#newId("pending_action_id");
@@ -2662,9 +4400,27 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     const approvalSummary =
       input.command.operation === "create_post"
         ? `Create one post in ${1 + input.command.additionalCommunityIds.length} ${input.command.additionalCommunityIds.length === 0 ? "Community" : "Communities"}.`
-        : "Create one reply in an existing discussion.";
-    const encrypted = encryptPendingCommand(
+        : input.command.operation === "reply_to_content"
+          ? "Create one reply in an existing discussion."
+          : `Update one ContentItem from version ${input.command.expectedVersion}.`;
+    const commandWithFrozenMentions = freezeResearchCommandMentionActors(
       input.command,
+      input.mentionActorIds,
+    );
+    let frozenCommand: NormalizedResearchCommand = commandWithFrozenMentions;
+    if (commandWithFrozenMentions.operation === "update_content") {
+      if (!input.updateBaseline) {
+        throw new Error("An update PendingAction requires a frozen baseline.");
+      }
+      frozenCommand = freezeUpdateContentBaseline(
+        commandWithFrozenMentions,
+        input.updateBaseline,
+      );
+    } else if (input.updateBaseline !== undefined) {
+      throw new Error("Only update PendingActions can carry a frozen baseline.");
+    }
+    const encrypted = encryptPendingCommand(
+      frozenCommand,
       {
         actionId,
         ownerId: input.context.owner.id,
@@ -2702,6 +4458,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         pending_action_id: actionId,
         state: "pending_approval",
       },
+      auditDigests: input.auditDigests,
       agentId: input.context.agent.id,
       auditId,
       channel: input.channel,
@@ -2729,6 +4486,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         operation,
         target_type,
         target_id,
+        expected_version,
         normalized_input_ciphertext,
         normalized_input_nonce,
         normalized_input_key_version,
@@ -2756,6 +4514,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         ${input.command.operation},
         ${targetType},
         ${targetId},
+        ${input.command.operation === "update_content" ? input.command.expectedVersion : null},
         ${encrypted.ciphertext},
         ${encrypted.nonce},
         ${encrypted.keyVersion},
@@ -2789,6 +4548,9 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         id: actionId,
         inputDigest: input.digestText,
         operation: input.command.operation,
+        ...(input.command.operation === "update_content"
+          ? { expectedVersion: input.command.expectedVersion }
+          : {}),
         policyVersion: input.authorization.policy_version,
         requestedAt: input.now,
         state: "pending_approval",
@@ -2818,7 +4580,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     transaction: TransactionSql,
     input: {
       authorization: AuthorizationRow;
-      command: NormalizedResearchCommand;
+      command: NewResearchCommand;
       facts: ResolvedWriteFacts;
       now: Date;
       preparedRevision: PreparedRevision;
@@ -3060,8 +4822,9 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     transaction: TransactionSql,
     input: {
       authorization: AuthorizationRow;
+      auditDigests: ResearchActionAuditDigests;
       channel: string;
-      command: NormalizedResearchCommand;
+      command: NewResearchCommand;
       context: AgentCredentialContext;
       decisionId: string;
       evaluation: AgentOperationEvaluation;
@@ -3087,10 +4850,12 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       actorId: input.authorization.actor_id,
       after: {
         content_id: persisted.contentId,
+        idempotency_record_id: input.idempotencyId,
         resource_version: 1,
         revision_id: persisted.revisionId,
         root_content_id: persisted.rootContentId,
       },
+      auditDigests: input.auditDigests,
       agentId: input.context.agent.id,
       auditId,
       channel: input.channel,
@@ -3136,6 +4901,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       action: string;
       actorId: string;
       after: postgres.JSONValue;
+      auditDigests: ResearchActionAuditDigests;
       agentId: string;
       approvalMethod?: "owner_approval" | "policy_auto" | undefined;
       approvedByOwnerId?: string | null | undefined;
@@ -3159,6 +4925,18 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       targetType: "community" | "content";
     },
   ): Promise<void> {
+    if (
+      !isRecord(event.after) ||
+      Object.hasOwn(event.after, "input_digest") ||
+      Object.hasOwn(event.after, "idempotency_key_digest")
+    ) {
+      throw new Error("Research ActionLog after_state has an invalid audit shape.");
+    }
+    const afterState = {
+      ...event.after,
+      idempotency_key_digest: event.auditDigests.idempotencyKeyDigest,
+      input_digest: event.auditDigests.inputDigest,
+    };
     await transaction`
       insert into platform.action_logs (
         id,
@@ -3212,7 +4990,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         ${event.outboxId},
         ${event.policy.policy_version},
         ${event.requestId},
-        ${transaction.json(event.after)},
+        ${transaction.json(afterState)},
         ${event.reasonCode ?? event.evaluation.reason.toLocaleLowerCase("en-US")}
       )
     `;
@@ -3247,11 +5025,23 @@ export class PostgresResearchWriteService implements ResearchWriteService {
 }
 
 function actionName(operation: ResearchWriteOperation): string {
-  return operation === "create_post" ? "content.create_post" : "content.reply_to_content";
+  switch (operation) {
+    case "create_post":
+      return "content.create_post";
+    case "reply_to_content":
+      return "content.reply_to_content";
+    case "update_content":
+      return "content.update_content";
+  }
 }
 
 function intendedTargetId(command: NormalizedResearchCommand): string {
-  return command.operation === "create_post"
-    ? command.primaryCommunityId
-    : command.parentContentId;
+  switch (command.operation) {
+    case "create_post":
+      return command.primaryCommunityId;
+    case "reply_to_content":
+      return command.parentContentId;
+    case "update_content":
+      return command.contentId;
+  }
 }

@@ -21,11 +21,13 @@ import {
 import { ContentReferenceSchema } from "./content.ts";
 import {
   ContentWriteOperationSchema,
+  EditSummarySchema,
   PendingActionStateSchema,
   PostBodyMarkdownSchema,
   PostTitleSchema,
   ReplyBodyMarkdownSchema,
   SourceLinkInputSchema,
+  UpdateContentPatchSchema,
 } from "./content-write.ts";
 
 const uniqueArray = <T>(values: readonly T[]) => new Set(values).size === values.length;
@@ -36,6 +38,7 @@ export type OwnerActionState = z.infer<typeof OwnerActionStateSchema>;
 export const OwnerActionOperationSchema = ContentWriteOperationSchema.extract([
   "create_post",
   "reply_to_content",
+  "update_content",
 ]);
 export type OwnerActionOperation = z.infer<typeof OwnerActionOperationSchema>;
 
@@ -171,9 +174,92 @@ export const OwnerReplyToContentPreviewSchema = z
   .strict();
 export type OwnerReplyToContentPreview = z.infer<typeof OwnerReplyToContentPreviewSchema>;
 
+const OwnerUpdateContentBaselineCommonShape = {
+  resource_version: z.number().int().positive().safe(),
+  revision_id: OpaqueIdSchema,
+  primary_community_id: OpaqueIdSchema,
+  additional_community_ids: z
+    .array(OpaqueIdSchema)
+    .max(4)
+    .refine(uniqueArray, "Additional community IDs must be unique."),
+};
+
+export const OwnerUpdateContentBaselineSchema = z
+  .discriminatedUnion("content_kind", [
+    z
+      .object({
+        content_kind: z.literal("post"),
+        title: PostTitleSchema,
+        body_markdown: PostBodyMarkdownSchema,
+        ...OwnerUpdateContentBaselineCommonShape,
+      })
+      .strict(),
+    z
+      .object({
+        content_kind: z.literal("reply"),
+        title: z.null(),
+        body_markdown: ReplyBodyMarkdownSchema,
+        ...OwnerUpdateContentBaselineCommonShape,
+      })
+      .strict(),
+  ])
+  .superRefine((baseline, context) => {
+    if (baseline.additional_community_ids.includes(baseline.primary_community_id)) {
+      context.addIssue({
+        code: "custom",
+        path: ["additional_community_ids"],
+        message: "The primary community cannot also be an additional community.",
+      });
+    }
+  });
+export type OwnerUpdateContentBaseline = z.infer<typeof OwnerUpdateContentBaselineSchema>;
+
+export const OwnerUpdateContentPreviewSchema = z
+  .object({
+    operation: z.literal("update_content"),
+    content_id: OpaqueIdSchema,
+    expected_version: z.number().int().positive().safe(),
+    baseline: OwnerUpdateContentBaselineSchema,
+    patch: UpdateContentPatchSchema,
+    edit_summary: EditSummarySchema.optional(),
+  })
+  .strict()
+  .superRefine((preview, context) => {
+    if (
+      preview.edit_summary !== undefined &&
+      preview.patch.title === undefined &&
+      preview.patch.body_markdown === undefined &&
+      preview.patch.source_links === undefined &&
+      preview.patch.references === undefined
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["edit_summary"],
+        message:
+          "An edit summary requires a title, body, source, or reference revision field.",
+      });
+    }
+    if (preview.baseline.resource_version !== preview.expected_version) {
+      context.addIssue({
+        code: "custom",
+        path: ["baseline", "resource_version"],
+        message: "The frozen baseline must match the expected content version.",
+      });
+    }
+    if (preview.baseline.content_kind === "reply" && preview.patch.title !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["patch", "title"],
+        message: "A reply update cannot add a title.",
+      });
+    }
+  });
+export type OwnerUpdateContentPreview = z.infer<typeof OwnerUpdateContentPreviewSchema>;
+
 export const OwnerActionPreviewSchema = z.discriminatedUnion("operation", [
   OwnerCreatePostPreviewSchema,
   OwnerReplyToContentPreviewSchema,
+  OwnerUpdateContentPreviewSchema,
 ]);
 export type OwnerActionPreview = z.infer<typeof OwnerActionPreviewSchema>;
 
@@ -274,6 +360,8 @@ export const OwnerActionDetailSchema = z
     ...OwnerActionSummaryShape,
     preview: OwnerActionPreviewSchema,
     input_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/u),
+    idempotency_key_hint: z.string().regex(/^hmac-sha256:[0-9a-f]{12}$/u),
+    approval_reason_category: z.literal("owner_approval_required"),
     decision_id: OpaqueIdSchema,
     policy_version: z.string().min(1).max(200),
     decided_at: TimestampSchema.nullable(),
@@ -290,6 +378,16 @@ export const OwnerActionDetailSchema = z
         code: "custom",
         path: ["preview", "operation"],
         message: "The frozen preview must match the Owner action operation.",
+      });
+    }
+    if (
+      action.preview.operation === "update_content" &&
+      (action.target.type !== "content" || action.preview.content_id !== action.target.id)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["preview", "content_id"],
+        message: "The frozen update preview must match the action target content.",
       });
     }
     if (!approvalOutcomesByState[action.state].has(action.approval_outcome)) {

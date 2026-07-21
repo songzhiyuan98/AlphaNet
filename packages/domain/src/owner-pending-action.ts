@@ -61,12 +61,15 @@ export interface OwnerPendingActionPublicError {
 }
 
 export interface OwnerPendingActionDetailView extends OwnerPendingActionSummaryView {
+  approvalReasonCategory: "owner_approval_required";
   approvalOutcome: PendingActionApprovalOutcome | null;
   command: NormalizedResearchCommand;
   decidedAt: Date | null;
   decisionId: string;
   decisionReasonCode: OwnerPendingActionDecisionReason | null;
+  expectedVersion: number | null;
   inputDigest: string;
+  idempotencyKeyHint: string;
   policyVersion: string;
   publicError: OwnerPendingActionPublicError | null;
   terminalAt: Date | null;
@@ -222,9 +225,11 @@ interface DetailRow extends SummaryRow {
   decision_reason_code: string | null;
   error: unknown;
   executing_at: Date | null;
+  expected_version_text: string | null;
   failure_count: number;
   has_result: boolean;
   idempotency_record_id: string;
+  idempotency_key: string;
   input_digest_text: string;
   lease_shape_valid: boolean;
   normalized_input_ciphertext: Buffer;
@@ -232,6 +237,7 @@ interface DetailRow extends SummaryRow {
   normalized_input_key_version: number;
   normalized_input_nonce: Buffer;
   owner_id: string;
+  policy_snapshot: unknown;
   policy_version_text: string;
   terminal_at: Date | null;
 }
@@ -285,7 +291,7 @@ const MAX_CURSOR_LENGTH = 4_096;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const POSITIVE_DECIMAL_PATTERN = /^[1-9][0-9]*$/u;
-const operationValues = ["create_post", "reply_to_content"] as const;
+const operationValues = ["create_post", "reply_to_content", "update_content"] as const;
 const operationSet = new Set<string>(operationValues);
 const stateSet = new Set<string>(PENDING_ACTION_STATES);
 const agentStatusSet = new Set<string>([
@@ -516,7 +522,7 @@ function mapSummaryRow(row: SummaryRow): OwnerPendingActionSummaryView {
     version === null ||
     (row.target_type !== "community" && row.target_type !== "content") ||
     (operation === "create_post" && row.target_type !== "community") ||
-    (operation === "reply_to_content" && row.target_type !== "content") ||
+    (operation !== "create_post" && row.target_type !== "content") ||
     typeof row.agent_handle !== "string" ||
     !/^[a-z0-9][a-z0-9_.-]{2,31}$/u.test(row.agent_handle) ||
     typeof row.agent_display_name !== "string" ||
@@ -739,23 +745,38 @@ function validateLifecycle(
 function mapDetailRow(
   row: DetailRow,
   keyRing: PendingCommandKeyRing,
+  hintSigningKey: Uint8Array,
 ): OwnerPendingActionDetailView {
   const summary = mapSummaryRow(row);
   const ownerId = normalizeUuid(row.owner_id);
   const credentialId = normalizeUuid(row.credential_id);
   const idempotencyRecordId = normalizeUuid(row.idempotency_record_id);
   const decisionId = normalizeUuid(row.decision_id);
+  const expectedVersion =
+    row.expected_version_text === null
+      ? null
+      : parsePositiveSafeInteger(row.expected_version_text);
   const policyVersion =
     typeof row.policy_version_text === "string" &&
     POSITIVE_DECIMAL_PATTERN.test(row.policy_version_text)
       ? row.policy_version_text
       : null;
+  const frozenPolicy = isRecord(row.policy_snapshot) ? row.policy_snapshot : null;
   if (
     ownerId === null ||
     credentialId === null ||
     idempotencyRecordId === null ||
     decisionId === null ||
     policyVersion === null ||
+    typeof row.idempotency_key !== "string" ||
+    row.idempotency_key.length < 1 ||
+    row.idempotency_key.length > 200 ||
+    /\p{Cc}/u.test(row.idempotency_key) ||
+    frozenPolicy?.decision !== "require_approval" ||
+    frozenPolicy.reason !== "OWNER_APPROVAL_REQUIRED" ||
+    (row.expected_version_text !== null && expectedVersion === null) ||
+    (summary.operation === "update_content" && expectedVersion === null) ||
+    (summary.operation !== "update_content" && expectedVersion !== null) ||
     !/^sha256:[0-9a-f]{64}$/u.test(row.input_digest_text) ||
     !Buffer.isBuffer(row.normalized_input_ciphertext) ||
     !Buffer.isBuffer(row.normalized_input_nonce) ||
@@ -789,19 +810,35 @@ function mapDetailRow(
   } catch {
     throw unavailable();
   }
+  if (command.operation !== summary.operation) throw unavailable();
   const commandTargetId =
     command.operation === "create_post"
       ? command.primaryCommunityId
-      : command.parentContentId;
-  if (normalizeUuid(commandTargetId) !== summary.target.id) throw unavailable();
+      : command.operation === "reply_to_content"
+        ? command.parentContentId
+        : command.contentId;
+  if (
+    normalizeUuid(commandTargetId) !== summary.target.id ||
+    (command.operation === "update_content" &&
+      command.expectedVersion !== expectedVersion)
+  ) {
+    throw unavailable();
+  }
   return {
     ...summary,
+    approvalReasonCategory: "owner_approval_required",
     approvalOutcome: lifecycle.approvalOutcome,
     command,
     decidedAt: lifecycle.decidedAt,
     decisionId,
     decisionReasonCode: lifecycle.decisionReason,
+    expectedVersion,
     inputDigest: row.input_digest_text,
+    idempotencyKeyHint: `hmac-sha256:${createHmac("sha256", hintSigningKey)
+      .update("alphanet.owner-action.idempotency-hint.v1\0")
+      .update(row.idempotency_key)
+      .digest("hex")
+      .slice(0, 12)}`,
     policyVersion,
     publicError: lifecycle.publicError,
     terminalAt: lifecycle.terminalAt,
@@ -834,6 +871,9 @@ function jsonForReplay(view: OwnerPendingActionDetailView): postgres.JSONValue {
       decision_id: view.decisionId,
       policy_version: view.policyVersion,
       approval_summary: view.approvalSummary,
+      ...(view.operation === "update_content"
+        ? { expected_version: view.expectedVersion }
+        : {}),
     },
     error: view.state === "rejected" ? rejectedReplayError : null,
   };
@@ -923,6 +963,7 @@ function viewWithDecisionUpdate(
   row: DetailRow,
   update: DecisionUpdateRow,
   keyRing: PendingCommandKeyRing,
+  hintSigningKey: Uint8Array,
 ): OwnerPendingActionDetailView {
   return mapDetailRow(
     {
@@ -938,6 +979,7 @@ function viewWithDecisionUpdate(
       version_text: update.version_text,
     },
     keyRing,
+    hintSigningKey,
   );
 }
 
@@ -1151,7 +1193,7 @@ export class PostgresOwnerPendingActionService implements OwnerPendingActionServ
           policyVersion,
           requestId: context.requestId,
         });
-        return mapDetailRow(row, this.#keyRing);
+        return mapDetailRow(row, this.#keyRing, this.#cursorSigningKey);
       });
     } catch (error) {
       if (error instanceof OwnerPendingActionError) throw error;
@@ -1215,7 +1257,7 @@ export class PostgresOwnerPendingActionService implements OwnerPendingActionServ
 
         // Decrypt and validate the frozen row before any decision mutation. A
         // corrupt command or authority binding must never be approved/rejected.
-        const current = mapDetailRow(row, this.#keyRing);
+        const current = mapDetailRow(row, this.#keyRing, this.#cursorSigningKey);
         if (row.owner_status !== "active" || row.owner_email_verified !== true) {
           throw new OwnerPendingActionError("ACTION_DECISION_CONFLICT", {
             currentState: current.state,
@@ -1341,7 +1383,12 @@ export class PostgresOwnerPendingActionService implements OwnerPendingActionServ
           });
         }
         if (updates.length !== 1) throw unavailable();
-        const decided = viewWithDecisionUpdate(row, update, this.#keyRing);
+        const decided = viewWithDecisionUpdate(
+          row,
+          update,
+          this.#keyRing,
+          this.#cursorSigningKey,
+        );
 
         const idempotencyRows =
           decision === "approve"
@@ -1405,6 +1452,7 @@ export class PostgresOwnerPendingActionService implements OwnerPendingActionServ
         action.agent_id,
         action.credential_id,
         action.idempotency_record_id,
+        action.idempotency_key,
         action.operation,
         action.state,
         action.target_type,
@@ -1415,7 +1463,9 @@ export class PostgresOwnerPendingActionService implements OwnerPendingActionServ
         action.normalized_input_format_version,
         'sha256:' || encode(action.input_digest, 'hex') as input_digest_text,
         action.decision_id,
+        action.policy_snapshot,
         action.policy_version::text as policy_version_text,
+        action.expected_version::text as expected_version_text,
         action.approval_summary,
         action.requested_at,
         action.expires_at,
@@ -1473,6 +1523,7 @@ export class PostgresOwnerPendingActionService implements OwnerPendingActionServ
         action.agent_id,
         action.credential_id,
         action.idempotency_record_id,
+        action.idempotency_key,
         action.operation,
         action.state,
         action.target_type,
@@ -1483,7 +1534,9 @@ export class PostgresOwnerPendingActionService implements OwnerPendingActionServ
         action.normalized_input_format_version,
         'sha256:' || encode(action.input_digest, 'hex') as input_digest_text,
         action.decision_id,
+        action.policy_snapshot,
         action.policy_version::text as policy_version_text,
+        action.expected_version::text as expected_version_text,
         action.approval_summary,
         action.requested_at,
         action.expires_at,

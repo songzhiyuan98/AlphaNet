@@ -2,14 +2,18 @@ import { describe, expect, it } from "vitest";
 
 import {
   digestResearchCommand,
+  freezeResearchCommandMentionActors,
+  freezeUpdateContentBaseline,
   normalizeCreatePostCommand,
   normalizeReplyCommand,
+  normalizeUpdateContentCommand,
 } from "./research-command.js";
 import type { ResearchCommandValidationError } from "./research-command.js";
 
 const communityId = "00000000-0000-4000-8000-000000000101";
 const additionalCommunityId = "00000000-0000-4000-8000-000000000102";
 const parentContentId = "00000000-0000-4000-8000-000000000201";
+const contentId = "00000000-0000-4000-8000-000000000202";
 
 describe("research command normalization", () => {
   it("produces one canonical create-post command and stable digest", () => {
@@ -185,5 +189,122 @@ describe("research command normalization", () => {
       "https://example.test/report#financial-statements",
       "https://example.test/report#risk-factors",
     ]);
+  });
+
+  it("canonicalizes update patches while preserving omitted versus explicit empty sets", () => {
+    const normalized = normalizeUpdateContentCommand({
+      contentId,
+      expectedVersion: 7,
+      patch: {
+        title: "  Updated AMD thesis  ",
+        bodyMarkdown: "## Update\r\n\r\nFX sensitivity added.\r\n",
+        additionalCommunityIds: [additionalCommunityId],
+        symbols: [" amd ", "AMD"],
+        topics: [],
+        sourceLinks: [],
+        references: [
+          { targetContentId: parentContentId, relationType: "reference" },
+          { targetContentId: parentContentId, relationType: "reference" },
+        ],
+      },
+      editSummary: "  Add FX sensitivity  ",
+    });
+
+    expect(normalized).toEqual({
+      operation: "update_content",
+      contentId,
+      expectedVersion: 7,
+      patch: {
+        title: "Updated AMD thesis",
+        bodyMarkdown: "## Update\n\nFX sensitivity added.\n",
+        additionalCommunityIds: [additionalCommunityId],
+        symbols: ["AMD"],
+        topics: [],
+        sourceLinks: [],
+        references: [{ targetContentId: parentContentId, relationType: "reference" }],
+      },
+      editSummary: "Add FX sensitivity",
+    });
+
+    const omitted = normalizeUpdateContentCommand({
+      contentId,
+      expectedVersion: 7,
+      patch: { title: "Updated AMD thesis" },
+    });
+    const cleared = normalizeUpdateContentCommand({
+      contentId,
+      expectedVersion: 7,
+      patch: { title: "Updated AMD thesis", topics: [] },
+    });
+    expect(omitted.patch).not.toHaveProperty("topics");
+    expect(cleared.patch.topics).toEqual([]);
+    expect(digestResearchCommand(omitted)).not.toBe(digestResearchCommand(cleared));
+  });
+
+  it("rejects empty update patches and invalid optimistic-concurrency versions", () => {
+    expect(() =>
+      normalizeUpdateContentCommand({
+        contentId,
+        expectedVersion: 1,
+        patch: {},
+      }),
+    ).toThrowError(
+      expect.objectContaining<Partial<ResearchCommandValidationError>>({
+        code: "PATCH_EMPTY",
+      }),
+    );
+
+    expect(() =>
+      normalizeUpdateContentCommand({
+        contentId,
+        expectedVersion: 0,
+        patch: { bodyMarkdown: "Changed" },
+      }),
+    ).toThrowError(
+      expect.objectContaining<Partial<ResearchCommandValidationError>>({
+        code: "VERSION_INVALID",
+      }),
+    );
+  });
+
+  it("freezes resolved mention recipients without changing client idempotency identity", () => {
+    const command = normalizeReplyCommand({
+      parentContentId,
+      bodyMarkdown: "Ask @market-scout to verify the source.",
+    });
+    const frozen = freezeResearchCommandMentionActors(command, [contentId]);
+
+    expect(frozen.frozenMentionActorIds).toEqual([contentId]);
+    expect(digestResearchCommand(frozen)).toBe(digestResearchCommand(command));
+  });
+
+  it("freezes the Owner update baseline without changing client idempotency identity", () => {
+    const command = normalizeUpdateContentCommand({
+      contentId,
+      expectedVersion: 7,
+      patch: { bodyMarkdown: "Updated research body." },
+    });
+    const frozen = freezeUpdateContentBaseline(command, {
+      additionalCommunityIds: [additionalCommunityId],
+      bodyMarkdown: "Original research body.",
+      contentKind: "post",
+      primaryCommunityId: communityId,
+      resourceVersion: 7,
+      revisionId: parentContentId,
+      title: "Original AMD research thesis",
+    });
+
+    expect(frozen.frozenUpdateBaseline?.revisionId).toBe(parentContentId);
+    expect(digestResearchCommand(frozen)).toBe(digestResearchCommand(command));
+    expect(() =>
+      freezeUpdateContentBaseline(command, {
+        ...frozen.frozenUpdateBaseline!,
+        resourceVersion: 8,
+      }),
+    ).toThrowError(
+      expect.objectContaining<Partial<ResearchCommandValidationError>>({
+        code: "VERSION_INVALID",
+      }),
+    );
   });
 });

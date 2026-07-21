@@ -16,6 +16,7 @@ readonly published_agent_v1_checksum="8d2aa4d3fe53bfda58b644460b386763350b38e7aa
 readonly content_reactions_checksum="da6750692823bb082c1c417d266fd9e1c3585356fd5a25eae256fc6e7c5441bf"
 readonly agent_policy_control_checksum="5311bfde7d77bd2ddf6d7207675284a3259db1722b20e21cecb97f69b9fb6826"
 readonly follow_graph_checksum="3505e7a190e266d792c4f0e7b03997a6042687f1fe12550fa80d1250fa2cf83c"
+readonly content_revision_write_checksum="c0e3b1f605651e30a619caede945eb978840a725dc0585bb1e05abc9d88d484c"
 readonly suffix="${GITHUB_RUN_ID:-local}_${RANDOM}_$$"
 readonly empty_database="alphanet_migration_empty_${suffix}"
 readonly owner_database="alphanet_migration_owner_${suffix}"
@@ -758,9 +759,10 @@ for database in \
       --set=published_agent_database="${published_agent_database}" \
       --set=content_reactions_checksum="${content_reactions_checksum}" \
       --set=agent_policy_control_checksum="${agent_policy_control_checksum}" \
-      --set=follow_graph_checksum="${follow_graph_checksum}" <<'SQL'
+      --set=follow_graph_checksum="${follow_graph_checksum}" \
+      --set=content_revision_write_checksum="${content_revision_write_checksum}" <<'SQL'
 SELECT
-  (SELECT count(*) FROM system.schema_migrations) = 11
+  (SELECT count(*) FROM system.schema_migrations) = 12
   AND EXISTS (
     SELECT 1
     FROM system.schema_migrations
@@ -805,6 +807,102 @@ SELECT
     WHERE version = '000011'
       AND name = 'follow_graph'
       AND checksum = :'follow_graph_checksum'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM system.schema_migrations
+    WHERE version = '000012'
+      AND name = 'content_revision_write'
+      AND checksum = :'content_revision_write_checksum'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM pg_trigger AS trigger_record
+    WHERE trigger_record.tgrelid = 'platform.content_revisions'::regclass
+      AND trigger_record.tgname = 'content_revisions_validate_current_pointer'
+      AND NOT trigger_record.tgisinternal
+      AND trigger_record.tgenabled IN ('O', 'A')
+  )
+  AND to_regclass(
+    'platform.content_additional_communities_admission_rate_idx'
+  ) IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+    FROM pg_proc AS routine
+    JOIN pg_namespace AS namespace
+      ON namespace.oid = routine.pronamespace
+    WHERE namespace.nspname = 'platform'
+      AND routine.proname = 'validate_runtime_content_write_provenance'
+      AND routine.pronargs = 0
+      AND pg_get_function_identity_arguments(routine.oid) = ''
+      AND NOT routine.prosecdef
+      AND 'search_path=pg_catalog' = ANY (routine.proconfig)
+  )
+  AND (
+    SELECT count(*) = 7
+    FROM (
+      VALUES
+        (
+          'content_items'::name,
+          'content_items_validate_runtime_provenance'::name,
+          21::smallint
+        ),
+        (
+          'content_additional_communities'::name,
+          'content_additional_communities_validate_runtime_provenance'::name,
+          29::smallint
+        ),
+        (
+          'content_symbols'::name,
+          'content_symbols_validate_runtime_provenance'::name,
+          29::smallint
+        ),
+        (
+          'content_topics'::name,
+          'content_topics_validate_runtime_provenance'::name,
+          29::smallint
+        ),
+        (
+          'source_links'::name,
+          'source_links_validate_runtime_provenance'::name,
+          21::smallint
+        ),
+        (
+          'content_relations'::name,
+          'content_relations_validate_runtime_provenance'::name,
+          21::smallint
+        ),
+        (
+          'mentions'::name,
+          'mentions_validate_runtime_provenance'::name,
+          5::smallint
+        )
+    ) AS expected(table_name, trigger_name, tgtype)
+    JOIN pg_trigger AS trigger_record
+      ON trigger_record.tgname = expected.trigger_name
+    JOIN pg_class AS relation
+      ON relation.oid = trigger_record.tgrelid
+     AND relation.relname = expected.table_name
+    JOIN pg_namespace AS namespace
+      ON namespace.oid = relation.relnamespace
+    JOIN pg_proc AS trigger_routine
+      ON trigger_routine.oid = trigger_record.tgfoid
+    JOIN pg_namespace AS trigger_routine_namespace
+      ON trigger_routine_namespace.oid = trigger_routine.pronamespace
+    WHERE namespace.nspname = 'platform'
+      AND NOT trigger_record.tgisinternal
+      AND trigger_record.tgconstraint <> 0
+      AND trigger_record.tgdeferrable
+      AND trigger_record.tginitdeferred
+      AND trigger_record.tgenabled IN ('O', 'A')
+      AND trigger_record.tgtype = expected.tgtype
+      AND trigger_record.tgfoid =
+        'platform.validate_runtime_content_write_provenance()'::regprocedure
+      AND trigger_routine_namespace.nspname = 'platform'
+      AND trigger_routine.proname =
+        'validate_runtime_content_write_provenance'
+      AND trigger_routine.pronargs = 0
+      AND pg_get_function_identity_arguments(trigger_routine.oid) = ''
   )
   AND to_regclass('platform.owners') IS NOT NULL
   AND to_regclass('platform.agents') IS NOT NULL
@@ -1122,4 +1220,4 @@ SQL
   fi
 done
 
-echo "Empty, Owner-schema, and published Agent-v1 paths all reach the Follow graph schema."
+echo "Empty, Owner-schema, and published Agent-v1 paths all reach the Content Revision write schema."

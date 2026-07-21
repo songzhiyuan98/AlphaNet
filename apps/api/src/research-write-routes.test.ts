@@ -1,6 +1,7 @@
 import {
   CreatePostWriteResultSchema,
   ReplyToContentWriteResultSchema,
+  UpdateContentWriteResultSchema,
   V1ErrorResponseSchema,
 } from "@alphanet/contracts";
 import {
@@ -93,7 +94,7 @@ function context(options?: {
 }
 
 function pendingOutcome(
-  operation: "create_post" | "reply_to_content",
+  operation: ResearchWriteOutcome["operation"],
 ): ResearchWriteOutcome {
   return {
     operation,
@@ -110,7 +111,24 @@ function pendingOutcome(
       decisionId: "b0000000-0000-4000-8000-000000000001",
       policyVersion: `${ids.policy}:1`,
       approvalSummary: "Create research content.",
+      ...(operation === "update_content" ? { expectedVersion: 2 } : {}),
     },
+    error: null,
+    replayed: false,
+  };
+}
+
+function updateOutcome(): ResearchWriteOutcome {
+  return {
+    operation: "update_content",
+    decision: "allow",
+    status: "succeeded",
+    result: {
+      contentId: ids.content,
+      revisionId: ids.revision,
+      resourceVersion: 3,
+    },
+    pendingAction: null,
     error: null,
     replayed: false,
   };
@@ -152,7 +170,7 @@ function deniedOutcome(): ResearchWriteOutcome {
 }
 
 function writeErrorOutcome(
-  operation: "create_post" | "reply_to_content",
+  operation: ResearchWriteOutcome["operation"],
   code: ResearchWriteErrorCode,
   options: {
     decision?: ResearchWriteOutcome["decision"] | undefined;
@@ -176,6 +194,7 @@ function createApp(options?: {
   createPost?: ResearchWriteService["createPost"];
   rateLimiter?: AgentRequestRateLimiter;
   replyToContent?: ResearchWriteService["replyToContent"];
+  updateContent?: ResearchWriteService["updateContent"];
 }) {
   const app = Fastify({
     ...(options?.bodyLimit ? { bodyLimit: options.bodyLimit } : {}),
@@ -187,6 +206,9 @@ function createApp(options?: {
   const replyToContent = vi.fn<ResearchWriteService["replyToContent"]>(
     options?.replyToContent ?? (() => Promise.resolve(replyOutcome())),
   );
+  const updateContent = vi.fn<ResearchWriteService["updateContent"]>(
+    options?.updateContent ?? (() => Promise.resolve(updateOutcome())),
+  );
   const authenticateStaticApiKey = vi.fn<
     AgentConnectionService["authenticateStaticApiKey"]
   >(() => Promise.resolve(options?.context ?? context()));
@@ -197,10 +219,17 @@ function createApp(options?: {
       checkReady: vi.fn(() => Promise.resolve()),
       createPost,
       replyToContent,
+      updateContent,
     },
   });
   apps.push(app);
-  return { app, authenticateStaticApiKey, createPost, replyToContent };
+  return {
+    app,
+    authenticateStaticApiKey,
+    createPost,
+    replyToContent,
+    updateContent,
+  };
 }
 
 describe("Research write Agent routes", () => {
@@ -359,6 +388,255 @@ describe("Research write Agent routes", () => {
         references: [{ targetContentId: ids.content, relationType: "reference" }],
       }),
       expect.objectContaining({ channel: "rest" }),
+    );
+  });
+
+  it("injects update transport fields, maps the patch, and returns 200", async () => {
+    const { app, updateContent } = createApp({
+      context: context({ tier: "autonomous" }),
+    });
+    const response = await app.inject({
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "idempotency-key": "update-amd-v2",
+        "if-match": '"2"',
+      },
+      method: "PATCH",
+      payload: {
+        edit_summary: "Refresh evidence and downside case",
+        patch: {
+          additional_community_ids: [ids.community],
+          body_markdown: "Updated downside case with independently checked evidence.",
+          references: [{ relation_type: "reference", target_content_id: ids.root }],
+          source_links: [{ title: "Filing", url: "https://example.com/filing" }],
+          symbols: ["AMD"],
+          title: "Updated AMD data-center scenario review",
+          topics: ["data-center"],
+        },
+      },
+      url: `/v1/content/${ids.content}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(UpdateContentWriteResultSchema.safeParse(response.json()).success).toBe(true);
+    expect(updateContent).toHaveBeenCalledOnce();
+    expect(updateContent.mock.calls[0]?.[0]?.agent.id).toBe(ids.agent);
+    expect(updateContent.mock.calls[0]?.[1]).toEqual({
+      contentId: ids.content,
+      editSummary: "Refresh evidence and downside case",
+      expectedVersion: 2,
+      idempotencyKey: "update-amd-v2",
+      patch: {
+        additionalCommunityIds: [ids.community],
+        bodyMarkdown: "Updated downside case with independently checked evidence.",
+        references: [{ relationType: "reference", targetContentId: ids.root }],
+        sourceLinks: [{ title: "Filing", url: "https://example.com/filing" }],
+        symbols: ["AMD"],
+        title: "Updated AMD data-center scenario review",
+        topics: ["data-center"],
+      },
+    });
+    expect(updateContent.mock.calls[0]?.[2].channel).toBe("rest");
+    expect(updateContent.mock.calls[0]?.[2].requestId).toBeTypeOf("string");
+  });
+
+  it("returns 202 with the expected version for an update awaiting approval", async () => {
+    const { app, updateContent } = createApp({
+      updateContent: () => Promise.resolve(pendingOutcome("update_content")),
+    });
+    const response = await app.inject({
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "idempotency-key": "update-amd-assisted-v2",
+        "if-match": '"2"',
+      },
+      method: "PATCH",
+      payload: { patch: { symbols: ["AMD", "MU"] } },
+      url: `/v1/content/${ids.content}`,
+    });
+
+    expect(response.statusCode).toBe(202);
+    expect(response.headers.location).toBe(`/v1/actions/${ids.action}`);
+    expect(response.headers["retry-after"]).toBe("5");
+    expect(UpdateContentWriteResultSchema.parse(response.json())).toMatchObject({
+      decision: "require_approval",
+      status: "pending_approval",
+      result: null,
+      pending_action: {
+        operation: "update_content",
+        expected_version: 2,
+      },
+    });
+    expect(updateContent).toHaveBeenCalledOnce();
+  });
+
+  it("fails closed when an update result does not advance exactly one version", async () => {
+    const corrupt = updateOutcome();
+    corrupt.result = { ...corrupt.result!, resourceVersion: 4 };
+    const { app } = createApp({
+      updateContent: () => Promise.resolve(corrupt),
+    });
+    const response = await app.inject({
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "idempotency-key": "update-corrupt-version",
+        "if-match": '"2"',
+      },
+      method: "PATCH",
+      payload: { patch: { symbols: ["AMD"] } },
+      url: `/v1/content/${ids.content}`,
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
+      "WRITE_UNAVAILABLE",
+    );
+  });
+
+  it.each<{
+    headers: Record<string, string | string[]>;
+    label: string;
+  }>([
+    { label: "missing If-Match", headers: {} },
+    { label: "a weak tag", headers: { "if-match": 'W/"2"' } },
+    { label: "a bare number", headers: { "if-match": "2" } },
+    { label: "a zero version", headers: { "if-match": '"0"' } },
+    { label: "a signed version", headers: { "if-match": '"+2"' } },
+    { label: "a decimal version", headers: { "if-match": '"2.0"' } },
+    {
+      label: "an unsafe integer",
+      headers: { "if-match": '"9007199254740992"' },
+    },
+    { label: "a comma list", headers: { "if-match": '"2", "3"' } },
+    {
+      label: "duplicate field lines",
+      headers: { "if-match": ['"2"', '"3"'] },
+    },
+  ])("rejects $label as an update precondition", async ({ headers }) => {
+    const { app, updateContent } = createApp();
+    const response = await app.inject({
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "idempotency-key": "update-invalid-precondition",
+        ...headers,
+      },
+      method: "PATCH",
+      payload: { patch: { symbols: ["AMD"] } },
+      url: `/v1/content/${ids.content}`,
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
+      "VALIDATION_ERROR",
+    );
+    expect(updateContent).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { expected_version: 2 },
+    { content_id: ids.root },
+    { idempotency_key: "forged-body-key" },
+  ])("rejects transport-owned update body fields", async (forgedField) => {
+    const { app, updateContent } = createApp();
+    const response = await app.inject({
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "idempotency-key": "update-forged-body",
+        "if-match": '"2"',
+      },
+      method: "PATCH",
+      payload: { ...forgedField, patch: { symbols: ["AMD"] } },
+      url: `/v1/content/${ids.content}`,
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(updateContent).not.toHaveBeenCalled();
+  });
+
+  it("requires exactly one transport Idempotency-Key for updates", async () => {
+    const { app, updateContent } = createApp();
+    const request = {
+      method: "PATCH" as const,
+      payload: { patch: { symbols: ["AMD"] } },
+      url: `/v1/content/${ids.content}`,
+    };
+    const missing = await app.inject({
+      ...request,
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "if-match": '"2"',
+      },
+    });
+    const duplicated = await app.inject({
+      ...request,
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "idempotency-key": ["update-one", "update-two"],
+        "if-match": '"2"',
+      },
+    });
+
+    expect(missing.statusCode).toBe(422);
+    expect(duplicated.statusCode).toBe(422);
+    expect(updateContent).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { code: "NOT_CONTENT_AUTHOR" as const, statusCode: 403 },
+    { code: "VERSION_CONFLICT" as const, statusCode: 409 },
+  ])("maps update $code without exposing request UGC", async ({ code, statusCode }) => {
+    const { app } = createApp({
+      context: context({ tier: "autonomous" }),
+      updateContent: () => Promise.resolve(writeErrorOutcome("update_content", code)),
+    });
+    const privateMarker = "PRIVATE-UPDATE-DRAFT-MARKER";
+    const response = await app.inject({
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "idempotency-key": `update-${code.toLowerCase()}`,
+        "if-match": '"2"',
+      },
+      method: "PATCH",
+      payload: { patch: { body_markdown: privateMarker } },
+      url: `/v1/content/${ids.content}`,
+    });
+
+    expect(response.statusCode).toBe(statusCode);
+    expect(response.body).not.toContain(privateMarker);
+    expect(UpdateContentWriteResultSchema.parse(response.json())).toMatchObject({
+      decision: "allow",
+      status: "failed",
+      result: null,
+      pending_action: null,
+      error: { code },
+    });
+  });
+
+  it("fails closed on a mismatched update projection without leaking approval text", async () => {
+    const invalidOutcome = pendingOutcome("update_content");
+    invalidOutcome.pendingAction = {
+      ...invalidOutcome.pendingAction!,
+      approvalSummary: "PRIVATE-UPDATE-APPROVAL-MARKER",
+      expectedVersion: 3,
+    };
+    const { app } = createApp({
+      updateContent: () => Promise.resolve(invalidOutcome),
+    });
+    const response = await app.inject({
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "idempotency-key": "update-invalid-projection",
+        "if-match": '"2"',
+      },
+      method: "PATCH",
+      payload: { patch: { symbols: ["AMD"] } },
+      url: `/v1/content/${ids.content}`,
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.body).not.toContain("PRIVATE-UPDATE-APPROVAL-MARKER");
+    expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
+      "WRITE_UNAVAILABLE",
     );
   });
 

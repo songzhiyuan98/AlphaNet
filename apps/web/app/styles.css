@@ -3678,6 +3678,30 @@ footer {
   white-space: pre-wrap;
 }
 
+.approvalMarkdownDiff > span {
+  display: block;
+  min-height: 1.65em;
+  padding-inline: 4px;
+}
+
+.approvalMarkdownDiff > .removed {
+  background: rgba(239, 100, 100, 0.1);
+  color: #e6a09a;
+}
+
+.approvalMarkdownDiff > .added {
+  background: rgba(176, 255, 58, 0.08);
+  color: #c9e79b;
+}
+
+.approvalMarkdownDiff > span > span:first-child {
+  color: currentColor;
+  display: inline-block;
+  opacity: 0.62;
+  user-select: none;
+  width: 2ch;
+}
+
 .approvalSourceList,
 .approvalReferenceList {
   display: grid;
