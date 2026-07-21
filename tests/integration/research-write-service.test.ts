@@ -12,6 +12,7 @@ import {
   type AgentCredentialContext,
   type AgentPolicyTier,
 } from "../../packages/domain/src/agent-connection.js";
+import { PostgresContentReadService } from "../../packages/domain/src/content-read.js";
 import { PostgresOwnerPendingActionService } from "../../packages/domain/src/owner-pending-action.js";
 import { PostgresPendingActionExecutionRepository } from "../../packages/domain/src/pending-action-execution.js";
 import {
@@ -46,6 +47,13 @@ const fixtureAgentContentRateLimits = {
   newAgentPostsPerHour: 10_000,
   newAgentRepliesPerHour: 10_000,
 } as const;
+const fixtureResearchAntiSpamLimits = {
+  duplicateContentWindowMs: 60_000,
+  ownerContentWritesPerHour: 10_000,
+  ownerPostsPerHour: 10_000,
+  pairRepliesPerThirtyMinutes: 10_000,
+  threadRepliesPerHour: 10_000,
+} as const;
 
 const generalCommunityId = "00000000-0000-4000-8000-000000000001";
 const semiconductorsCommunityId = "00000000-0000-4000-8000-000000004001";
@@ -64,6 +72,14 @@ function asRecord(value: unknown): Record<string, unknown> {
   expect(value).not.toBeNull();
   expect(Array.isArray(value)).toBe(false);
   return value as Record<string, unknown>;
+}
+
+function revisionIdOf(value: object | null | undefined): string | null | undefined {
+  if (value === null || value === undefined || !("revisionId" in value)) {
+    return undefined;
+  }
+  const revisionId = value.revisionId;
+  return typeof revisionId === "string" || revisionId === null ? revisionId : undefined;
 }
 
 async function withTimeout<T>(
@@ -101,6 +117,7 @@ describeResearchWrite("PostgresResearchWriteService", () => {
   );
   const service = new PostgresResearchWriteService(postgres.sql, {
     agentContentRateLimits: fixtureAgentContentRateLimits,
+    antiSpamLimits: fixtureResearchAntiSpamLimits,
     pendingActionKeyRing,
   });
   const ownerActionService = new PostgresOwnerPendingActionService(postgres.sql, {
@@ -109,10 +126,14 @@ describeResearchWrite("PostgresResearchWriteService", () => {
   });
   const competingService = new PostgresResearchWriteService(competingPostgres.sql, {
     agentContentRateLimits: fixtureAgentContentRateLimits,
+    antiSpamLimits: fixtureResearchAntiSpamLimits,
     pendingActionKeyRing: {
       currentVersion: 1,
       keys: { 1: randomBytes(32) },
     },
+  });
+  const contentReadService = new PostgresContentReadService(postgres.sql, {
+    cursorSigningKey: randomBytes(32),
   });
   dependencies.push(postgres, competingPostgres);
 
@@ -220,6 +241,51 @@ describeResearchWrite("PostgresResearchWriteService", () => {
     });
   }
 
+  async function createIsolatedWriteContext(options: {
+    label: string;
+    ownerId?: string;
+    tier?: AgentPolicyTier;
+  }): Promise<AgentCredentialContext> {
+    const suffix = randomUUID().replaceAll("-", "").slice(0, 10);
+    const ownerId =
+      options.ownerId ?? (await createVerifiedOwner(`${options.label}-${suffix}`));
+    const created = await agentService.createAgent(
+      ownerId,
+      {
+        displayName: `Anti-spam ${options.label} Agent`,
+        handle: `anti-${options.label}-${suffix}`,
+      },
+      randomUUID(),
+    );
+    await activatePolicy(ownerId, created.agent.id, options.tier ?? "autonomous");
+    const credential = await agentService.createCredential(
+      ownerId,
+      created.agent.id,
+      {
+        name: `${options.label} integration credential`,
+        scopes: ["research:read", "content:write", "actions:read"],
+      },
+      randomUUID(),
+    );
+    return agentService.authenticateStaticApiKey(credential.apiKey);
+  }
+
+  async function createAdditionalWriteCredential(
+    context: AgentCredentialContext,
+    label: string,
+  ): Promise<AgentCredentialContext> {
+    const credential = await agentService.createCredential(
+      context.owner.id,
+      context.agent.id,
+      {
+        name: `${label} ${randomUUID()}`,
+        scopes: ["research:read", "content:write", "actions:read"],
+      },
+      randomUUID(),
+    );
+    return agentService.authenticateStaticApiKey(credential.apiKey);
+  }
+
   async function claimIsolatedAction(
     repository: PostgresPendingActionExecutionRepository,
     actionId: string,
@@ -274,7 +340,7 @@ describeResearchWrite("PostgresResearchWriteService", () => {
       status: "succeeded",
     });
     const contentId = created.result?.contentId;
-    const revisionId = created.result?.revisionId;
+    const revisionId = revisionIdOf(created.result);
     expectUuid(contentId);
     expectUuid(revisionId);
     return { contentId, revisionId };
@@ -556,7 +622,7 @@ describeResearchWrite("PostgresResearchWriteService", () => {
       status: "succeeded",
     });
     const contentId = result.result?.contentId;
-    const revisionId = result.result?.revisionId;
+    const revisionId = revisionIdOf(result.result);
     expectUuid(contentId);
     expectUuid(revisionId);
 
@@ -835,7 +901,7 @@ describeResearchWrite("PostgresResearchWriteService", () => {
       },
       status: "succeeded",
     });
-    const revisionId = updated.result?.revisionId;
+    const revisionId = revisionIdOf(updated.result);
     expectUuid(revisionId);
     expect(revisionId).not.toBe(fixture.revisionId);
 
@@ -1334,7 +1400,7 @@ describeResearchWrite("PostgresResearchWriteService", () => {
     expect(claim).toMatchObject({ actionId, operation: "update_content" });
 
     const executed = await service.executeApprovedAction(executionRepository, claim);
-    const revisionId = executed.content.revisionId;
+    const revisionId = revisionIdOf(executed.content);
     expectUuid(revisionId);
     expect(executed.content).toEqual({
       contentId: fixture.contentId,
@@ -1835,7 +1901,7 @@ describeResearchWrite("PostgresResearchWriteService", () => {
       version: "4",
     });
     const contentId = executed.content.contentId;
-    const revisionId = executed.content.revisionId;
+    const revisionId = revisionIdOf(executed.content);
     expectUuid(contentId);
     expectUuid(revisionId);
     expectUuid(executed.resolvedOutboxEventId);
@@ -3857,5 +3923,766 @@ describeResearchWrite("PostgresResearchWriteService", () => {
       where action.id = ${actionId}
     `;
     expect(effects).toEqual([{ content_count: 0, state: "invalidated" }]);
+  });
+
+  it("soft-deletes an Autonomous author's content as an immutable public tombstone", async () => {
+    const fixture = await insertPublishedUpdateFixture(
+      autonomousContext.agent.actorId,
+      `autonomous-delete-${randomUUID()}`,
+    );
+    const idempotencyKey = `autonomous-delete-${randomUUID()}`;
+    const privateReason = `private-delete-reason-${randomUUID()}`;
+    const input = {
+      contentId: fixture.contentId,
+      expectedVersion: 1,
+      idempotencyKey,
+      mode: "soft" as const,
+      reason: privateReason,
+    };
+
+    const deleted = await service.deleteContent(autonomousContext, input, {
+      channel: "mcp",
+      requestId: `req-${randomUUID()}`,
+    });
+    expect(deleted).toEqual({
+      decision: "allow",
+      error: null,
+      operation: "delete_content",
+      pendingAction: null,
+      replayed: false,
+      result: {
+        contentId: fixture.contentId,
+        lifecycleState: "deleted",
+        resourceVersion: 2,
+      },
+      status: "succeeded",
+    });
+
+    const replay = await service.deleteContent(autonomousContext, input, {
+      requestId: `req-${randomUUID()}`,
+    });
+    expect(replay).toEqual({ ...deleted, replayed: true });
+
+    const tombstone = await contentReadService.getContent(null, {
+      contentId: fixture.contentId,
+    });
+    expect(tombstone).toMatchObject({
+      content: {
+        currentRevisionId: null,
+        id: fixture.contentId,
+        lifecycleState: "deleted",
+        symbols: [],
+        title: null,
+        topics: [],
+        version: 2,
+      },
+      revision: null,
+    });
+    expect(JSON.stringify(tombstone)).not.toContain("Direct update fixture");
+
+    const persisted = await postgres.sql<
+      {
+        action_after: unknown;
+        action_count: number;
+        current_revision_id: string;
+        deleted_at: Date | null;
+        idempotency_response: unknown;
+        idempotency_response_code: number;
+        idempotency_status: string;
+        lifecycle_state: string;
+        outbox_count: number;
+        outbox_payload: unknown;
+        revision_count: number;
+        version: number;
+      }[]
+    >`
+      select
+        content.current_revision_id,
+        content.lifecycle_state,
+        content.deleted_at,
+        content.version::integer as version,
+        idempotency.status as idempotency_status,
+        idempotency.response_code as idempotency_response_code,
+        idempotency.response_body as idempotency_response,
+        (
+          select count(*)::integer
+          from platform.content_revisions as revision
+          where revision.content_id = content.id
+        ) as revision_count,
+        (
+          select count(*)::integer
+          from system.outbox_events as event
+          where event.aggregate_type = 'content'
+            and event.aggregate_id = content.id::text
+            and event.event_type = 'content.deleted'
+        ) as outbox_count,
+        (
+          select event.payload
+          from system.outbox_events as event
+          where event.aggregate_type = 'content'
+            and event.aggregate_id = content.id::text
+            and event.event_type = 'content.deleted'
+          limit 1
+        ) as outbox_payload,
+        (
+          select count(*)::integer
+          from platform.action_logs as audit
+          where audit.action = 'content.delete_content'
+            and audit.target_id = content.id::text
+            and audit.outcome = 'succeeded'
+        ) as action_count,
+        (
+          select audit.after_state
+          from platform.action_logs as audit
+          where audit.action = 'content.delete_content'
+            and audit.target_id = content.id::text
+            and audit.outcome = 'succeeded'
+          limit 1
+        ) as action_after
+      from platform.content_items as content
+      join platform.idempotency_records as idempotency
+        on idempotency.principal_scope_key = ${`credential:${autonomousContext.credential.id}`}
+       and idempotency.operation = 'delete_content'
+       and idempotency.idempotency_key = ${idempotencyKey}
+      where content.id = ${fixture.contentId}
+    `;
+    expect(persisted).toHaveLength(1);
+    const row = persisted[0];
+    expect(row).toMatchObject({
+      action_count: 1,
+      current_revision_id: fixture.revisionId,
+      deleted_at: expect.any(Date),
+      idempotency_response_code: 200,
+      idempotency_status: "succeeded",
+      lifecycle_state: "deleted",
+      outbox_count: 1,
+      revision_count: 1,
+      version: 2,
+    });
+    expect(asRecord(row?.outbox_payload)).toEqual({
+      actor_id: autonomousContext.agent.actorId,
+      content_id: fixture.contentId,
+      current_revision_id: fixture.revisionId,
+      kind: "post",
+      lifecycle_state: "deleted",
+      resource_version: 2,
+      root_content_id: fixture.contentId,
+    });
+    expect(asRecord(row?.action_after)).toMatchObject({
+      content_id: fixture.contentId,
+      lifecycle_state: "deleted",
+      resource_version: 2,
+    });
+    expect(asRecord(row?.idempotency_response)).toMatchObject({
+      operation: "delete_content",
+      result: {
+        content_id: fixture.contentId,
+        lifecycle_state: "deleted",
+        resource_version: 2,
+      },
+      status: "succeeded",
+    });
+    expect(JSON.stringify(row)).not.toContain(privateReason);
+  });
+
+  it("executes an Owner-approved Assisted soft delete through the worker", async () => {
+    const assistedDeleteContext = await createIsolatedWriteContext({
+      label: "assisted-delete",
+      tier: "assisted",
+    });
+    const fixture = await insertPublishedUpdateFixture(
+      assistedDeleteContext.agent.actorId,
+      `assisted-delete-${randomUUID()}`,
+    );
+    const idempotencyKey = `assisted-delete-${randomUUID()}`;
+    const input = {
+      contentId: fixture.contentId,
+      expectedVersion: 1,
+      idempotencyKey,
+      mode: "soft" as const,
+      reason: "The author withdrew this research claim.",
+    };
+    const pending = await service.deleteContent(assistedDeleteContext, input, {
+      requestId: `req-${randomUUID()}`,
+    });
+    expect(pending).toMatchObject({
+      decision: "require_approval",
+      error: null,
+      operation: "delete_content",
+      pendingAction: {
+        expectedVersion: 1,
+        operation: "delete_content",
+        state: "pending_approval",
+      },
+      result: null,
+      status: "pending_approval",
+    });
+    const actionId = pending.pendingAction?.id;
+    expectUuid(actionId);
+
+    const detail = await ownerActionService.getAction(
+      assistedDeleteContext.owner.id,
+      actionId,
+      { requestId: `req-${randomUUID()}` },
+    );
+    expect(detail).toMatchObject({
+      command: {
+        contentId: fixture.contentId,
+        expectedVersion: 1,
+        mode: "soft",
+        operation: "delete_content",
+      },
+      id: actionId,
+      state: "pending_approval",
+    });
+    await ownerActionService.approveAction(assistedDeleteContext.owner.id, actionId, {
+      expectedVersion: detail.version,
+      reasonCode: "owner_approved",
+      requestId: `req-${randomUUID()}`,
+    });
+
+    const executionRepository = new PostgresPendingActionExecutionRepository(
+      postgres.sql,
+      {
+        leaseOwner: `approved-delete-integration:${randomUUID()}`,
+        leaseSeconds: 30,
+      },
+    );
+    const claim = await claimIsolatedAction(executionRepository, actionId);
+    if (!claim) throw new Error("The approved delete was not available to the worker");
+    expect(claim).toMatchObject({ actionId, operation: "delete_content" });
+
+    const executed = await service.executeApprovedAction(executionRepository, claim);
+    expect(executed.content).toEqual({
+      contentId: fixture.contentId,
+      lifecycleState: "deleted",
+      resourceVersion: 2,
+    });
+    expect(executed.action).toMatchObject({
+      actionId,
+      idempotencyStatus: "succeeded",
+      operation: "delete_content",
+      resourceId: fixture.contentId,
+      state: "succeeded",
+    });
+    expect(executed.action.result).toEqual({
+      content_id: fixture.contentId,
+      lifecycle_state: "deleted",
+      resource_version: 2,
+    });
+
+    const replay = await service.deleteContent(assistedDeleteContext, input, {
+      requestId: `req-${randomUUID()}`,
+    });
+    expect(replay).toMatchObject({
+      decision: "require_approval",
+      operation: "delete_content",
+      pendingAction: { id: actionId, state: "succeeded" },
+      replayed: true,
+      result: executed.content,
+      status: "succeeded",
+    });
+
+    const state = await postgres.sql<
+      {
+        action_result: unknown;
+        current_revision_id: string;
+        lifecycle_state: string;
+        version: number;
+      }[]
+    >`
+      select
+        content.current_revision_id,
+        content.lifecycle_state,
+        content.version::integer as version,
+        action.result as action_result
+      from platform.content_items as content
+      join platform.pending_actions as action on action.target_id = content.id
+      where content.id = ${fixture.contentId}
+        and action.id = ${actionId}
+    `;
+    expect(state).toEqual([
+      {
+        action_result: {
+          content_id: fixture.contentId,
+          lifecycle_state: "deleted",
+          resource_version: 2,
+        },
+        current_revision_id: fixture.revisionId,
+        lifecycle_state: "deleted",
+        version: 2,
+      },
+    ]);
+  });
+
+  it("rejects permanent erasure, foreign-author deletion, and stale versions without mutation", async () => {
+    const permanentFixture = await insertPublishedUpdateFixture(
+      autonomousContext.agent.actorId,
+      `permanent-delete-${randomUUID()}`,
+    );
+    const permanentKey = `permanent-delete-${randomUUID()}`;
+    const permanentInput = {
+      contentId: permanentFixture.contentId,
+      expectedVersion: 1,
+      idempotencyKey: permanentKey,
+      mode: "permanent" as const,
+    };
+    const permanent = await service.deleteContent(autonomousContext, permanentInput, {
+      requestId: `req-${randomUUID()}`,
+    });
+    expect(permanent).toMatchObject({
+      decision: "deny",
+      error: {
+        code: "POLICY_DENIED",
+        details: { mode: "permanent", rule_version: "author-soft-delete-v1" },
+        retryable: false,
+      },
+      pendingAction: null,
+      replayed: false,
+      result: null,
+      status: "denied",
+    });
+    const permanentReplay = await service.deleteContent(
+      autonomousContext,
+      permanentInput,
+      { requestId: `req-${randomUUID()}` },
+    );
+    expect(permanentReplay).toEqual({ ...permanent, replayed: true });
+
+    const foreignFixture = await insertPublishedUpdateFixture(
+      autonomousContext.agent.actorId,
+      `foreign-delete-${randomUUID()}`,
+    );
+    const foreignContext = await createIsolatedWriteContext({
+      label: "foreign-delete",
+    });
+    const foreign = await service.deleteContent(
+      foreignContext,
+      {
+        contentId: foreignFixture.contentId,
+        expectedVersion: 1,
+        idempotencyKey: `foreign-delete-${randomUUID()}`,
+        mode: "soft",
+      },
+      { requestId: `req-${randomUUID()}` },
+    );
+    expect(foreign).toMatchObject({
+      decision: "allow",
+      error: { code: "NOT_CONTENT_AUTHOR", retryable: false },
+      pendingAction: null,
+      result: null,
+      status: "failed",
+    });
+
+    const staleFixture = await insertPublishedUpdateFixture(
+      autonomousContext.agent.actorId,
+      `stale-delete-${randomUUID()}`,
+    );
+    const stale = await service.deleteContent(
+      autonomousContext,
+      {
+        contentId: staleFixture.contentId,
+        expectedVersion: 2,
+        idempotencyKey: `stale-delete-${randomUUID()}`,
+        mode: "soft",
+      },
+      { requestId: `req-${randomUUID()}` },
+    );
+    expect(stale).toMatchObject({
+      decision: "allow",
+      error: {
+        code: "VERSION_CONFLICT",
+        details: { current_version: 1, expected_version: 2 },
+        retryable: false,
+      },
+      pendingAction: null,
+      result: null,
+      status: "failed",
+    });
+
+    const unchanged = await postgres.sql<
+      { id: string; lifecycle_state: string; version: number }[]
+    >`
+      select id, lifecycle_state, version::integer as version
+      from platform.content_items
+      where id in (
+        ${permanentFixture.contentId},
+        ${foreignFixture.contentId},
+        ${staleFixture.contentId}
+      )
+      order by id
+    `;
+    expect(unchanged).toHaveLength(3);
+    expect(unchanged).toEqual(
+      expect.arrayContaining([
+        {
+          id: permanentFixture.contentId,
+          lifecycle_state: "published",
+          version: 1,
+        },
+        {
+          id: foreignFixture.contentId,
+          lifecycle_state: "published",
+          version: 1,
+        },
+        {
+          id: staleFixture.contentId,
+          lifecycle_state: "published",
+          version: 1,
+        },
+      ]),
+    );
+  });
+
+  it("serializes duplicate publication across credentials and stably replays the denial", async () => {
+    const firstContext = await createIsolatedWriteContext({ label: "duplicate" });
+    const secondContext = await createAdditionalWriteCredential(
+      firstContext,
+      "Duplicate race credential",
+    );
+    const duplicateMarker = randomUUID();
+    const title = `Concurrent duplicate ${duplicateMarker}`;
+    const bodyMarkdown = `Identical research payload ${duplicateMarker}.`;
+    const firstInput = {
+      bodyMarkdown,
+      idempotencyKey: `duplicate-first-${randomUUID()}`,
+      primaryCommunityId: generalCommunityId,
+      title,
+    };
+    const secondInput = {
+      ...firstInput,
+      idempotencyKey: `duplicate-second-${randomUUID()}`,
+    };
+    const attempts = await withTimeout(
+      Promise.all([
+        service
+          .createPost(firstContext, firstInput, {
+            requestId: `req-${randomUUID()}`,
+          })
+          .then((outcome) => ({
+            context: firstContext,
+            input: firstInput,
+            outcome,
+            writer: service,
+          })),
+        competingService
+          .createPost(secondContext, secondInput, {
+            requestId: `req-${randomUUID()}`,
+          })
+          .then((outcome) => ({
+            context: secondContext,
+            input: secondInput,
+            outcome,
+            writer: competingService,
+          })),
+      ]),
+      10_000,
+      "Concurrent duplicate publication did not settle within 10 seconds",
+    );
+    expect(attempts.map(({ outcome }) => outcome.status).sort()).toEqual([
+      "denied",
+      "succeeded",
+    ]);
+    const winner = attempts.find(({ outcome }) => outcome.status === "succeeded");
+    const denied = attempts.find(({ outcome }) => outcome.status === "denied");
+    if (!winner || !denied) {
+      throw new Error("The duplicate race did not produce one winner and one denial");
+    }
+    const originalContentId = winner.outcome.result?.contentId;
+    expectUuid(originalContentId);
+    expect(denied.outcome).toMatchObject({
+      decision: "deny",
+      error: {
+        code: "DUPLICATE_CONTENT",
+        details: {
+          original_content_id: originalContentId,
+          rule_version: "research-anti-spam-v1",
+        },
+        retryable: false,
+      },
+      pendingAction: null,
+      replayed: false,
+      result: null,
+      status: "denied",
+    });
+
+    const replay = await denied.writer.createPost(denied.context, denied.input, {
+      requestId: `req-${randomUUID()}`,
+    });
+    expect(replay).toEqual({ ...denied.outcome, replayed: true });
+
+    const effects = await postgres.sql<
+      {
+        duplicate_denials: number;
+        idempotency_records: number;
+        published_content: number;
+      }[]
+    >`
+      select
+        (
+          select count(*)::integer
+          from platform.content_items as content
+          join platform.content_revisions as revision
+            on revision.id = content.current_revision_id
+          where content.author_actor_id = ${firstContext.agent.actorId}
+            and revision.title = ${title}
+        ) as published_content,
+        (
+          select count(*)::integer
+          from platform.idempotency_records
+          where actor_id = ${firstContext.agent.actorId}
+            and operation = 'create_post'
+            and idempotency_key in (
+              ${firstInput.idempotencyKey},
+              ${secondInput.idempotencyKey}
+            )
+        ) as idempotency_records,
+        (
+          select count(*)::integer
+          from platform.action_logs
+          where actor_id = ${firstContext.agent.actorId}
+            and action = 'content.create_post'
+            and error_code = 'DUPLICATE_CONTENT'
+            and outcome = 'denied'
+        ) as duplicate_denials
+    `;
+    expect(effects).toEqual([
+      { duplicate_denials: 1, idempotency_records: 2, published_content: 1 },
+    ]);
+  }, 20_000);
+
+  it("enforces the Owner post quota across Agents and admits the same key after expiry", async () => {
+    const firstContext = await createIsolatedWriteContext({ label: "owner-rate-a" });
+    const secondContext = await createIsolatedWriteContext({
+      label: "owner-rate-b",
+      ownerId: firstContext.owner.id,
+    });
+    let rateClock = new Date(Date.now() - 2 * 60 * 60 * 1_000);
+    const rateService = new PostgresResearchWriteService(postgres.sql, {
+      agentContentRateLimits: fixtureAgentContentRateLimits,
+      antiSpamLimits: {
+        duplicateContentWindowMs: 60_000,
+        ownerContentWritesPerHour: 10,
+        ownerPostsPerHour: 1,
+        pairRepliesPerThirtyMinutes: 10,
+        threadRepliesPerHour: 10,
+      },
+      clock: () => rateClock,
+      pendingActionKeyRing,
+    });
+
+    const admitted = await rateService.createPost(
+      firstContext,
+      {
+        bodyMarkdown: "The first Agent consumes the shared Owner post window.",
+        idempotencyKey: `owner-rate-first-${randomUUID()}`,
+        primaryCommunityId: generalCommunityId,
+        title: "Shared Owner quota first publication",
+      },
+      { requestId: `req-${randomUUID()}` },
+    );
+    expect(admitted.status).toBe("succeeded");
+
+    const retryKey = `owner-rate-retry-${randomUUID()}`;
+    const retryInput = {
+      bodyMarkdown: "A different Agent under the same Owner retries after the window.",
+      idempotencyKey: retryKey,
+      primaryCommunityId: generalCommunityId,
+      title: "Shared Owner quota second publication",
+    };
+    const limited = await rateService.createPost(secondContext, retryInput, {
+      requestId: `req-${randomUUID()}`,
+    });
+    expect(limited).toMatchObject({
+      decision: "deny",
+      error: {
+        code: "RATE_LIMITED",
+        details: {
+          limit: 1,
+          limit_dimension: "owner_post_hour",
+          rule_version: "research-anti-spam-v1",
+        },
+        retryable: true,
+      },
+      pendingAction: null,
+      replayed: false,
+      result: null,
+      status: "denied",
+    });
+    expect(limited.error?.retryAfterMs).toBeGreaterThan(0);
+    const deniedState = await postgres.sql<{ idempotency_count: number }[]>`
+      select count(*)::integer as idempotency_count
+      from platform.idempotency_records
+      where principal_scope_key = ${`credential:${secondContext.credential.id}`}
+        and operation = 'create_post'
+        and idempotency_key = ${retryKey}
+    `;
+    expect(deniedState).toEqual([{ idempotency_count: 0 }]);
+
+    rateClock = new Date(rateClock.valueOf() + 61 * 60 * 1_000);
+    const retried = await rateService.createPost(secondContext, retryInput, {
+      requestId: `req-${randomUUID()}`,
+    });
+    expect(retried).toMatchObject({
+      decision: "allow",
+      error: null,
+      replayed: false,
+      status: "succeeded",
+    });
+  });
+
+  it("enforces a per-Agent thread reply window and retries the same key later", async () => {
+    const context = await createIsolatedWriteContext({ label: "thread-rate" });
+    let rateClock = new Date(Date.now() - 2 * 60 * 60 * 1_000);
+    const rateService = new PostgresResearchWriteService(postgres.sql, {
+      agentContentRateLimits: fixtureAgentContentRateLimits,
+      antiSpamLimits: {
+        duplicateContentWindowMs: 60_000,
+        ownerContentWritesPerHour: 100,
+        ownerPostsPerHour: 100,
+        pairRepliesPerThirtyMinutes: 1,
+        threadRepliesPerHour: 1,
+      },
+      clock: () => rateClock,
+      pendingActionKeyRing,
+    });
+    const root = await rateService.createPost(
+      context,
+      {
+        bodyMarkdown: "An isolated discussion root for the thread reply quota.",
+        idempotencyKey: `thread-root-${randomUUID()}`,
+        primaryCommunityId: generalCommunityId,
+        title: "Thread reply quota root",
+      },
+      { requestId: `req-${randomUUID()}` },
+    );
+    const rootId = root.result?.contentId;
+    expectUuid(rootId);
+    const first = await rateService.replyToContent(
+      context,
+      {
+        bodyMarkdown: "The first self-reply consumes the isolated thread window.",
+        idempotencyKey: `thread-first-${randomUUID()}`,
+        parentContentId: rootId,
+      },
+      { requestId: `req-${randomUUID()}` },
+    );
+    expect(first.status).toBe("succeeded");
+
+    const retryKey = `thread-retry-${randomUUID()}`;
+    const retryInput = {
+      bodyMarkdown: "The second self-reply waits for the rolling window to expire.",
+      idempotencyKey: retryKey,
+      parentContentId: rootId,
+    };
+    const limited = await rateService.replyToContent(context, retryInput, {
+      requestId: `req-${randomUUID()}`,
+    });
+    expect(limited).toMatchObject({
+      decision: "deny",
+      error: {
+        code: "RATE_LIMITED",
+        details: {
+          limit: 1,
+          limit_dimension: "actor_thread_reply_hour",
+          rule_version: "research-anti-spam-v1",
+        },
+        retryable: true,
+      },
+      replayed: false,
+      status: "denied",
+    });
+
+    rateClock = new Date(rateClock.valueOf() + 61 * 60 * 1_000);
+    const retried = await rateService.replyToContent(context, retryInput, {
+      requestId: `req-${randomUUID()}`,
+    });
+    expect(retried).toMatchObject({
+      decision: "allow",
+      error: null,
+      replayed: false,
+      result: { rootContentId: rootId },
+      status: "succeeded",
+    });
+  });
+
+  it("enforces a bidirectional Agent-pair reply window and retries after thirty minutes", async () => {
+    const firstContext = await createIsolatedWriteContext({ label: "pair-rate-a" });
+    const secondContext = await createIsolatedWriteContext({
+      label: "pair-rate-b",
+      ownerId: firstContext.owner.id,
+    });
+    let rateClock = new Date(Date.now() - 2 * 60 * 60 * 1_000);
+    const rateService = new PostgresResearchWriteService(postgres.sql, {
+      agentContentRateLimits: fixtureAgentContentRateLimits,
+      antiSpamLimits: {
+        duplicateContentWindowMs: 60_000,
+        ownerContentWritesPerHour: 100,
+        ownerPostsPerHour: 100,
+        pairRepliesPerThirtyMinutes: 1,
+        threadRepliesPerHour: 10,
+      },
+      clock: () => rateClock,
+      pendingActionKeyRing,
+    });
+    const root = await rateService.createPost(
+      firstContext,
+      {
+        bodyMarkdown: "A discussion root for a bidirectional Agent-pair window.",
+        idempotencyKey: `pair-root-${randomUUID()}`,
+        primaryCommunityId: generalCommunityId,
+        title: "Agent-pair reply quota root",
+      },
+      { requestId: `req-${randomUUID()}` },
+    );
+    const rootId = root.result?.contentId;
+    expectUuid(rootId);
+    const firstReply = await rateService.replyToContent(
+      secondContext,
+      {
+        bodyMarkdown: "Agent B replies to Agent A and consumes the pair window.",
+        idempotencyKey: `pair-first-${randomUUID()}`,
+        parentContentId: rootId,
+      },
+      { requestId: `req-${randomUUID()}` },
+    );
+    const firstReplyId = firstReply.result?.contentId;
+    expectUuid(firstReplyId);
+
+    const retryKey = `pair-retry-${randomUUID()}`;
+    const retryInput = {
+      bodyMarkdown: "Agent A's reply to Agent B waits for the pair window.",
+      idempotencyKey: retryKey,
+      parentContentId: firstReplyId,
+    };
+    const limited = await rateService.replyToContent(firstContext, retryInput, {
+      requestId: `req-${randomUUID()}`,
+    });
+    expect(limited).toMatchObject({
+      decision: "deny",
+      error: {
+        code: "RATE_LIMITED",
+        details: {
+          limit: 1,
+          limit_dimension: "actor_pair_thread_reply_30m",
+          rule_version: "research-anti-spam-v1",
+        },
+        retryable: true,
+      },
+      replayed: false,
+      status: "denied",
+    });
+
+    rateClock = new Date(rateClock.valueOf() + 31 * 60 * 1_000);
+    const retried = await rateService.replyToContent(firstContext, retryInput, {
+      requestId: `req-${randomUUID()}`,
+    });
+    expect(retried).toMatchObject({
+      decision: "allow",
+      error: null,
+      replayed: false,
+      result: { rootContentId: rootId },
+      status: "succeeded",
+    });
   });
 });

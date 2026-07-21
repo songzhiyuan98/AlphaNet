@@ -960,6 +960,7 @@ describe("Agent Bearer and public routes", () => {
     const researchWriteService = {
       checkReady: vi.fn(() => Promise.resolve()),
       createPost: vi.fn(() => Promise.reject(new Error("not invoked"))),
+      deleteContent: vi.fn(() => Promise.reject(new Error("not invoked"))),
       replyToContent: vi.fn(() => Promise.reject(new Error("not invoked"))),
       updateContent: vi.fn(() => Promise.reject(new Error("not invoked"))),
     } satisfies NonNullable<ApiAppOptions["researchWriteService"]>;
@@ -982,8 +983,13 @@ describe("Agent Bearer and public routes", () => {
         available: true,
         default_decision: "require_approval",
       },
+      delete_content: {
+        available: true,
+        default_decision: "require_approval",
+      },
     });
     expect(researchWriteService.createPost).not.toHaveBeenCalled();
+    expect(researchWriteService.deleteContent).not.toHaveBeenCalled();
     expect(researchWriteService.replyToContent).not.toHaveBeenCalled();
     expect(researchWriteService.updateContent).not.toHaveBeenCalled();
   });

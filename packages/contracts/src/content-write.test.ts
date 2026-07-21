@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   CreatePostRequestSchema,
   CreatePostWriteResultSchema,
+  DeleteContentRequestSchema,
+  DeleteContentWriteResultSchema,
   HttpsSourceUrlSchema,
   IdempotencyKeySchema,
   ReplyToContentRequestSchema,
@@ -93,6 +95,14 @@ const update = {
   idempotency_key: "edit-amd-scenarios-20260720-v2",
 } as const;
 
+const deleteContent = {
+  content_id: "cnt_amd_thesis",
+  expected_version: 3,
+  mode: "soft",
+  reason: "Superseded by a corrected research post.",
+  idempotency_key: "delete-amd-thesis-20260720-v3",
+} as const;
+
 const structuredError = {
   code: "POLICY_DENIED",
   message: "The current policy denies this write.",
@@ -175,6 +185,35 @@ describe("content write request contracts", () => {
         edit_summary: "x".repeat(501),
       }).success,
     ).toBe(false);
+  });
+
+  it("accepts strict soft/permanent delete commands with an optional safe reason", () => {
+    expect(DeleteContentRequestSchema.parse(deleteContent)).toEqual(deleteContent);
+    expect(
+      DeleteContentRequestSchema.parse({
+        ...deleteContent,
+        mode: "permanent",
+        reason: undefined,
+      }),
+    ).toEqual({
+      content_id: deleteContent.content_id,
+      expected_version: deleteContent.expected_version,
+      mode: "permanent",
+      reason: undefined,
+      idempotency_key: deleteContent.idempotency_key,
+    });
+
+    for (const candidate of [
+      { ...deleteContent, mode: "archive" },
+      { ...deleteContent, expected_version: 0 },
+      { ...deleteContent, reason: "" },
+      { ...deleteContent, reason: " not trimmed" },
+      { ...deleteContent, reason: "control\ncharacter" },
+      { ...deleteContent, reason: "😀".repeat(501) },
+      { ...deleteContent, owner_id: "own_forged" },
+    ]) {
+      expect(DeleteContentRequestSchema.safeParse(candidate).success).toBe(false);
+    }
   });
 
   it("applies source and decompressed request budgets inside update patches", () => {
@@ -525,6 +564,69 @@ describe("unified write and PendingAction contracts", () => {
     expect(UpdateContentWriteResultSchema.parse(classificationOnly)).toEqual(
       classificationOnly,
     );
+  });
+
+  it("binds pending and approved deletes to the expected resource version", () => {
+    const pending = {
+      decision: "require_approval",
+      status: "pending_approval",
+      result: null,
+      pending_action: {
+        id: "act_pending_delete",
+        operation: "delete_content",
+        state: "pending_approval",
+        expected_version: 3,
+        expires_at: timestamp,
+        input_digest: `sha256:${"d".repeat(64)}`,
+        ...pendingSummaryMetadata,
+      },
+      error: null,
+      request_id: "req-delete-pending",
+      schema_version: "1",
+    } as const;
+    expect(DeleteContentWriteResultSchema.parse(pending)).toEqual(pending);
+    expect(UnifiedContentWriteResultSchema.parse(pending)).toEqual(pending);
+    expect(
+      DeleteContentWriteResultSchema.safeParse({
+        ...pending,
+        pending_action: { ...pending.pending_action, expected_version: undefined },
+      }).success,
+    ).toBe(false);
+
+    const approved = {
+      ...pending,
+      status: "succeeded",
+      result: {
+        content_id: deleteContent.content_id,
+        lifecycle_state: "deleted",
+        resource_version: 4,
+      },
+      pending_action: { ...pending.pending_action, state: "succeeded" },
+      request_id: "req-delete-approved",
+    } as const;
+    expect(DeleteContentWriteResultSchema.parse(approved)).toEqual(approved);
+    expect(UnifiedContentWriteResultSchema.parse(approved)).toEqual(approved);
+    expect(
+      DeleteContentWriteResultSchema.safeParse({
+        ...approved,
+        result: { ...approved.result, resource_version: 5 },
+      }).success,
+    ).toBe(false);
+
+    const direct = {
+      decision: "allow",
+      status: "succeeded",
+      result: {
+        content_id: deleteContent.content_id,
+        lifecycle_state: "deleted",
+        resource_version: 4,
+      },
+      pending_action: null,
+      error: null,
+      request_id: "req-delete-direct",
+      schema_version: "1",
+    } as const;
+    expect(DeleteContentWriteResultSchema.parse(direct)).toEqual(direct);
   });
 
   it("accepts direct and approved success while rejecting illegal decision/status pairs", () => {

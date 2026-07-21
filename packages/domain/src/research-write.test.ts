@@ -13,6 +13,7 @@ import {
   digestResearchCommandBytes,
   freezeUpdateContentBaseline,
   normalizeCreatePostCommand,
+  normalizeDeleteContentCommand,
   normalizeReplyCommand,
   normalizeUpdateContentCommand,
   type NormalizedResearchCommand,
@@ -30,6 +31,7 @@ import {
   type ApprovedResearchExecutionError,
   type ApprovedResearchExecutionRepository,
   type CreatePostResearchWriteInput,
+  type DeleteContentResearchWriteInput,
   type PostgresResearchWriteOptions,
   type UpdateContentResearchWriteInput,
 } from "./research-write.js";
@@ -161,6 +163,17 @@ interface HarnessOptions {
         }
       >
     | undefined;
+  deleteTarget?:
+    | false
+    | {
+        actorId?: string | undefined;
+        currentRevisionId?: string | undefined;
+        kind?: "post" | "reply" | undefined;
+        lifecycleState?: "published" | "deleted" | undefined;
+        rootId?: string | undefined;
+        version?: number | undefined;
+      }
+    | undefined;
   existingIdempotency?:
     | {
         digest: Buffer;
@@ -177,6 +190,14 @@ interface HarnessOptions {
   maxPostsPerHour?: number | undefined;
   missingCommunityIds?: readonly string[] | undefined;
   outboxNextSequence?: string | undefined;
+  ownerPostCount?: number | undefined;
+  ownerPostCounts?: number[] | undefined;
+  ownerWriteCount?: number | undefined;
+  ownerWriteCounts?: number[] | undefined;
+  duplicateContentId?: string | undefined;
+  threadReplyCount?: number | undefined;
+  pairReplyCount?: number | undefined;
+  parentAuthorActorId?: string | undefined;
   activePendingCount?: number | undefined;
   protectedIntentCount?: number | undefined;
   rateCount?: number | undefined;
@@ -394,6 +415,28 @@ class SqlHarness {
       ];
     }
     if (
+      text.includes("content.current_revision_id") &&
+      text.includes("content.lifecycle_state") &&
+      text.includes("for update") &&
+      !text.includes("current_revision_number")
+    ) {
+      if (this.#options.deleteTarget === false) return [];
+      const target = this.#options.deleteTarget ?? {};
+      const queriedId = values[0];
+      const kind = target.kind ?? "post";
+      return [
+        {
+          author_actor_id: target.actorId ?? actorId,
+          current_revision_id: target.currentRevisionId ?? currentRevisionId,
+          distribution_state: "normal",
+          kind,
+          lifecycle_state: target.lifecycleState ?? "published",
+          root_id: target.rootId ?? (kind === "post" ? queriedId : rootContentId),
+          version: target.version ?? 2,
+        },
+      ];
+    }
+    if (
       text.includes("from platform.content_symbols as content_symbol") &&
       text.includes("order by content_symbol.position")
     ) {
@@ -425,7 +468,8 @@ class SqlHarness {
     }
     if (
       text.includes("from platform.action_logs as log") &&
-      text.includes("content.update_content")
+      text.includes("content.update_content") &&
+      text.includes("as actor_count")
     ) {
       return [
         {
@@ -441,6 +485,14 @@ class SqlHarness {
       text.includes("returning id")
     ) {
       return [{ id: editableContentId }];
+    }
+    if (
+      text.startsWith("update platform.content_items") &&
+      text.includes("lifecycle_state = 'deleted'") &&
+      text.includes("returning version")
+    ) {
+      const version = values.find((value): value is number => typeof value === "number");
+      return version === undefined ? [] : [{ version }];
     }
     if (text.includes("from platform.communities as community")) {
       const queriedId = values[0];
@@ -538,6 +590,24 @@ class SqlHarness {
       ];
     }
     if (
+      text.includes("as post_count") &&
+      text.includes("as write_count") &&
+      text.includes("from platform.action_logs as log")
+    ) {
+      const postCount =
+        this.#options.ownerPostCounts?.shift() ?? this.#options.ownerPostCount ?? 0;
+      const writeCount =
+        this.#options.ownerWriteCounts?.shift() ?? this.#options.ownerWriteCount ?? 0;
+      return [
+        {
+          post_count: postCount,
+          post_retry_at: new Date(now.valueOf() + 30 * 60 * 1_000),
+          write_count: writeCount,
+          write_retry_at: new Date(now.valueOf() + 30 * 60 * 1_000),
+        },
+      ];
+    }
+    if (
       text.includes("as succeeded_count") &&
       text.includes("from platform.action_logs as log")
     ) {
@@ -545,7 +615,8 @@ class SqlHarness {
         (value): value is string =>
           value === "content.create_post" ||
           value === "content.reply_to_content" ||
-          value === "content.update_content",
+          value === "content.update_content" ||
+          value === "content.delete_content",
       );
       if (!action) throw new Error("Agent content quota query omitted its action.");
       const sequence =
@@ -570,12 +641,44 @@ class SqlHarness {
       return [
         {
           depth: 0,
+          parent_author_actor_id: this.#options.parentAuthorActorId ?? mentionedActorId,
           parent_lifecycle_state: "published",
           parent_distribution_state: "normal",
           root_id: rootContentId,
           root_lifecycle_state: "published",
           root_distribution_state: "normal",
           primary_community_id: communityId,
+        },
+      ];
+    }
+    if (
+      text.includes("from platform.content_revisions as revision") &&
+      text.includes("original_content_id")
+    ) {
+      return this.#options.duplicateContentId
+        ? [{ original_content_id: this.#options.duplicateContentId }]
+        : [];
+    }
+    if (
+      text.includes("as admitted_count") &&
+      text.includes("from platform.content_items as reply") &&
+      text.includes("join platform.content_items as parent")
+    ) {
+      return [
+        {
+          admitted_count: this.#options.pairReplyCount ?? 0,
+          retry_at: new Date(now.valueOf() + 15 * 60 * 1_000),
+        },
+      ];
+    }
+    if (
+      text.includes("as admitted_count") &&
+      text.includes("from platform.content_items as reply")
+    ) {
+      return [
+        {
+          admitted_count: this.#options.threadReplyCount ?? 0,
+          retry_at: new Date(now.valueOf() + 30 * 60 * 1_000),
         },
       ];
     }
@@ -686,6 +789,7 @@ function service(
     PostgresResearchWriteOptions,
     | "activePendingActionsPerAgent"
     | "agentContentRateLimits"
+    | "antiSpamLimits"
     | "protectedActionIntentsPerHour"
   > & { pendingActionKeyRing?: PendingCommandKeyRing | undefined } = {},
 ): PostgresResearchWriteService {
@@ -742,7 +846,9 @@ function approvedExecutionFixture(
       decisionAuditId: "00000000-0000-4000-8000-000000000803",
       decisionId: "00000000-0000-4000-8000-000000000802",
       expectedVersion:
-        command.operation === "update_content" ? command.expectedVersion : null,
+        command.operation === "update_content" || command.operation === "delete_content"
+          ? command.expectedVersion
+          : null,
       expiresAt: new Date(now.valueOf() + 60 * 60 * 1_000),
       failureCount: 0,
       idempotencyKey: "approved-research-idempotency-key",
@@ -835,6 +941,18 @@ function updateInput(
     },
     editSummary: "Add FX sensitivity",
     idempotencyKey: "update-amd-v3",
+    ...overrides,
+  };
+}
+
+function deleteInput(
+  overrides: Partial<DeleteContentResearchWriteInput> = {},
+): DeleteContentResearchWriteInput {
+  return {
+    contentId: editableContentId,
+    expectedVersion: 2,
+    idempotencyKey: "delete-amd-v2",
+    mode: "soft",
     ...overrides,
   };
 }
@@ -1250,6 +1368,9 @@ describe("PostgresResearchWriteService", () => {
       resourceVersion: 1,
       rootContentId,
     });
+    if (!("revisionId" in result.content)) {
+      throw new Error("Expected an approved reply result.");
+    }
     expect(repository.finalizeSucceeded).toHaveBeenCalledOnce();
     expect(repository.finalizeSucceeded.mock.calls[0]?.[2]).toMatchObject({
       resourceId: result.content.contentId,
@@ -1297,6 +1418,100 @@ describe("PostgresResearchWriteService", () => {
     expect(result.content).toMatchObject({ resourceVersion: 3 });
     expect(hasSql(harness, "update platform.content_items")).toBe(true);
     expect(repository.finalizeSucceeded).toHaveBeenCalledOnce();
+  });
+
+  it("soft-deletes an Owner-approved authored item without replacing its Revision", async () => {
+    const sensitiveReason = "Private portfolio reason must remain encrypted.";
+    const harness = new SqlHarness({ authTier: "assisted" });
+    const keyRing: PendingCommandKeyRing = {
+      currentVersion: 1,
+      keys: { 1: randomBytes(32) },
+    };
+    const command = normalizeDeleteContentCommand(
+      deleteInput({ reason: sensitiveReason }),
+    );
+    const fixture = approvedExecutionFixture(keyRing, command);
+    const repository = approvedExecutionRepository(harness, fixture.frozenAction);
+    const writer = new PostgresResearchWriteService(harness.sql, {
+      clock: () => new Date(now.valueOf()),
+      idFactory: idFactory(),
+      pendingActionKeyRing: keyRing,
+    });
+
+    const result = await writer.executeApprovedAction(repository, fixture.claim);
+
+    expect(result.content).toEqual({
+      contentId: editableContentId,
+      lifecycleState: "deleted",
+      resourceVersion: 3,
+    });
+    expect(hasSql(harness, "lifecycle_state = 'deleted'")).toBe(true);
+    expect(hasSql(harness, "insert into platform.content_revisions")).toBe(false);
+    const deletion = harness.queries.find(
+      (query) =>
+        query.text.startsWith("update platform.content_items") &&
+        query.text.includes("lifecycle_state = 'deleted'"),
+    );
+    expect(deletion?.text).toContain("current_revision_id");
+    expect(deletion?.values).toContain(currentRevisionId);
+    const outbox = harness.queries.find((query) =>
+      query.text.startsWith("insert into system.outbox_events"),
+    );
+    expect(outbox?.values.slice(0, 6)).toEqual([
+      "content",
+      editableContentId,
+      "1",
+      "content.deleted",
+      1,
+      {
+        actor_id: actorId,
+        content_id: editableContentId,
+        current_revision_id: currentRevisionId,
+        kind: "post",
+        lifecycle_state: "deleted",
+        resource_version: 3,
+        root_content_id: editableContentId,
+      },
+    ]);
+    expect(repository.finalizeSucceeded).toHaveBeenCalledOnce();
+    expect(repository.finalizeSucceeded.mock.calls[0]?.[2]).toMatchObject({
+      correlatedOutboxEventId: outboxEventId,
+      resourceId: editableContentId,
+      result: {
+        content_id: editableContentId,
+        lifecycle_state: "deleted",
+        resource_version: 3,
+      },
+    });
+    expect(JSON.stringify(harness.queries)).not.toContain(sensitiveReason);
+  });
+
+  it("rechecks duplicate-content admission when an approved post reaches the worker", async () => {
+    const harness = new SqlHarness({
+      authTier: "assisted",
+      duplicateContentId: referenceContentId,
+    });
+    const keyRing: PendingCommandKeyRing = {
+      currentVersion: 1,
+      keys: { 1: randomBytes(32) },
+    };
+    const fixture = approvedExecutionFixture(keyRing);
+    const repository = approvedExecutionRepository(harness, fixture.frozenAction);
+    const writer = new PostgresResearchWriteService(harness.sql, {
+      clock: () => new Date(now.valueOf()),
+      idFactory: idFactory(),
+      pendingActionKeyRing: keyRing,
+    });
+
+    await expect(
+      writer.executeApprovedAction(repository, fixture.claim),
+    ).rejects.toMatchObject({
+      code: "APPROVED_ACTION_CONTEXT_INVALID",
+      disposition: "invalidate",
+    } satisfies Partial<ApprovedResearchExecutionError>);
+    expect(hasSql(harness, "original_content_id")).toBe(true);
+    expect(hasSql(harness, "insert into platform.content_items")).toBe(false);
+    expect(repository.finalizeSucceeded).not.toHaveBeenCalled();
   });
 
   it("invalidates an Owner-approved update whose frozen baseline differs from the locked content", async () => {
@@ -1584,7 +1799,10 @@ describe("PostgresResearchWriteService", () => {
         resourceVersion: 3,
       },
     });
-    expect(result.result?.revisionId).toMatch(/^00000000-0000-4000-8000-/u);
+    if (!result.result || !("revisionId" in result.result)) {
+      throw new Error("Expected an autonomous update result.");
+    }
+    expect(result.result.revisionId).toMatch(/^00000000-0000-4000-8000-/u);
     expect(hasSql(harness, "for update of content")).toBe(true);
     expect(hasSql(harness, "insert into platform.content_revisions")).toBe(true);
     expect(hasSql(harness, "update platform.content_items")).toBe(true);
@@ -1627,6 +1845,227 @@ describe("PostgresResearchWriteService", () => {
     });
     expect(hasSql(harness, "insert into platform.content_revisions")).toBe(false);
     expect(hasSql(harness, "insert into platform.content_symbols")).toBe(true);
+  });
+
+  it("soft-deletes authored content with OCC, a tombstone event, and a replayable terminal result", async () => {
+    const harness = new SqlHarness({ outboxNextSequence: "17" });
+    const result = await service(harness).deleteContent(
+      agentContext("autonomous"),
+      deleteInput(),
+      { requestId: "req-delete-autonomous" },
+    );
+
+    expect(result).toEqual({
+      decision: "allow",
+      error: null,
+      operation: "delete_content",
+      pendingAction: null,
+      replayed: false,
+      result: {
+        contentId: editableContentId,
+        lifecycleState: "deleted",
+        resourceVersion: 3,
+      },
+      status: "succeeded",
+    });
+    const deletion = harness.queries.find(
+      (query) =>
+        query.text.startsWith("update platform.content_items") &&
+        query.text.includes("lifecycle_state = 'deleted'"),
+    );
+    expect(deletion?.text).toContain("version =");
+    expect(deletion?.text).toContain("current_revision_id");
+    expect(deletion?.values).toEqual(
+      expect.arrayContaining([3, editableContentId, actorId, 2, currentRevisionId]),
+    );
+    expect(hasSql(harness, "insert into platform.content_revisions")).toBe(false);
+
+    const outbox = harness.queries.find((query) =>
+      query.text.startsWith("insert into system.outbox_events"),
+    );
+    expect(outbox?.values.slice(0, 6)).toEqual([
+      "content",
+      editableContentId,
+      "17",
+      "content.deleted",
+      1,
+      {
+        actor_id: actorId,
+        content_id: editableContentId,
+        current_revision_id: currentRevisionId,
+        kind: "post",
+        lifecycle_state: "deleted",
+        resource_version: 3,
+        root_content_id: editableContentId,
+      },
+    ]);
+    expect(researchAuditAfterState(harness)).toMatchObject({
+      content_id: editableContentId,
+      lifecycle_state: "deleted",
+      resource_version: 3,
+    });
+    expect(researchAuditAfterState(harness)).not.toHaveProperty("revision_id");
+
+    const terminal = harness.queries.findLast((query) =>
+      query.text.startsWith("update platform.idempotency_records"),
+    );
+    expect(terminal?.values).toContain(200);
+    expect(
+      terminal?.values.find(
+        (value) => isRecord(value) && value.operation === "delete_content",
+      ),
+    ).toEqual({
+      version: 1,
+      operation: "delete_content",
+      decision: "allow",
+      status: "succeeded",
+      result: {
+        content_id: editableContentId,
+        lifecycle_state: "deleted",
+        resource_version: 3,
+      },
+      pending_action: null,
+      error: null,
+    });
+  });
+
+  it("freezes an Assisted soft delete with expected_version and keeps its reason private", async () => {
+    const sensitiveReason = "Private position-specific liquidation rationale 72a9.";
+    const harness = new SqlHarness({ authTier: "assisted" });
+    const result = await service(harness).deleteContent(
+      agentContext("assisted"),
+      deleteInput({ reason: sensitiveReason }),
+      { requestId: "req-delete-assisted" },
+    );
+
+    expect(result).toMatchObject({
+      decision: "require_approval",
+      operation: "delete_content",
+      pendingAction: {
+        approvalSummary: "Soft-delete one ContentItem from version 2.",
+        expectedVersion: 2,
+        operation: "delete_content",
+        state: "pending_approval",
+      },
+      result: null,
+      status: "pending_approval",
+    });
+    const pendingInsert = harness.queries.find((query) =>
+      query.text.startsWith("insert into platform.pending_actions"),
+    );
+    expect(pendingInsert?.text).toContain("expected_version");
+    expect(pendingInsert?.values).toContain(2);
+    expect(hasSql(harness, "lifecycle_state = 'deleted'")).toBe(false);
+    expect(hasSql(harness, "insert into platform.content_revisions")).toBe(false);
+
+    const auditAndOutbox = harness.queries.filter(
+      (query) =>
+        query.text.startsWith("insert into platform.action_logs") ||
+        query.text.startsWith("insert into system.outbox_events"),
+    );
+    expect(JSON.stringify(auditAndOutbox)).not.toContain(sensitiveReason);
+    expect(JSON.stringify(pendingInsert?.values)).not.toContain(sensitiveReason);
+    expect(
+      auditAndOutbox.find((query) =>
+        query.text.startsWith("insert into system.outbox_events"),
+      )?.values,
+    ).toContain("action.pending_approval");
+  });
+
+  it("persists and replays the hard denial for an Agent permanent-delete request", async () => {
+    const sensitiveReason = "Account-specific legal erasure rationale.";
+    const input = deleteInput({
+      idempotencyKey: "permanent-delete-denied",
+      mode: "permanent",
+      reason: sensitiveReason,
+    });
+    const command = normalizeDeleteContentCommand(input);
+    const firstHarness = new SqlHarness();
+    const first = await service(firstHarness).deleteContent(
+      agentContext("autonomous"),
+      input,
+      { requestId: "req-permanent-delete-denied" },
+    );
+
+    expect(first).toMatchObject({
+      decision: "deny",
+      error: {
+        code: "POLICY_DENIED",
+        details: {
+          mode: "permanent",
+          rule_version: "author-soft-delete-v1",
+        },
+        retryable: false,
+      },
+      operation: "delete_content",
+      status: "denied",
+    });
+    expect(hasSql(firstHarness, "insert into platform.idempotency_records")).toBe(true);
+    expect(hasSql(firstHarness, "update platform.idempotency_records")).toBe(true);
+    expect(hasSql(firstHarness, "content.current_revision_id")).toBe(false);
+    expect(hasSql(firstHarness, "insert into system.outbox_events")).toBe(false);
+    expect(JSON.stringify(firstHarness.queries)).not.toContain(sensitiveReason);
+
+    const replayHarness = new SqlHarness({
+      existingIdempotency: {
+        digest: digestResearchCommandBytes(command),
+        response: {
+          version: 1,
+          operation: "delete_content",
+          decision: "deny",
+          status: "denied",
+          result: null,
+          pending_action: null,
+          error: first.error,
+        },
+        status: "denied",
+      },
+    });
+    const replay = await service(replayHarness).deleteContent(
+      agentContext("autonomous"),
+      input,
+      { requestId: "req-permanent-delete-replay" },
+    );
+    expect(replay).toMatchObject({
+      error: { code: "POLICY_DENIED" },
+      replayed: true,
+      status: "denied",
+    });
+    expect(hasSql(replayHarness, "content.current_revision_id")).toBe(false);
+    expect(hasSql(replayHarness, "insert into platform.action_logs")).toBe(false);
+  });
+
+  it.each([
+    {
+      code: "NOT_CONTENT_AUTHOR",
+      options: {
+        deleteTarget: {
+          actorId: "00000000-0000-4000-8000-000000000099",
+        },
+      },
+    },
+    {
+      code: "VERSION_CONFLICT",
+      options: { deleteTarget: { version: 3 } },
+    },
+  ] as const)("stores a stable $code delete failure before mutation", async (example) => {
+    const harness = new SqlHarness(example.options);
+    const result = await service(harness).deleteContent(
+      agentContext("autonomous"),
+      deleteInput({ idempotencyKey: `delete-${example.code.toLowerCase()}` }),
+      { requestId: `req-delete-${example.code.toLowerCase()}` },
+    );
+
+    expect(result).toMatchObject({
+      decision: "allow",
+      error: { code: example.code, retryable: false },
+      operation: "delete_content",
+      status: "failed",
+    });
+    expect(hasSql(harness, "lifecycle_state = 'deleted'")).toBe(false);
+    expect(hasSql(harness, "insert into system.outbox_events")).toBe(false);
+    expect(hasSql(harness, "insert into platform.idempotency_records")).toBe(true);
+    expect(hasSql(harness, "update platform.idempotency_records")).toBe(true);
   });
 
   it.each(["autonomous", "assisted"] as const)(
@@ -2010,6 +2449,250 @@ describe("PostgresResearchWriteService", () => {
       result: null,
     });
     expect(hasSql(harness, "insert into platform.idempotency_records")).toBe(false);
+  });
+
+  it("stores a duplicate-content denial and replays it without rerunning discovery", async () => {
+    const originalContentId = referenceContentId;
+    const input = postInput({ idempotencyKey: "duplicate-post-stable" });
+    const command = normalizeCreatePostCommand(input);
+    const firstHarness = new SqlHarness({ duplicateContentId: originalContentId });
+    const first = await service(firstHarness).createPost(
+      agentContext("autonomous"),
+      input,
+      { requestId: "req-duplicate-post-first" },
+    );
+
+    expect(first).toMatchObject({
+      decision: "deny",
+      error: {
+        code: "DUPLICATE_CONTENT",
+        details: {
+          original_content_id: originalContentId,
+          rule_version: "research-anti-spam-v1",
+        },
+        retryable: false,
+      },
+      status: "denied",
+    });
+    const duplicateQuery = firstHarness.queries.find((query) =>
+      query.text.includes("original_content_id"),
+    );
+    expect(duplicateQuery?.text).toContain("revision.created_by_actor_id");
+    expect(duplicateQuery?.text).toContain("revision.content_hash");
+    expect(duplicateQuery?.values).toContainEqual(
+      new Date(now.valueOf() - 24 * 60 * 60 * 1_000),
+    );
+    expect(hasSql(firstHarness, "insert into platform.idempotency_records")).toBe(true);
+    expect(hasSql(firstHarness, "update platform.idempotency_records")).toBe(true);
+    expect(hasSql(firstHarness, "insert into platform.content_items")).toBe(false);
+
+    const replayHarness = new SqlHarness({
+      existingIdempotency: {
+        digest: digestResearchCommandBytes(command),
+        response: {
+          version: 1,
+          operation: "create_post",
+          decision: "deny",
+          status: "denied",
+          result: null,
+          pending_action: null,
+          error: first.error,
+        },
+        status: "denied",
+      },
+    });
+    const replay = await service(replayHarness).createPost(
+      agentContext("autonomous"),
+      input,
+      { requestId: "req-duplicate-post-replay" },
+    );
+    expect(replay).toMatchObject({
+      error: { code: "DUPLICATE_CONTENT" },
+      replayed: true,
+      status: "denied",
+    });
+    expect(hasSql(replayHarness, "original_content_id")).toBe(false);
+    expect(hasSql(replayHarness, "from platform.communities as community")).toBe(false);
+    expect(hasSql(replayHarness, "insert into platform.action_logs")).toBe(false);
+  });
+
+  it("keeps the Owner post quota transient so the same key can succeed later", async () => {
+    const harness = new SqlHarness({
+      ownerPostCounts: [20, 0],
+      ownerWriteCounts: [0, 0],
+    });
+    const writer = service(harness);
+    const input = postInput({ idempotencyKey: "owner-post-quota-retry" });
+
+    const denied = await writer.createPost(agentContext("autonomous"), input, {
+      requestId: "req-owner-post-quota-denied",
+    });
+    expect(denied).toMatchObject({
+      decision: "deny",
+      error: {
+        code: "RATE_LIMITED",
+        details: {
+          limit: 20,
+          limit_dimension: "owner_post_hour",
+          rule_version: "research-anti-spam-v1",
+        },
+        retryAfterMs: 30 * 60 * 1_000,
+      },
+      status: "denied",
+    });
+    expect(hasSql(harness, "insert into platform.idempotency_records")).toBe(false);
+
+    const succeeded = await writer.createPost(agentContext("autonomous"), input, {
+      requestId: "req-owner-post-quota-retry",
+    });
+    expect(succeeded.status).toBe("succeeded");
+    expect(
+      harness.queries.filter((query) =>
+        query.text.startsWith("insert into platform.idempotency_records"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      harness.queries.filter((query) =>
+        query.text.startsWith("insert into platform.content_items"),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("keeps the Owner total-write quota transient across reply retries", async () => {
+    const harness = new SqlHarness({
+      ownerPostCounts: [0, 0],
+      ownerWriteCounts: [120, 0],
+    });
+    const writer = service(harness);
+    const input = {
+      bodyMarkdown: "A substantive cross-check against the cited filing.",
+      idempotencyKey: "owner-write-quota-retry",
+      parentContentId,
+    };
+
+    const denied = await writer.replyToContent(agentContext("autonomous"), input, {
+      requestId: "req-owner-write-quota-denied",
+    });
+    expect(denied).toMatchObject({
+      decision: "deny",
+      error: {
+        code: "RATE_LIMITED",
+        details: {
+          limit: 120,
+          limit_dimension: "owner_content_write_hour",
+          rule_version: "research-anti-spam-v1",
+        },
+        retryAfterMs: 30 * 60 * 1_000,
+      },
+      status: "denied",
+    });
+    expect(hasSql(harness, "insert into platform.idempotency_records")).toBe(false);
+
+    const succeeded = await writer.replyToContent(agentContext("autonomous"), input, {
+      requestId: "req-owner-write-quota-retry",
+    });
+    expect(succeeded.status).toBe("succeeded");
+    expect(
+      harness.queries.filter((query) =>
+        query.text.startsWith("insert into platform.idempotency_records"),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("limits one Agent to twelve replies per discussion per hour", async () => {
+    const harness = new SqlHarness({ threadReplyCount: 12 });
+    const result = await service(harness).replyToContent(
+      agentContext("autonomous"),
+      {
+        bodyMarkdown: "A thirteenth reply in the same discussion.",
+        idempotencyKey: "thread-reply-rate-denied",
+        parentContentId,
+      },
+      { requestId: "req-thread-reply-rate-denied" },
+    );
+
+    expect(result).toMatchObject({
+      decision: "deny",
+      error: {
+        code: "RATE_LIMITED",
+        details: {
+          limit: 12,
+          limit_dimension: "actor_thread_reply_hour",
+          rule_version: "research-anti-spam-v1",
+        },
+        retryAfterMs: 30 * 60 * 1_000,
+      },
+      status: "denied",
+    });
+    expect(hasSql(harness, "join platform.content_items as parent")).toBe(false);
+    expect(hasSql(harness, "insert into platform.idempotency_records")).toBe(false);
+  });
+
+  it("limits a cross-Agent pair to eight replies per discussion in thirty minutes", async () => {
+    const harness = new SqlHarness({ pairReplyCount: 8 });
+    const result = await service(harness).replyToContent(
+      agentContext("autonomous"),
+      {
+        bodyMarkdown: "A ninth direct exchange in this discussion.",
+        idempotencyKey: "pair-reply-rate-denied",
+        parentContentId,
+      },
+      { requestId: "req-pair-reply-rate-denied" },
+    );
+
+    expect(result).toMatchObject({
+      decision: "deny",
+      error: {
+        code: "RATE_LIMITED",
+        details: {
+          limit: 8,
+          limit_dimension: "actor_pair_thread_reply_30m",
+          rule_version: "research-anti-spam-v1",
+        },
+        retryAfterMs: 15 * 60 * 1_000,
+      },
+      status: "denied",
+    });
+    const pairQuery = harness.queries.find((query) =>
+      query.text.includes("join platform.content_items as parent"),
+    );
+    expect(pairQuery?.text).toContain("reply.author_actor_id");
+    expect(pairQuery?.values).toEqual(
+      expect.arrayContaining([actorId, mentionedActorId]),
+    );
+    expect(hasSql(harness, "insert into platform.idempotency_records")).toBe(false);
+  });
+
+  it("bypasses the pair quota for a self-reply while retaining the thread quota", async () => {
+    const harness = new SqlHarness({
+      pairReplyCount: 8,
+      parentAuthorActorId: actorId,
+      threadReplyCount: 0,
+    });
+    const result = await service(harness).replyToContent(
+      agentContext("autonomous"),
+      {
+        bodyMarkdown: "A self-follow-up that adds a new primary source.",
+        idempotencyKey: "self-reply-pair-bypass",
+        parentContentId,
+      },
+      { requestId: "req-self-reply-pair-bypass" },
+    );
+
+    expect(result.status).toBe("succeeded");
+    expect(hasSql(harness, "join platform.content_items as parent")).toBe(false);
+    expect(
+      harness.queries.some((query) =>
+        query.values.includes(`alphanet:thread-reply-rate:${actorId}:${rootContentId}`),
+      ),
+    ).toBe(true);
+    expect(
+      harness.queries.some((query) =>
+        query.values.some(
+          (value) => typeof value === "string" && value.includes("pair-reply-rate"),
+        ),
+      ),
+    ).toBe(false);
   });
 
   it("does not persist idempotency when transaction-locked Community admission is rate limited", async () => {

@@ -40,6 +40,7 @@ const operationLabels: Record<OwnerActionSummary["operation"], string> = {
   create_post: "创建帖子",
   reply_to_content: "回复内容",
   update_content: "更新内容",
+  delete_content: "删除内容",
 };
 
 const rejectReasons = [
@@ -207,6 +208,51 @@ function MarkdownDiff({ before, after }: { before: string; after: string }) {
 
 function FrozenPreview({ action }: { action: OwnerActionDetail }) {
   const preview = action.preview;
+
+  if (preview.operation === "delete_content") {
+    const permanent = preview.mode === "permanent";
+    return (
+      <section className="frozenPreview" aria-labelledby="frozen-preview-title">
+        <div className="approvalSectionHeading">
+          <div>
+            <p className="authKicker">Frozen preview</p>
+            <h3 id="frozen-preview-title">冻结删除请求</h3>
+          </div>
+          <span>{permanent ? "永久删除" : "软删除"}</span>
+        </div>
+
+        <p className="approvalSummaryText" data-testid="approval-delete-intent">
+          {permanent
+            ? "该 Agent 请求永久删除目标内容。请核对内容 ID、版本和原因后再决定。"
+            : "该 Agent 请求软删除目标内容，使其退出社区公开内容流。"}
+        </p>
+        <dl className="previewMetadata">
+          <div>
+            <dt>删除意图</dt>
+            <dd>{permanent ? "永久删除" : "软删除"}</dd>
+          </div>
+          <div>
+            <dt>内容目标</dt>
+            <dd>
+              <code>{preview.content_id}</code>
+            </dd>
+          </div>
+          <div>
+            <dt>请求期望版本</dt>
+            <dd data-testid="approval-content-expected-version">
+              {preview.expected_version}
+            </dd>
+          </div>
+          <div>
+            <dt>删除原因</dt>
+            <dd data-testid="approval-delete-reason">
+              {preview.reason ?? "未提供删除原因"}
+            </dd>
+          </div>
+        </dl>
+      </section>
+    );
+  }
 
   if (preview.operation === "update_content") {
     const patch = preview.patch;

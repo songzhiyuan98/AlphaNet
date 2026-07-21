@@ -1,11 +1,14 @@
 import {
   CreatePostRequestSchema,
   CreatePostWriteResultSchema,
+  DeleteContentRequestSchema,
+  DeleteContentWriteResultSchema,
   ReplyToContentRequestSchema,
   ReplyToContentWriteResultSchema,
   UpdateContentRequestSchema,
   UpdateContentWriteResultSchema,
   type CreatePostWriteResult,
+  type DeleteContentWriteResult,
   type ReplyToContentWriteResult,
   type UpdateContentWriteResult,
   type V1ErrorDetail,
@@ -20,6 +23,7 @@ import {
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
 import {
+  AGENT_WRITE_REQUEST_RATE_LIMIT_CATEGORY,
   createAgentRequestAuthorizationBoundary,
   type AgentRequestRateLimiter,
 } from "./agent-request.js";
@@ -139,7 +143,7 @@ function publicPendingAction(outcome: ResearchWriteOutcome) {
     policy_version: action.policyVersion,
     approval_summary: action.approvalSummary,
   };
-  return action.operation === "update_content"
+  return action.operation === "update_content" || action.operation === "delete_content"
     ? { ...summary, expected_version: action.expectedVersion }
     : summary;
 }
@@ -150,7 +154,9 @@ function serializeCreatePost(
 ): CreatePostWriteResult | null {
   if (outcome.operation !== "create_post") return null;
   const result =
-    outcome.result === null || "rootContentId" in outcome.result
+    outcome.result === null ||
+    !("revisionId" in outcome.result) ||
+    "rootContentId" in outcome.result
       ? null
       : {
           content_id: outcome.result.contentId,
@@ -175,7 +181,9 @@ function serializeReply(
 ): ReplyToContentWriteResult | null {
   if (outcome.operation !== "reply_to_content") return null;
   const result =
-    outcome.result !== null && "rootContentId" in outcome.result
+    outcome.result !== null &&
+    "revisionId" in outcome.result &&
+    "rootContentId" in outcome.result
       ? {
           content_id: outcome.result.contentId,
           root_content_id: outcome.result.rootContentId,
@@ -213,7 +221,9 @@ function serializeUpdateContent(
     return null;
   }
   const result =
-    outcome.result === null || "rootContentId" in outcome.result
+    outcome.result === null ||
+    !("revisionId" in outcome.result) ||
+    "rootContentId" in outcome.result
       ? null
       : {
           content_id: outcome.result.contentId,
@@ -221,6 +231,44 @@ function serializeUpdateContent(
           resource_version: outcome.result.resourceVersion,
         };
   const parsed = UpdateContentWriteResultSchema.safeParse({
+    decision: outcome.decision,
+    status: outcome.status,
+    result,
+    pending_action: publicPendingAction(outcome),
+    error: publicError(outcome.error),
+    request_id: request.id,
+    schema_version: "1",
+  });
+  return parsed.success ? parsed.data : null;
+}
+
+function serializeDeleteContent(
+  request: FastifyRequest,
+  outcome: ResearchWriteOutcome,
+  expectedContentId: string,
+  expectedVersion: number,
+): DeleteContentWriteResult | null {
+  if (outcome.operation !== "delete_content") return null;
+  if (
+    (outcome.result !== null &&
+      (!("lifecycleState" in outcome.result) ||
+        outcome.result.contentId !== expectedContentId ||
+        outcome.result.resourceVersion !== expectedVersion + 1)) ||
+    (outcome.pendingAction !== null &&
+      (outcome.pendingAction.operation !== "delete_content" ||
+        outcome.pendingAction.expectedVersion !== expectedVersion))
+  ) {
+    return null;
+  }
+  const result =
+    outcome.result !== null && "lifecycleState" in outcome.result
+      ? {
+          content_id: outcome.result.contentId,
+          lifecycle_state: outcome.result.lifecycleState,
+          resource_version: outcome.result.resourceVersion,
+        }
+      : null;
+  const parsed = DeleteContentWriteResultSchema.safeParse({
     decision: outcome.decision,
     status: outcome.status,
     result,
@@ -273,7 +321,11 @@ function sendWriteError(
 function sendOutcome(
   reply: FastifyReply,
   outcome: ResearchWriteOutcome,
-  response: CreatePostWriteResult | ReplyToContentWriteResult | UpdateContentWriteResult,
+  response:
+    | CreatePostWriteResult
+    | ReplyToContentWriteResult
+    | UpdateContentWriteResult
+    | DeleteContentWriteResult,
 ): FastifyReply {
   if (outcome.status === "pending_approval" && outcome.pendingAction) {
     void reply.header("location", `/v1/actions/${outcome.pendingAction.id}`);
@@ -281,7 +333,13 @@ function sendOutcome(
     return reply.code(202).send(response);
   }
   if (outcome.status === "succeeded") {
-    return reply.code(outcome.operation === "update_content" ? 200 : 201).send(response);
+    return reply
+      .code(
+        outcome.operation === "update_content" || outcome.operation === "delete_content"
+          ? 200
+          : 201,
+      )
+      .send(response);
   }
   if (outcome.error?.retryAfterMs !== null && outcome.error?.retryAfterMs !== undefined) {
     void reply.header(
@@ -308,6 +366,7 @@ function statusForOutcomeError(code: ResearchWriteErrorCode | undefined): number
     case "IDEMPOTENCY_CONFLICT":
     case "IDEMPOTENCY_IN_PROGRESS":
     case "VERSION_CONFLICT":
+    case "DUPLICATE_CONTENT":
       return 409;
     case "COMMUNITY_RESTRICTED":
     case "NOT_CONTENT_AUTHOR":
@@ -327,11 +386,12 @@ function statusForOutcomeError(code: ResearchWriteErrorCode | undefined): number
 
 function writeAuthorizationBoundary(
   options: ResearchWriteRouteOptions,
-  operation: "create_post" | "reply_to_content" | "update_content",
+  operation: "create_post" | "reply_to_content" | "update_content" | "delete_content",
 ) {
   const boundary = createAgentRequestAuthorizationBoundary({
     operation,
     policyEnforcement: "domain",
+    rateLimitCategory: AGENT_WRITE_REQUEST_RATE_LIMIT_CATEGORY,
     service: options.agentConnectionService,
     ...(options.rateLimiter ? { rateLimiter: options.rateLimiter } : {}),
     ...(options.resolveClientIp ? { resolveClientIp: options.resolveClientIp } : {}),
@@ -353,6 +413,7 @@ export function registerResearchWriteRoutes(
   const createPostAuthorization = writeAuthorizationBoundary(options, "create_post");
   const replyAuthorization = writeAuthorizationBoundary(options, "reply_to_content");
   const updateAuthorization = writeAuthorizationBoundary(options, "update_content");
+  const deleteAuthorization = writeAuthorizationBoundary(options, "delete_content");
 
   app.post(
     "/v1/posts",
@@ -529,6 +590,64 @@ export function registerResearchWriteRoutes(
           request.log.error(
             { operation: outcome.operation, status: outcome.status },
             "Update-content result violated its public response contract",
+          );
+          return sendWriteError(request, reply, new Error("projection invalid"));
+        }
+        return sendOutcome(reply, outcome, response);
+      } catch (error) {
+        return sendWriteError(request, reply, error);
+      }
+    },
+  );
+
+  app.delete(
+    "/v1/content/:contentId",
+    { onRequest: deleteAuthorization.onRequest },
+    async (request, reply) => {
+      const authorization = deleteAuthorization.getAuthorization(request);
+      const key = idempotencyKey(request);
+      const expectedVersion = ifMatchVersion(request);
+      const parameters = request.params as { contentId?: unknown };
+      if (
+        !key ||
+        expectedVersion === null ||
+        !isRecord(request.body) ||
+        "content_id" in request.body ||
+        "expected_version" in request.body ||
+        "idempotency_key" in request.body
+      ) {
+        return validationFailed(request, reply);
+      }
+      const body = DeleteContentRequestSchema.safeParse({
+        ...request.body,
+        content_id: parameters.contentId,
+        expected_version: expectedVersion,
+        idempotency_key: key,
+      });
+      if (!body.success) return validationFailed(request, reply);
+
+      try {
+        const outcome = await options.service.deleteContent(
+          authorization.context,
+          {
+            contentId: body.data.content_id,
+            expectedVersion: body.data.expected_version,
+            mode: body.data.mode,
+            ...(body.data.reason === undefined ? {} : { reason: body.data.reason }),
+            idempotencyKey: body.data.idempotency_key,
+          },
+          { channel: "rest", requestId: request.id },
+        );
+        const response = serializeDeleteContent(
+          request,
+          outcome,
+          body.data.content_id,
+          body.data.expected_version,
+        );
+        if (!response) {
+          request.log.error(
+            { operation: outcome.operation, status: outcome.status },
+            "Delete-content result violated its public response contract",
           );
           return sendWriteError(request, reply, new Error("projection invalid"));
         }

@@ -38,7 +38,7 @@ function serializeAction(
   action: AgentPendingActionView,
 ): GetActionStatusResponse | null {
   const expectedVersion =
-    action.operation === "update_content"
+    action.operation === "update_content" || action.operation === "delete_content"
       ? { expected_version: action.expectedVersion }
       : {};
   const parsed = GetActionStatusResponseSchema.safeParse({

@@ -205,6 +205,30 @@ function updateDetailFor(bodyMarkdown: string): OwnerActionDetail {
   }).action;
 }
 
+function deleteDetailFor(mode: "permanent" | "soft", reason?: string): OwnerActionDetail {
+  const base = detailFor();
+  return OwnerActionDetailResponseSchema.parse({
+    action: {
+      ...base,
+      operation: "delete_content",
+      target: { id: ids.content, type: "content" },
+      approval_summary:
+        mode === "permanent"
+          ? "Permanently delete one research post."
+          : "Soft-delete one research post.",
+      preview: {
+        operation: "delete_content",
+        content_id: ids.content,
+        expected_version: 7,
+        mode,
+        ...(reason === undefined ? {} : { reason }),
+      },
+    },
+    request_id: "req-delete-approval-detail",
+    schema_version: "1",
+  }).action;
+}
+
 function summaryFor(action: OwnerActionDetail): OwnerActionSummary {
   return {
     id: action.id,
@@ -310,6 +334,45 @@ describe("ApprovalInbox", () => {
     expect(fetchMock.mock.calls.map(([input]) => requestUrl(input))).not.toContain(
       "https://example.com/revised-research",
     );
+  });
+
+  it.each([
+    {
+      intent: "软删除",
+      mode: "soft" as const,
+      reason: "研究结论已被更正。",
+      summary: "使其退出社区公开内容流",
+    },
+    {
+      intent: "永久删除",
+      mode: "permanent" as const,
+      reason: '<img src="x" onerror="alert(1)">永久删除原因',
+      summary: "请求永久删除目标内容",
+    },
+  ])("renders the frozen $intent intent and reason as inert text", async (scenario) => {
+    const pending = deleteDetailFor(scenario.mode, scenario.reason);
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = requestUrl(input);
+      if (url === queuePath) {
+        return Promise.resolve(Response.json(listPayload([pending])));
+      }
+      if (url === detailPath) {
+        return Promise.resolve(Response.json(detailPayload(pending)));
+      }
+      throw new Error(`Unexpected approval request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<ApprovalInbox />);
+
+    const intent = await screen.findByTestId("approval-delete-intent");
+    expect(intent.textContent).toContain(scenario.summary);
+    expect(screen.getAllByText(scenario.intent).length).toBeGreaterThan(0);
+    expect(screen.getByText(ids.content)).toBeTruthy();
+    expect(screen.getByTestId("approval-content-expected-version").textContent).toBe("7");
+    const reason = screen.getByTestId("approval-delete-reason");
+    expect(reason.textContent).toBe(scenario.reason);
+    expect(reason.querySelector("img")).toBeNull();
   });
 
   it.each([

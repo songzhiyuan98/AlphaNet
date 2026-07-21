@@ -50,6 +50,15 @@ export interface UpdateContentCommandInput {
   editSummary?: string | undefined;
 }
 
+export type DeleteContentMode = "soft" | "permanent";
+
+export interface DeleteContentCommandInput {
+  contentId: string;
+  expectedVersion: number;
+  mode: DeleteContentMode;
+  reason?: string | undefined;
+}
+
 export interface NormalizedResearchSourceLink {
   url: string;
   title?: string | undefined;
@@ -112,11 +121,23 @@ export interface NormalizedUpdateContentCommand {
   frozenUpdateBaseline?: FrozenUpdateContentBaseline | undefined;
 }
 
+export interface NormalizedDeleteContentCommand {
+  operation: "delete_content";
+  contentId: string;
+  expectedVersion: number;
+  mode: DeleteContentMode;
+  reason?: string | undefined;
+}
+
 export type NormalizedResearchCommand =
-  NormalizedCreatePostCommand | NormalizedReplyCommand | NormalizedUpdateContentCommand;
+  | NormalizedCreatePostCommand
+  | NormalizedReplyCommand
+  | NormalizedUpdateContentCommand
+  | NormalizedDeleteContentCommand;
 
 export type ResearchCommandValidationErrorCode =
   | "DUPLICATE_COMMUNITY_TARGET"
+  | "DELETE_MODE_INVALID"
   | "IDENTIFIER_INVALID"
   | "PATCH_EMPTY"
   | "SOURCE_LINK_CONFLICT"
@@ -386,10 +407,55 @@ export function normalizeUpdateContentCommand(
   };
 }
 
+export function normalizeDeleteContentCommand(
+  input: DeleteContentCommandInput,
+): NormalizedDeleteContentCommand {
+  if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
+    throw new ResearchCommandValidationError(
+      "VERSION_INVALID",
+      "The expected content version must be a positive safe integer.",
+    );
+  }
+  if (input.mode !== "soft" && input.mode !== "permanent") {
+    throw new ResearchCommandValidationError(
+      "DELETE_MODE_INVALID",
+      "The delete mode must be explicitly soft or permanent.",
+    );
+  }
+
+  let reason: string | undefined;
+  if (input.reason !== undefined) {
+    reason = normalizeOptionalLabel(input.reason);
+    if (reason === undefined || [...reason].length > 500 || /\p{Cc}/u.test(reason)) {
+      throw new ResearchCommandValidationError(
+        "TEXT_INVALID",
+        "A delete reason must be non-blank, control-free, and at most 500 characters.",
+      );
+    }
+  }
+
+  return {
+    operation: "delete_content",
+    contentId: normalizeIdentifier(input.contentId),
+    expectedVersion: input.expectedVersion,
+    mode: input.mode,
+    ...(reason === undefined ? {} : { reason }),
+  };
+}
+
 export function freezeResearchCommandMentionActors<T extends NormalizedResearchCommand>(
   command: T,
   actorIds: readonly string[],
 ): T {
+  if (command.operation === "delete_content") {
+    if (actorIds.length !== 0) {
+      throw new ResearchCommandValidationError(
+        "IDENTIFIER_INVALID",
+        "Delete commands cannot carry frozen mention recipients.",
+      );
+    }
+    return command;
+  }
   const normalizedActorIds = actorIds.map(normalizeIdentifier);
   if (new Set(normalizedActorIds).size !== normalizedActorIds.length) {
     throw new ResearchCommandValidationError(

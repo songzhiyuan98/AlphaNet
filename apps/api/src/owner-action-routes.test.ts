@@ -150,6 +150,28 @@ function updateDetail(): OwnerPendingActionDetailView {
   return view;
 }
 
+function deleteDetail(): OwnerPendingActionDetailView {
+  const view = {
+    ...pendingDetail(),
+    approvalSummary: "Permanently delete the frozen AMD research post.",
+    operation: "delete_content",
+    target: { id: ids.content, type: "content" },
+    expectedVersion: 7,
+    command: {
+      operation: "delete_content",
+      contentId: ids.content,
+      expectedVersion: 7,
+      mode: "permanent",
+      reason: "Superseded by a corrected research post.",
+    },
+  } satisfies OwnerPendingActionDetailView;
+  Object.assign(view.command, {
+    idempotencyKey: "private-delete-key",
+    normalizedInputCiphertext: "private-ciphertext",
+  });
+  return view;
+}
+
 function approvedDetail(
   state: "approved" | "succeeded" = "approved",
 ): OwnerPendingActionDetailView {
@@ -279,7 +301,7 @@ describe("Owner pending-action read routes", () => {
       url:
         `/v1/owner/pending-actions?agent_id=${ids.agent}` +
         "&states=pending_approval,approved" +
-        "&operations=create_post,reply_to_content,update_content" +
+        "&operations=create_post,reply_to_content,update_content,delete_content" +
         "&limit=20&cursor=cursor_01",
     });
 
@@ -289,7 +311,7 @@ describe("Owner pending-action read routes", () => {
     expect(listActions).toHaveBeenCalledExactlyOnceWith(ids.owner, {
       agentId: ids.agent,
       states: ["pending_approval", "approved"],
-      operations: ["create_post", "reply_to_content", "update_content"],
+      operations: ["create_post", "reply_to_content", "update_content", "delete_content"],
       limit: 20,
       cursor: "cursor_01",
     });
@@ -298,7 +320,7 @@ describe("Owner pending-action read routes", () => {
   it.each([
     "/v1/owner/pending-actions?states=pending_approval&states=approved",
     "/v1/owner/pending-actions?states=pending_approval,,approved",
-    "/v1/owner/pending-actions?operations=create_post,delete_content",
+    "/v1/owner/pending-actions?operations=create_post,set_reaction",
     "/v1/owner/pending-actions?limit=01",
     "/v1/owner/pending-actions?unknown=value",
   ])("rejects noncanonical or unknown list query %s", async (url) => {
@@ -380,6 +402,28 @@ describe("Owner pending-action read routes", () => {
     });
     expect(response.body).not.toContain("frozenMentionActorIds");
     expect(response.body).not.toContain(ids.owner);
+  });
+
+  it("serializes a delete intent through an explicit public-field allowlist", async () => {
+    const { app } = createApp({
+      getAction: () => Promise.resolve(deleteDetail()),
+    });
+    const response = await app.inject({
+      method: "GET",
+      url: `/v1/owner/pending-actions/${ids.action}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    const parsed = OwnerActionDetailResponseSchema.parse(response.json());
+    expect(parsed.action.preview).toEqual({
+      operation: "delete_content",
+      content_id: ids.content,
+      expected_version: 7,
+      mode: "permanent",
+      reason: "Superseded by a corrected research post.",
+    });
+    expect(response.body).not.toContain("private-delete-key");
+    expect(response.body).not.toContain("private-ciphertext");
   });
 
   it("rejects query fields on a detail request", async () => {
@@ -591,6 +635,22 @@ describe("Owner pending-action errors and response boundary", () => {
 
     expect(response.statusCode).toBe(503);
     expect(response.body).not.toContain("FX sensitivity evidence");
+    expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
+      "OWNER_ACTION_UNAVAILABLE",
+    );
+  });
+
+  it("fails closed when a delete preview disagrees with the frozen expected version", async () => {
+    const invalid = deleteDetail();
+    invalid.expectedVersion = 8;
+    const { app } = createApp({ getAction: () => Promise.resolve(invalid) });
+    const response = await app.inject({
+      method: "GET",
+      url: `/v1/owner/pending-actions/${ids.action}`,
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.body).not.toContain("corrected research post");
     expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
       "OWNER_ACTION_UNAVAILABLE",
     );

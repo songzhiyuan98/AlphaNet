@@ -15,6 +15,7 @@ import {
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
 import {
+  AGENT_WRITE_REQUEST_RATE_LIMIT_CATEGORY,
   createAgentRequestAuthorizationBoundary,
   type AgentRequestRateLimiter,
 } from "./agent-request.js";
@@ -149,10 +150,8 @@ export function registerReactionRoutes(
   const authorization = createAgentRequestAuthorizationBoundary({
     operation: "set_reaction",
     policyEnforcement: "domain",
+    rateLimitCategory: AGENT_WRITE_REQUEST_RATE_LIMIT_CATEGORY,
     service: options.agentConnectionService,
-    limits: {
-      credential: { max: 20, window: 60 },
-    },
     ...(options.rateLimiter ? { rateLimiter: options.rateLimiter } : {}),
     ...(options.resolveClientIp ? { resolveClientIp: options.resolveClientIp } : {}),
   });

@@ -161,6 +161,7 @@ async function runBoundary(options: {
   context?: AgentCredentialContext;
   operation?: AgentOperation;
   policyEnforcement?: AgentRequestBoundaryOptions["policyEnforcement"];
+  rateLimitCategory?: AgentRequestBoundaryOptions["rateLimitCategory"];
   rateLimiter?: AgentRequestRateLimiter;
   service?: Pick<AgentConnectionService, "authenticateStaticApiKey">;
   url?: string | undefined;
@@ -182,6 +183,9 @@ async function runBoundary(options: {
   };
   if (options.rateLimiter) {
     boundaryOptions.rateLimiter = options.rateLimiter;
+  }
+  if (options.rateLimitCategory) {
+    boundaryOptions.rateLimitCategory = options.rateLimitCategory;
   }
   const result = await authorizeAgentRequest(
     request.request,
@@ -286,6 +290,56 @@ describe("authorizeAgentRequest", () => {
       reason: "OWNER_APPROVAL_REQUIRED",
       scopeSatisfied: true,
     });
+  });
+
+  it("adds a namespaced category budget without changing any global bucket", async () => {
+    const limiter = allowAllLimiter();
+    const { result } = await runBoundary({
+      authorization: `Bearer ${apiKey}`,
+      rateLimitCategory: {
+        limits: { credential: { max: 20, window: 60 } },
+        namespace: "write",
+      },
+      rateLimiter: limiter,
+    });
+
+    expect(result).not.toBeNull();
+    expect(limiter.consume.mock.calls).toEqual([
+      ["ip:203.0.113.10:agent-api", { max: 120, window: 60 }],
+      [`credential:${ids.credential}:agent-api`, { max: 120, window: 60 }],
+      [`agent:${ids.agent}:agent-api`, { max: 120, window: 60 }],
+      [`owner:${ids.owner}:agent-api`, { max: 120, window: 60 }],
+      [`credential:${ids.credential}:agent-api:write`, { max: 20, window: 60 }],
+    ]);
+  });
+
+  it("fails closed when an additional category limiter is unavailable", async () => {
+    const consume = vi.fn((key: string) =>
+      key.endsWith(":agent-api:write")
+        ? Promise.reject(new Error(`category included ${apiKey}`))
+        : Promise.resolve({ allowed: true, retryAfter: null }),
+    );
+    const { reply, request, result } = await runBoundary({
+      authorization: `Bearer ${apiKey}`,
+      rateLimitCategory: {
+        limits: { credential: { max: 20, window: 60 } },
+        namespace: "write",
+      },
+      rateLimiter: { consume },
+    });
+
+    expect(result).toBeNull();
+    expect(reply.statusCode()).toBe(503);
+    expectV1Error(reply.payload(), "TEMPORARILY_UNAVAILABLE");
+    expect(consume).toHaveBeenCalledTimes(5);
+    expect(consume).toHaveBeenLastCalledWith(
+      `credential:${ids.credential}:agent-api:write`,
+      { max: 20, window: 60 },
+    );
+    expect(JSON.stringify(request.errorLog.mock.calls)).not.toContain(apiKey);
+    expect(JSON.stringify(request.errorLog.mock.calls)).not.toContain(
+      "category included",
+    );
   });
 
   it.each([

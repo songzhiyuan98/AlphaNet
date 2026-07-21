@@ -1,5 +1,6 @@
 import {
   CreatePostWriteResultSchema,
+  DeleteContentWriteResultSchema,
   ReplyToContentWriteResultSchema,
   UpdateContentWriteResultSchema,
   V1ErrorResponseSchema,
@@ -33,6 +34,10 @@ const ids = {
 const apiKey = "aln_v1_abcdefghijkl_abcdefghijklmnopqrstuvwxyz0123456789ABCDE";
 const now = new Date("2026-07-20T12:00:00.000Z");
 const apps: FastifyInstance[] = [];
+type CreatePostOutcome = Extract<ResearchWriteOutcome, { operation: "create_post" }>;
+type ReplyOutcome = Extract<ResearchWriteOutcome, { operation: "reply_to_content" }>;
+type UpdateOutcome = Extract<ResearchWriteOutcome, { operation: "update_content" }>;
+type DeleteOutcome = Extract<ResearchWriteOutcome, { operation: "delete_content" }>;
 
 afterEach(async () => {
   await Promise.all(apps.splice(0).map((app) => app.close()));
@@ -93,32 +98,59 @@ function context(options?: {
   };
 }
 
+function pendingOutcome(operation: "create_post"): CreatePostOutcome;
+function pendingOutcome(operation: "reply_to_content"): ReplyOutcome;
+function pendingOutcome(operation: "update_content"): UpdateOutcome;
+function pendingOutcome(operation: "delete_content"): DeleteOutcome;
 function pendingOutcome(
   operation: ResearchWriteOutcome["operation"],
 ): ResearchWriteOutcome {
-  return {
-    operation,
+  const common = {
     decision: "require_approval",
     status: "pending_approval",
     result: null,
-    pendingAction: {
-      id: ids.action,
-      operation,
-      state: "pending_approval",
-      expiresAt: new Date(now.valueOf() + 86_400_000),
-      inputDigest: `sha256:${"a".repeat(64)}`,
-      requestedAt: now,
-      decisionId: "b0000000-0000-4000-8000-000000000001",
-      policyVersion: `${ids.policy}:1`,
-      approvalSummary: "Create research content.",
-      ...(operation === "update_content" ? { expectedVersion: 2 } : {}),
-    },
     error: null,
     replayed: false,
+  } as const;
+  const pending = {
+    id: ids.action,
+    state: "pending_approval" as const,
+    expiresAt: new Date(now.valueOf() + 86_400_000),
+    inputDigest: `sha256:${"a".repeat(64)}`,
+    requestedAt: now,
+    decisionId: "b0000000-0000-4000-8000-000000000001",
+    policyVersion: `${ids.policy}:1`,
+    approvalSummary: "Create research content.",
   };
+  switch (operation) {
+    case "create_post":
+      return {
+        ...common,
+        operation,
+        pendingAction: { ...pending, operation },
+      };
+    case "reply_to_content":
+      return {
+        ...common,
+        operation,
+        pendingAction: { ...pending, operation },
+      };
+    case "update_content":
+      return {
+        ...common,
+        operation,
+        pendingAction: { ...pending, operation, expectedVersion: 2 },
+      };
+    case "delete_content":
+      return {
+        ...common,
+        operation,
+        pendingAction: { ...pending, operation, expectedVersion: 2 },
+      };
+  }
 }
 
-function updateOutcome(): ResearchWriteOutcome {
+function updateOutcome(): UpdateOutcome {
   return {
     operation: "update_content",
     decision: "allow",
@@ -134,7 +166,7 @@ function updateOutcome(): ResearchWriteOutcome {
   };
 }
 
-function replyOutcome(): ResearchWriteOutcome {
+function replyOutcome(): ReplyOutcome {
   return {
     operation: "reply_to_content",
     decision: "allow",
@@ -151,7 +183,23 @@ function replyOutcome(): ResearchWriteOutcome {
   };
 }
 
-function deniedOutcome(): ResearchWriteOutcome {
+function deleteOutcome(): DeleteOutcome {
+  return {
+    operation: "delete_content",
+    decision: "allow",
+    status: "succeeded",
+    result: {
+      contentId: ids.content,
+      lifecycleState: "deleted",
+      resourceVersion: 3,
+    },
+    pendingAction: null,
+    error: null,
+    replayed: false,
+  };
+}
+
+function deniedOutcome(): CreatePostOutcome {
   return {
     operation: "create_post",
     decision: "deny",
@@ -169,16 +217,37 @@ function deniedOutcome(): ResearchWriteOutcome {
   };
 }
 
+interface WriteErrorOutcomeOptions {
+  decision?: ResearchWriteOutcome["decision"] | undefined;
+  status?: ResearchWriteOutcome["status"] | undefined;
+}
+
+function writeErrorOutcome(
+  operation: "create_post",
+  code: ResearchWriteErrorCode,
+  options?: WriteErrorOutcomeOptions,
+): CreatePostOutcome;
+function writeErrorOutcome(
+  operation: "reply_to_content",
+  code: ResearchWriteErrorCode,
+  options?: WriteErrorOutcomeOptions,
+): ReplyOutcome;
+function writeErrorOutcome(
+  operation: "update_content",
+  code: ResearchWriteErrorCode,
+  options?: WriteErrorOutcomeOptions,
+): UpdateOutcome;
+function writeErrorOutcome(
+  operation: "delete_content",
+  code: ResearchWriteErrorCode,
+  options?: WriteErrorOutcomeOptions,
+): DeleteOutcome;
 function writeErrorOutcome(
   operation: ResearchWriteOutcome["operation"],
   code: ResearchWriteErrorCode,
-  options: {
-    decision?: ResearchWriteOutcome["decision"] | undefined;
-    status?: ResearchWriteOutcome["status"] | undefined;
-  } = {},
+  options: WriteErrorOutcomeOptions = {},
 ): ResearchWriteOutcome {
-  return {
-    operation,
+  const common = {
     decision: options.decision ?? "allow",
     status: options.status ?? "failed",
     result: null,
@@ -186,12 +255,23 @@ function writeErrorOutcome(
     error: new ResearchWriteError(code, `Expected ${code} test failure.`).toDetail(),
     replayed: false,
   };
+  switch (operation) {
+    case "create_post":
+      return { ...common, operation };
+    case "reply_to_content":
+      return { ...common, operation };
+    case "update_content":
+      return { ...common, operation };
+    case "delete_content":
+      return { ...common, operation };
+  }
 }
 
 function createApp(options?: {
   bodyLimit?: number;
   context?: AgentCredentialContext;
   createPost?: ResearchWriteService["createPost"];
+  deleteContent?: ResearchWriteService["deleteContent"];
   rateLimiter?: AgentRequestRateLimiter;
   replyToContent?: ResearchWriteService["replyToContent"];
   updateContent?: ResearchWriteService["updateContent"];
@@ -202,6 +282,9 @@ function createApp(options?: {
   });
   const createPost = vi.fn<ResearchWriteService["createPost"]>(
     options?.createPost ?? (() => Promise.resolve(pendingOutcome("create_post"))),
+  );
+  const deleteContent = vi.fn<ResearchWriteService["deleteContent"]>(
+    options?.deleteContent ?? (() => Promise.resolve(deleteOutcome())),
   );
   const replyToContent = vi.fn<ResearchWriteService["replyToContent"]>(
     options?.replyToContent ?? (() => Promise.resolve(replyOutcome())),
@@ -218,6 +301,7 @@ function createApp(options?: {
     service: {
       checkReady: vi.fn(() => Promise.resolve()),
       createPost,
+      deleteContent,
       replyToContent,
       updateContent,
     },
@@ -227,6 +311,7 @@ function createApp(options?: {
     app,
     authenticateStaticApiKey,
     createPost,
+    deleteContent,
     replyToContent,
     updateContent,
   };
@@ -299,7 +384,7 @@ describe("Research write Agent routes", () => {
       expect(
         V1ErrorResponseSchema.parse(insufficientScopeResponse.json()).error.code,
       ).toBe("SCOPE_REQUIRED");
-      expect(insufficientScopeLimit).toHaveBeenCalledTimes(4);
+      expect(insufficientScopeLimit).toHaveBeenCalledTimes(5);
       expect(insufficientScope.authenticateStaticApiKey).toHaveBeenCalledOnce();
       expect(insufficientScope.createPost).not.toHaveBeenCalled();
 
@@ -318,7 +403,7 @@ describe("Research write Agent routes", () => {
       });
 
       expect(authorizedResponse.statusCode).toBe(expectedParseStatus);
-      expect(authorizedLimit).toHaveBeenCalledTimes(4);
+      expect(authorizedLimit).toHaveBeenCalledTimes(5);
       expect(authorized.authenticateStaticApiKey).toHaveBeenCalledOnce();
       expect(authorized.createPost).not.toHaveBeenCalled();
     },
@@ -358,7 +443,11 @@ describe("Research write Agent routes", () => {
       { channel: "rest", requestId: createPost.mock.calls[0]?.[2].requestId },
     );
     expect(createPost.mock.calls[0]?.[2].requestId).toBeTypeOf("string");
-    expect(consume).toHaveBeenCalledTimes(4);
+    expect(consume).toHaveBeenCalledTimes(5);
+    expect(consume).toHaveBeenCalledWith(`credential:${ids.credential}:agent-api:write`, {
+      max: 20,
+      window: 60,
+    });
   });
 
   it("injects the reply parent from the path and returns 201 on success", async () => {
@@ -484,6 +573,271 @@ describe("Research write Agent routes", () => {
       },
       method: "PATCH",
       payload: { patch: { symbols: ["AMD"] } },
+      url: `/v1/content/${ids.content}`,
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
+      "WRITE_UNAVAILABLE",
+    );
+  });
+
+  it("injects delete transport fields, maps a soft-delete request, and returns 200", async () => {
+    const { app, deleteContent } = createApp({
+      context: context({ tier: "autonomous" }),
+    });
+    const response = await app.inject({
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "idempotency-key": "delete-amd-v2",
+        "if-match": '"2"',
+      },
+      method: "DELETE",
+      payload: {
+        mode: "soft",
+        reason: "Superseded by independently verified evidence.",
+      },
+      url: `/v1/content/${ids.content}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store, private");
+    expect(DeleteContentWriteResultSchema.parse(response.json())).toMatchObject({
+      decision: "allow",
+      status: "succeeded",
+      result: {
+        content_id: ids.content,
+        lifecycle_state: "deleted",
+        resource_version: 3,
+      },
+      pending_action: null,
+      error: null,
+    });
+    expect(deleteContent).toHaveBeenCalledOnce();
+    expect(deleteContent.mock.calls[0]?.[0].agent.id).toBe(ids.agent);
+    expect(deleteContent.mock.calls[0]?.[1]).toEqual({
+      contentId: ids.content,
+      expectedVersion: 2,
+      idempotencyKey: "delete-amd-v2",
+      mode: "soft",
+      reason: "Superseded by independently verified evidence.",
+    });
+    expect(deleteContent.mock.calls[0]?.[2].channel).toBe("rest");
+    expect(deleteContent.mock.calls[0]?.[2].requestId).toBeTypeOf("string");
+  });
+
+  it("returns 202 and the optimistic version for a delete awaiting approval", async () => {
+    const { app, deleteContent } = createApp({
+      deleteContent: () => Promise.resolve(pendingOutcome("delete_content")),
+    });
+    const response = await app.inject({
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "idempotency-key": "delete-amd-assisted-v2",
+        "if-match": '"2"',
+      },
+      method: "DELETE",
+      payload: { mode: "soft" },
+      url: `/v1/content/${ids.content}`,
+    });
+
+    expect(response.statusCode).toBe(202);
+    expect(response.headers.location).toBe(`/v1/actions/${ids.action}`);
+    expect(response.headers["retry-after"]).toBe("5");
+    expect(DeleteContentWriteResultSchema.parse(response.json())).toMatchObject({
+      decision: "require_approval",
+      status: "pending_approval",
+      result: null,
+      pending_action: {
+        operation: "delete_content",
+        expected_version: 2,
+      },
+    });
+    expect(deleteContent).toHaveBeenCalledOnce();
+  });
+
+  it("returns an approved delete replay as 200 with its terminal action", async () => {
+    const approved = deleteOutcome();
+    approved.decision = "require_approval";
+    approved.pendingAction = {
+      ...pendingOutcome("delete_content").pendingAction!,
+      state: "succeeded",
+    };
+    const { app } = createApp({ deleteContent: () => Promise.resolve(approved) });
+    const response = await app.inject({
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "idempotency-key": "delete-amd-approved-v2",
+        "if-match": '"2"',
+      },
+      method: "DELETE",
+      payload: { mode: "soft" },
+      url: `/v1/content/${ids.content}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(DeleteContentWriteResultSchema.parse(response.json())).toMatchObject({
+      decision: "require_approval",
+      status: "succeeded",
+      result: { resource_version: 3 },
+      pending_action: {
+        operation: "delete_content",
+        expected_version: 2,
+        state: "succeeded",
+      },
+    });
+  });
+
+  it.each([
+    {
+      headers: { "idempotency-key": "delete-missing-version" },
+      label: "a missing If-Match",
+      payload: { mode: "soft" },
+    },
+    {
+      headers: { "idempotency-key": "delete-bare-version", "if-match": "2" },
+      label: "a non-entity-tag If-Match",
+      payload: { mode: "soft" },
+    },
+    {
+      headers: { "idempotency-key": "delete-missing-mode", "if-match": '"2"' },
+      label: "a missing mode",
+      payload: {},
+    },
+    {
+      headers: { "idempotency-key": "delete-invalid-mode", "if-match": '"2"' },
+      label: "an unknown mode",
+      payload: { mode: "archive" },
+    },
+    {
+      headers: { "idempotency-key": "delete-private-field", "if-match": '"2"' },
+      label: "a transport-owned expected_version body field",
+      payload: { expected_version: 2, mode: "soft" },
+    },
+    {
+      headers: { "idempotency-key": "delete-private-content", "if-match": '"2"' },
+      label: "a transport-owned content_id body field",
+      payload: { content_id: ids.root, mode: "soft" },
+    },
+    {
+      headers: { "idempotency-key": "delete-private-key", "if-match": '"2"' },
+      label: "a transport-owned idempotency_key body field",
+      payload: { idempotency_key: "body-key", mode: "soft" },
+    },
+    {
+      headers: { "idempotency-key": "delete-unknown-field", "if-match": '"2"' },
+      label: "an unknown body field",
+      payload: { mode: "soft", private_note: "must not be accepted" },
+    },
+    {
+      headers: { "idempotency-key": "delete-untrimmed-reason", "if-match": '"2"' },
+      label: "an untrimmed reason",
+      payload: { mode: "soft", reason: " private reason " },
+    },
+    {
+      headers: { "if-match": '"2"' },
+      label: "a missing idempotency key",
+      payload: { mode: "soft" },
+    },
+  ])("rejects $label before invoking delete", async ({ headers, payload }) => {
+    const { app, deleteContent } = createApp();
+    const response = await app.inject({
+      headers: { authorization: `Bearer ${apiKey}`, ...headers },
+      method: "DELETE",
+      payload,
+      url: `/v1/content/${ids.content}`,
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
+      "VALIDATION_ERROR",
+    );
+    expect(deleteContent).not.toHaveBeenCalled();
+  });
+
+  it("requires exactly one If-Match and Idempotency-Key field line for delete", async () => {
+    const { app, deleteContent } = createApp();
+    const duplicateIfMatch: Record<string, string | string[]> = {
+      "if-match": ['"2"', '"3"'],
+    };
+    const duplicatedVersion = await app.inject({
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "idempotency-key": "delete-duplicate-version",
+        ...duplicateIfMatch,
+      },
+      method: "DELETE",
+      payload: { mode: "soft" },
+      url: `/v1/content/${ids.content}`,
+    });
+    const duplicateIdempotencyKey: Record<string, string | string[]> = {
+      "idempotency-key": ["delete-one", "delete-two"],
+    };
+    const duplicatedKey = await app.inject({
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "if-match": '"2"',
+        ...duplicateIdempotencyKey,
+      },
+      method: "DELETE",
+      payload: { mode: "soft" },
+      url: `/v1/content/${ids.content}`,
+    });
+
+    expect(duplicatedVersion.statusCode).toBe(422);
+    expect(duplicatedKey.statusCode).toBe(422);
+    expect(deleteContent).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { code: "CONTENT_NOT_FOUND" as const, statusCode: 404 },
+    { code: "NOT_CONTENT_AUTHOR" as const, statusCode: 403 },
+    { code: "VERSION_CONFLICT" as const, statusCode: 409 },
+    { code: "POLICY_DENIED" as const, statusCode: 403 },
+  ])("maps delete $code into its write-result contract", async ({ code, statusCode }) => {
+    const { app } = createApp({
+      context: context({ tier: "autonomous" }),
+      deleteContent: () =>
+        Promise.resolve(
+          writeErrorOutcome("delete_content", code, {
+            ...(code === "POLICY_DENIED" ? { decision: "deny", status: "denied" } : {}),
+          }),
+        ),
+    });
+    const privateReason = "PRIVATE-DELETE-REASON-MARKER";
+    const response = await app.inject({
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "idempotency-key": `delete-${code.toLowerCase()}`,
+        "if-match": '"2"',
+      },
+      method: "DELETE",
+      payload: { mode: "soft", reason: privateReason },
+      url: `/v1/content/${ids.content}`,
+    });
+
+    expect(response.statusCode).toBe(statusCode);
+    expect(response.body).not.toContain(privateReason);
+    expect(DeleteContentWriteResultSchema.parse(response.json())).toMatchObject({
+      status: code === "POLICY_DENIED" ? "denied" : "failed",
+      result: null,
+      pending_action: null,
+      error: { code },
+    });
+  });
+
+  it("fails closed when a delete projection targets another content version", async () => {
+    const corrupt = deleteOutcome();
+    corrupt.result = { ...corrupt.result!, resourceVersion: 4 };
+    const { app } = createApp({ deleteContent: () => Promise.resolve(corrupt) });
+    const response = await app.inject({
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "idempotency-key": "delete-corrupt-version",
+        "if-match": '"2"',
+      },
+      method: "DELETE",
+      payload: { mode: "soft" },
       url: `/v1/content/${ids.content}`,
     });
 
@@ -820,12 +1174,20 @@ describe("Research write Agent routes", () => {
     { code: "IDEMPOTENCY_CONFLICT" as const, statusCode: 409 },
     { code: "IDEMPOTENCY_IN_PROGRESS" as const, statusCode: 409 },
     { code: "IDEMPOTENCY_RESULT_CORRUPT" as const, statusCode: 503 },
+    { code: "DUPLICATE_CONTENT" as const, statusCode: 409 },
   ])(
     "returns $code in the create-post write-result shape",
     async ({ code, statusCode }) => {
       const { app } = createApp({
         context: context({ tier: "autonomous" }),
-        createPost: () => Promise.resolve(writeErrorOutcome("create_post", code)),
+        createPost: () =>
+          Promise.resolve(
+            writeErrorOutcome("create_post", code, {
+              ...(code === "DUPLICATE_CONTENT"
+                ? { decision: "deny", status: "denied" }
+                : {}),
+            }),
+          ),
       });
       const response = await app.inject({
         headers: {
@@ -843,8 +1205,8 @@ describe("Research write Agent routes", () => {
 
       expect(response.statusCode).toBe(statusCode);
       expect(CreatePostWriteResultSchema.parse(response.json())).toMatchObject({
-        decision: "allow",
-        status: "failed",
+        decision: code === "DUPLICATE_CONTENT" ? "deny" : "allow",
+        status: code === "DUPLICATE_CONTENT" ? "denied" : "failed",
         result: null,
         pending_action: null,
         error: { code },
@@ -885,7 +1247,7 @@ describe("Research write Agent routes", () => {
 
   it("fails closed when an outcome does not match the operation contract", async () => {
     const invalidOutcome = pendingOutcome("create_post");
-    invalidOutcome.operation = "reply_to_content";
+    Reflect.set(invalidOutcome, "operation", "reply_to_content");
     invalidOutcome.pendingAction = {
       ...invalidOutcome.pendingAction!,
       approvalSummary: "private draft marker",

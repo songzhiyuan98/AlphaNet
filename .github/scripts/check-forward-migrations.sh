@@ -18,6 +18,7 @@ readonly agent_policy_control_checksum="5311bfde7d77bd2ddf6d7207675284a3259db172
 readonly follow_graph_checksum="3505e7a190e266d792c4f0e7b03997a6042687f1fe12550fa80d1250fa2cf83c"
 readonly content_revision_write_checksum="c0e3b1f605651e30a619caede945eb978840a725dc0585bb1e05abc9d88d484c"
 readonly content_search_v1_checksum="ae8c3d68863d78b8d131129a4f3cedd4f6026e733530eaf8f6a563b7fdfeeaf2"
+readonly content_delete_antispam_v1_checksum="c02af8f023edc8ab6eb58fc78afef9a5e4c0909f4833e04666ddfcfc384a2b18"
 readonly suffix="${GITHUB_RUN_ID:-local}_${RANDOM}_$$"
 readonly empty_database="alphanet_migration_empty_${suffix}"
 readonly owner_database="alphanet_migration_owner_${suffix}"
@@ -1021,9 +1022,10 @@ for database in \
       --set=agent_policy_control_checksum="${agent_policy_control_checksum}" \
       --set=follow_graph_checksum="${follow_graph_checksum}" \
       --set=content_revision_write_checksum="${content_revision_write_checksum}" \
-      --set=content_search_v1_checksum="${content_search_v1_checksum}" <<'SQL'
+      --set=content_search_v1_checksum="${content_search_v1_checksum}" \
+      --set=content_delete_antispam_v1_checksum="${content_delete_antispam_v1_checksum}" <<'SQL'
 SELECT
-  (SELECT count(*) FROM system.schema_migrations) = 13
+  (SELECT count(*) FROM system.schema_migrations) = 14
   AND EXISTS (
     SELECT 1
     FROM system.schema_migrations
@@ -1083,6 +1085,20 @@ SELECT
       AND name = 'content_search_v1'
       AND checksum = :'content_search_v1_checksum'
   )
+  AND EXISTS (
+    SELECT 1
+    FROM system.schema_migrations
+    WHERE version = '000014'
+      AND name = 'content_delete_antispam_v1'
+      AND checksum = :'content_delete_antispam_v1_checksum'
+  )
+  AND to_regclass('platform.content_revisions_actor_hash_recent_idx')
+    IS NOT NULL
+  AND to_regclass('platform.content_items_reply_root_author_published_idx')
+    IS NOT NULL
+  AND to_regclass(
+    'platform.action_logs_owner_content_publish_succeeded_idx'
+  ) IS NOT NULL
   AND EXISTS (
     SELECT 1
     FROM information_schema.columns
@@ -1176,6 +1192,24 @@ SELECT
       AND routine.prosecdef
       AND 'search_path=pg_catalog' = ANY (routine.proconfig)
   )
+  AND position(
+    'content.delete_content'
+    IN pg_get_functiondef(
+      'platform.validate_runtime_content_write_provenance()'::regprocedure
+    )
+  ) > 0
+  AND position(
+    'content.deleted'
+    IN pg_get_functiondef(
+      'platform.validate_runtime_content_write_provenance()'::regprocedure
+    )
+  ) > 0
+  AND position(
+    'delete_content'
+    IN pg_get_functiondef(
+      'platform.validate_runtime_content_write_provenance()'::regprocedure
+    )
+  ) > 0
   AND EXISTS (
     SELECT 1
     FROM pg_proc AS routine
@@ -1719,4 +1753,4 @@ SQL
   fi
 done
 
-echo "Empty, Owner-schema, and published Agent-v1 paths all reach the Content Search v1 schema."
+echo "Empty, Owner-schema, and published Agent-v1 paths all reach the Content Delete/Anti-spam v1 schema."

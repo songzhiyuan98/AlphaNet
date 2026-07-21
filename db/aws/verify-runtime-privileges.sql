@@ -140,6 +140,8 @@ VALUES
   ('platform', 'follows', 'notification_level', 'UPDATE'),
   ('platform', 'content_items', 'version', 'UPDATE'),
   ('platform', 'content_items', 'current_revision_id', 'UPDATE'),
+  ('platform', 'content_items', 'lifecycle_state', 'UPDATE'),
+  ('platform', 'content_items', 'deleted_at', 'UPDATE'),
   ('platform', 'source_links', 'removed_revision_id', 'UPDATE'),
   ('platform', 'content_relations', 'removed_revision_id', 'UPDATE');
 

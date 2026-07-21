@@ -187,6 +187,25 @@ function previewReferences(
 }
 
 function preview(view: OwnerPendingActionDetailView): unknown {
+  if (view.command.operation === "delete_content") {
+    const command = view.command;
+    if (
+      view.expectedVersion !== command.expectedVersion ||
+      view.target.type !== "content" ||
+      view.target.id !== command.contentId
+    ) {
+      return null;
+    }
+
+    return {
+      operation: command.operation,
+      content_id: command.contentId,
+      expected_version: command.expectedVersion,
+      mode: command.mode,
+      ...(command.reason === undefined ? {} : { reason: command.reason }),
+    };
+  }
+
   if (view.command.operation === "update_content") {
     const command = view.command;
     const baseline = command.frozenUpdateBaseline;

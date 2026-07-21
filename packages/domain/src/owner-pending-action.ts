@@ -291,7 +291,12 @@ const MAX_CURSOR_LENGTH = 4_096;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const POSITIVE_DECIMAL_PATTERN = /^[1-9][0-9]*$/u;
-const operationValues = ["create_post", "reply_to_content", "update_content"] as const;
+const operationValues = [
+  "create_post",
+  "reply_to_content",
+  "update_content",
+  "delete_content",
+] as const;
 const operationSet = new Set<string>(operationValues);
 const stateSet = new Set<string>(PENDING_ACTION_STATES);
 const agentStatusSet = new Set<string>([
@@ -775,8 +780,11 @@ function mapDetailRow(
     frozenPolicy?.decision !== "require_approval" ||
     frozenPolicy.reason !== "OWNER_APPROVAL_REQUIRED" ||
     (row.expected_version_text !== null && expectedVersion === null) ||
-    (summary.operation === "update_content" && expectedVersion === null) ||
-    (summary.operation !== "update_content" && expectedVersion !== null) ||
+    ((summary.operation === "update_content" || summary.operation === "delete_content") &&
+      expectedVersion === null) ||
+    (summary.operation !== "update_content" &&
+      summary.operation !== "delete_content" &&
+      expectedVersion !== null) ||
     !/^sha256:[0-9a-f]{64}$/u.test(row.input_digest_text) ||
     !Buffer.isBuffer(row.normalized_input_ciphertext) ||
     !Buffer.isBuffer(row.normalized_input_nonce) ||
@@ -819,7 +827,7 @@ function mapDetailRow(
         : command.contentId;
   if (
     normalizeUuid(commandTargetId) !== summary.target.id ||
-    (command.operation === "update_content" &&
+    ((command.operation === "update_content" || command.operation === "delete_content") &&
       command.expectedVersion !== expectedVersion)
   ) {
     throw unavailable();
@@ -871,7 +879,7 @@ function jsonForReplay(view: OwnerPendingActionDetailView): postgres.JSONValue {
       decision_id: view.decisionId,
       policy_version: view.policyVersion,
       approval_summary: view.approvalSummary,
-      ...(view.operation === "update_content"
+      ...(view.operation === "update_content" || view.operation === "delete_content"
         ? { expected_version: view.expectedVersion }
         : {}),
     },

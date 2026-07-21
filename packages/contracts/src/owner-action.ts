@@ -21,6 +21,8 @@ import {
 import { ContentReferenceSchema } from "./content.ts";
 import {
   ContentWriteOperationSchema,
+  DeleteContentModeSchema,
+  DeleteContentReasonSchema,
   EditSummarySchema,
   PendingActionStateSchema,
   PostBodyMarkdownSchema,
@@ -39,6 +41,7 @@ export const OwnerActionOperationSchema = ContentWriteOperationSchema.extract([
   "create_post",
   "reply_to_content",
   "update_content",
+  "delete_content",
 ]);
 export type OwnerActionOperation = z.infer<typeof OwnerActionOperationSchema>;
 
@@ -256,10 +259,22 @@ export const OwnerUpdateContentPreviewSchema = z
   });
 export type OwnerUpdateContentPreview = z.infer<typeof OwnerUpdateContentPreviewSchema>;
 
+export const OwnerDeleteContentPreviewSchema = z
+  .object({
+    operation: z.literal("delete_content"),
+    content_id: OpaqueIdSchema,
+    expected_version: z.number().int().positive().safe(),
+    mode: DeleteContentModeSchema,
+    reason: DeleteContentReasonSchema.optional(),
+  })
+  .strict();
+export type OwnerDeleteContentPreview = z.infer<typeof OwnerDeleteContentPreviewSchema>;
+
 export const OwnerActionPreviewSchema = z.discriminatedUnion("operation", [
   OwnerCreatePostPreviewSchema,
   OwnerReplyToContentPreviewSchema,
   OwnerUpdateContentPreviewSchema,
+  OwnerDeleteContentPreviewSchema,
 ]);
 export type OwnerActionPreview = z.infer<typeof OwnerActionPreviewSchema>;
 
@@ -381,13 +396,15 @@ export const OwnerActionDetailSchema = z
       });
     }
     if (
-      action.preview.operation === "update_content" &&
+      (action.preview.operation === "update_content" ||
+        action.preview.operation === "delete_content") &&
       (action.target.type !== "content" || action.preview.content_id !== action.target.id)
     ) {
       context.addIssue({
         code: "custom",
         path: ["preview", "content_id"],
-        message: "The frozen update preview must match the action target content.",
+        message:
+          "The frozen update or delete preview must match the action target content.",
       });
     }
     if (!approvalOutcomesByState[action.state].has(action.approval_outcome)) {

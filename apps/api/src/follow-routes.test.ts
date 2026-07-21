@@ -10,12 +10,14 @@ import {
   type FollowListPage,
   type FollowService,
   type FollowWriteOutcome,
+  type ReactionWriteService,
 } from "@alphanet/domain";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentRequestRateLimiter } from "./agent-request.js";
 import { registerFollowRoutes } from "./follow-routes.js";
+import { registerReactionRoutes } from "./reaction-routes.js";
 
 const ids = {
   actor: "20000000-0000-4000-8000-000000000001",
@@ -215,14 +217,18 @@ describe("Follow Agent routes", () => {
     expect(setFollowCall[2].requestId).toBeTypeOf("string");
     expect(consume.mock.calls).toEqual([
       ["ip:127.0.0.1:agent-api", { max: 120, window: 60 }],
-      [`credential:${ids.credential}:agent-api`, { max: 20, window: 60 }],
+      [`credential:${ids.credential}:agent-api`, { max: 120, window: 60 }],
       [`agent:${ids.agent}:agent-api`, { max: 120, window: 60 }],
       [`owner:${ids.owner}:agent-api`, { max: 120, window: 60 }],
+      [`credential:${ids.credential}:agent-api:write`, { max: 20, window: 60 }],
     ]);
   });
 
-  it("lists only the authenticated Actor's stable Follow projection", async () => {
-    const { app, listFollows } = createApp();
+  it("lists only the authenticated Actor's stable projection without a write budget", async () => {
+    const consume = vi.fn<AgentRequestRateLimiter["consume"]>(() =>
+      Promise.resolve({ allowed: true, retryAfter: null }),
+    );
+    const { app, listFollows } = createApp({ rateLimiter: { consume } });
     const response = await app.inject({
       headers: {
         authorization: `Bearer ${apiKey}`,
@@ -249,6 +255,94 @@ describe("Follow Agent routes", () => {
     }
     expect(listFollowsCall[0].agent.actorId).toBe(ids.actor);
     expect(listFollowsCall[1]).toEqual({ limit: 20, targetType: "symbol" });
+    expect(consume.mock.calls).toEqual([
+      ["ip:127.0.0.1:agent-api", { max: 120, window: 60 }],
+      [`credential:${ids.credential}:agent-api`, { max: 120, window: 60 }],
+      [`agent:${ids.agent}:agent-api`, { max: 120, window: 60 }],
+      [`owner:${ids.owner}:agent-api`, { max: 120, window: 60 }],
+    ]);
+    expect(consume.mock.calls.some(([key]) => String(key).endsWith(":write"))).toBe(
+      false,
+    );
+  });
+
+  it("aggregates one write category across Reaction and Follow routes", async () => {
+    const writeKey = `credential:${ids.credential}:agent-api:write`;
+    let writeCount = 0;
+    const consume = vi.fn((key: string) => {
+      if (key === writeKey) {
+        writeCount += 1;
+        if (writeCount > 1) {
+          return Promise.resolve({ allowed: false, retryAfter: 9 });
+        }
+      }
+      return Promise.resolve({ allowed: true, retryAfter: null });
+    });
+    const rateLimiter = { consume };
+    const sharedContext = context(["research:read", "follow:write", "reaction:write"]);
+    const follow = createApp({ context: sharedContext, rateLimiter });
+    const reactionApp = Fastify({ logger: false });
+    const setReaction = vi.fn<ReactionWriteService["setReaction"]>(() =>
+      Promise.resolve({
+        decision: "allow",
+        error: null,
+        operation: "set_reaction",
+        pendingAction: null,
+        replayed: false,
+        result: {
+          contentId: ids.targetActor,
+          reactionCounts: { agree: 1, disagree: 0, helpful: 0 },
+          viewerState: { following: false, reactions: ["agree"] },
+        },
+        status: "succeeded",
+      }),
+    );
+    registerReactionRoutes(reactionApp, {
+      agentConnectionService: {
+        authenticateStaticApiKey: vi.fn(() => Promise.resolve(sharedContext)),
+      },
+      rateLimiter,
+      service: {
+        checkReady: vi.fn(() => Promise.resolve()),
+        setReaction,
+      },
+    });
+    apps.push(reactionApp);
+
+    const reactionResponse = await reactionApp.inject({
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "idempotency-key": "shared-write-reaction",
+      },
+      method: "PUT",
+      payload: { active: true },
+      url: `/v1/content/${ids.targetActor}/reactions/agree`,
+    });
+    const followResponse = await follow.app.inject({
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "idempotency-key": "shared-write-follow",
+      },
+      method: "PUT",
+      payload: { active: true },
+      url: "/v1/follows/symbol/MU",
+    });
+    const readResponse = await follow.app.inject({
+      headers: { authorization: `Bearer ${apiKey}` },
+      method: "GET",
+      url: "/v1/follows",
+    });
+
+    expect(reactionResponse.statusCode).toBe(200);
+    expect(followResponse.statusCode).toBe(429);
+    expect(followResponse.headers["retry-after"]).toBe("9");
+    expect(readResponse.statusCode).toBe(200);
+    expect(setReaction).toHaveBeenCalledOnce();
+    expect(follow.setFollow).not.toHaveBeenCalled();
+    expect(consume.mock.calls.filter(([key]) => key === writeKey)).toEqual([
+      [writeKey, { max: 20, window: 60 }],
+      [writeKey, { max: 20, window: 60 }],
+    ]);
   });
 
   it("rejects missing scopes before either handler executes", async () => {

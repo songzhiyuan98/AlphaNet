@@ -95,6 +95,11 @@ SELECT
   pg_catalog.gen_random_uuid()::text AS replacement_credential_id,
   pg_catalog.gen_random_uuid()::text AS follow_id,
   pg_catalog.gen_random_uuid()::text AS search_event_id,
+  pg_catalog.gen_random_uuid()::text AS content_community_id,
+  pg_catalog.gen_random_uuid()::text AS content_id,
+  pg_catalog.gen_random_uuid()::text AS content_revision_id,
+  pg_catalog.gen_random_uuid()::text AS content_idempotency_id,
+  pg_catalog.gen_random_uuid()::text AS content_outbox_id,
   'css_' || left(replace(pg_catalog.gen_random_uuid()::text, '-', ''), 32)
     AS search_snapshot_id,
   pg_catalog.gen_random_uuid()::text AS search_snapshot_content_id,
@@ -369,6 +374,216 @@ WHERE credential.id = :'credential_id'
 
 SET CONSTRAINTS ALL IMMEDIATE;
 
+-- Build one complete Runtime create-post bundle, then prove that possession of
+-- the narrow soft-delete columns is not an independent write path. Switching
+-- the deferred guard to IMMEDIATE exercises the same validation PostgreSQL
+-- performs at COMMIT while the surrounding smoke transaction remains cleanly
+-- rollbackable.
+SET CONSTRAINTS ALL DEFERRED;
+
+INSERT INTO platform.communities (
+  id,
+  slug,
+  name,
+  description,
+  kind
+)
+VALUES (
+  :'content_community_id',
+  'runtime-smoke-' || left(replace(:'content_community_id', '-', ''), 20),
+  'AWS runtime smoke Community',
+  'Temporary Runtime content provenance fixture.',
+  'general'
+);
+
+INSERT INTO platform.idempotency_records (
+  id,
+  principal_scope_key,
+  owner_id,
+  agent_id,
+  actor_id,
+  credential_id,
+  operation,
+  idempotency_key,
+  request_digest,
+  status,
+  expires_at
+)
+VALUES (
+  :'content_idempotency_id',
+  'credential:' || :'replacement_credential_id',
+  :'owner_id',
+  :'agent_id',
+  :'actor_id',
+  :'replacement_credential_id',
+  'create_post',
+  'runtime-smoke-create-' || :'content_id',
+  public.digest('runtime-smoke-create:' || :'content_id', 'sha256'),
+  'in_progress',
+  clock_timestamp() + interval '30 days'
+);
+
+INSERT INTO platform.content_items (
+  id,
+  kind,
+  author_actor_id,
+  primary_community_id,
+  root_id,
+  depth
+)
+VALUES (
+  :'content_id',
+  'post',
+  :'actor_id',
+  :'content_community_id',
+  :'content_id',
+  0
+);
+
+INSERT INTO platform.content_revisions (
+  id,
+  content_id,
+  revision_number,
+  title,
+  body_markdown,
+  body_plain_text,
+  created_by_actor_id,
+  source_version,
+  content_hash,
+  public_node_serialized_bytes
+)
+VALUES (
+  :'content_revision_id',
+  :'content_id',
+  1,
+  'AWS Runtime provenance smoke',
+  'A complete Runtime bundle creates this rollback-only post.',
+  'A complete Runtime bundle creates this rollback-only post.',
+  :'actor_id',
+  1,
+  public.digest('runtime-smoke-revision:' || :'content_id', 'sha256'),
+  512
+);
+
+UPDATE platform.content_items
+SET current_revision_id = :'content_revision_id'
+WHERE id = :'content_id'
+  AND version = 1
+  AND current_revision_id IS NULL;
+
+INSERT INTO system.outbox_events (
+  id,
+  aggregate_type,
+  aggregate_id,
+  aggregate_sequence,
+  event_type,
+  event_version,
+  payload
+)
+VALUES (
+  :'content_outbox_id',
+  'content',
+  :'content_id',
+  1,
+  'content.published',
+  1,
+  jsonb_build_object(
+    'actor_id', :'actor_id',
+    'content_id', :'content_id',
+    'kind', 'post',
+    'revision_id', :'content_revision_id'
+  )
+);
+
+INSERT INTO platform.action_logs (
+  event_class,
+  actor_id,
+  actor_kind,
+  owner_id,
+  agent_id,
+  credential_id,
+  channel,
+  approval_method,
+  authentication_assurance,
+  authorization_snapshot,
+  action,
+  target_type,
+  target_id,
+  decision,
+  outcome,
+  outbox_event_id,
+  policy_version,
+  request_id,
+  after_state
+)
+VALUES (
+  'domain_write',
+  :'actor_id',
+  'agent',
+  :'owner_id',
+  :'agent_id',
+  :'replacement_credential_id',
+  'rest',
+  'policy_auto',
+  'agent_credential',
+  '{"decision":"allow"}'::jsonb,
+  'content.create_post',
+  'content',
+  :'content_id',
+  'allow',
+  'succeeded',
+  :'content_outbox_id',
+  2,
+  'runtime-smoke-create-' || :'content_id',
+  jsonb_build_object(
+    'content_id', :'content_id',
+    'idempotency_record_id', :'content_idempotency_id',
+    'resource_version', 1,
+    'revision_id', :'content_revision_id'
+  )
+);
+
+UPDATE platform.idempotency_records
+SET status = 'succeeded',
+    response_code = 201,
+    response_body = '{"operation":"create_post","status":"succeeded"}'::jsonb,
+    resource_id = :'content_id',
+    terminal_at = clock_timestamp()
+WHERE id = :'content_idempotency_id'
+  AND status = 'in_progress';
+
+SET CONSTRAINTS ALL IMMEDIATE;
+SET CONSTRAINTS ALL DEFERRED;
+
+SAVEPOINT runtime_raw_delete_probe;
+UPDATE platform.content_items
+SET version = version + 1,
+    lifecycle_state = 'deleted',
+    deleted_at = clock_timestamp()
+WHERE id = :'content_id'
+  AND version = 1
+  AND lifecycle_state = 'published';
+
+\set ON_ERROR_STOP off
+SET CONSTRAINTS ALL IMMEDIATE;
+\set raw_delete_sqlstate :SQLSTATE
+ROLLBACK TO SAVEPOINT runtime_raw_delete_probe;
+\set raw_delete_rollback_sqlstate :SQLSTATE
+\set ON_ERROR_STOP on
+
+SELECT (
+  :'raw_delete_sqlstate' = '23514'
+  AND :'raw_delete_rollback_sqlstate' = '00000'
+) AS raw_delete_rejected_by_deferred_provenance
+\gset
+
+\if :raw_delete_rejected_by_deferred_provenance
+\else
+  SELECT 1 / 0 AS raw_runtime_delete_bypassed_commit_provenance;
+\endif
+
+RELEASE SAVEPOINT runtime_raw_delete_probe;
+
 INSERT INTO platform.agent_search_activity_events (
   id,
   request_id,
@@ -523,6 +738,15 @@ SELECT (
     SELECT 1
     FROM platform.follows
     WHERE id = :'follow_id'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM platform.content_items
+    WHERE id = :'content_id'
+      AND version = 1
+      AND current_revision_id = :'content_revision_id'
+      AND lifecycle_state = 'published'
+      AND deleted_at IS NULL
   )
   AND EXISTS (
     SELECT 1

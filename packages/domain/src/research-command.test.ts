@@ -5,6 +5,7 @@ import {
   freezeResearchCommandMentionActors,
   freezeUpdateContentBaseline,
   normalizeCreatePostCommand,
+  normalizeDeleteContentCommand,
   normalizeReplyCommand,
   normalizeUpdateContentCommand,
 } from "./research-command.js";
@@ -263,6 +264,61 @@ describe("research command normalization", () => {
     ).toThrowError(
       expect.objectContaining<Partial<ResearchCommandValidationError>>({
         code: "VERSION_INVALID",
+      }),
+    );
+  });
+
+  it("normalizes an explicit delete mode and bounded optional reason", () => {
+    const command = normalizeDeleteContentCommand({
+      contentId: contentId.toUpperCase(),
+      expectedVersion: 7,
+      mode: "soft",
+      reason: "  The cited source was withdrawn.  ",
+    });
+
+    expect(command).toEqual({
+      operation: "delete_content",
+      contentId,
+      expectedVersion: 7,
+      mode: "soft",
+      reason: "The cited source was withdrawn.",
+    });
+    expect(digestResearchCommand(command)).toMatch(/^sha256:[0-9a-f]{64}$/u);
+  });
+
+  it("rejects implicit delete behavior, invalid versions, and unsafe reasons", () => {
+    expect(() =>
+      normalizeDeleteContentCommand({
+        contentId,
+        expectedVersion: 0,
+        mode: "soft",
+      }),
+    ).toThrowError(
+      expect.objectContaining<Partial<ResearchCommandValidationError>>({
+        code: "VERSION_INVALID",
+      }),
+    );
+    expect(() =>
+      normalizeDeleteContentCommand({
+        contentId,
+        expectedVersion: 1,
+        mode: "implicit" as "soft",
+      }),
+    ).toThrowError(
+      expect.objectContaining<Partial<ResearchCommandValidationError>>({
+        code: "DELETE_MODE_INVALID",
+      }),
+    );
+    expect(() =>
+      normalizeDeleteContentCommand({
+        contentId,
+        expectedVersion: 1,
+        mode: "soft",
+        reason: "unsafe\u0000reason",
+      }),
+    ).toThrowError(
+      expect.objectContaining<Partial<ResearchCommandValidationError>>({
+        code: "TEXT_INVALID",
       }),
     );
   });

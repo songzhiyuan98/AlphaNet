@@ -11,6 +11,7 @@ import {
   PENDING_ACTION_OPERATIONS,
   PENDING_ACTION_STATES,
   type CreatePostActionResult,
+  type DeleteContentActionResult,
   type PendingActionOperation,
   type PendingActionState,
   type ReplyToContentActionResult,
@@ -150,7 +151,11 @@ export interface PendingActionRetryOptions {
 export interface PendingActionExecutionSuccessInput {
   correlatedOutboxEventId: string;
   resourceId: string;
-  result: CreatePostActionResult | ReplyToContentActionResult | UpdateContentActionResult;
+  result:
+    | CreatePostActionResult
+    | ReplyToContentActionResult
+    | UpdateContentActionResult
+    | DeleteContentActionResult;
 }
 
 export interface PendingActionExecutionSuccessResult {
@@ -278,6 +283,11 @@ type SuccessResultSnapshot =
       content_id: string;
       resource_version: number;
       revision_id: string | null;
+    })
+  | (OutboxJsonObject & {
+      content_id: string;
+      lifecycle_state: "deleted";
+      resource_version: number;
     });
 
 function assertIntegerInRange(
@@ -345,39 +355,62 @@ function snapshotSuccessInput(
   if (
     claim.operation !== "create_post" &&
     claim.operation !== "reply_to_content" &&
-    claim.operation !== "update_content"
+    claim.operation !== "update_content" &&
+    claim.operation !== "delete_content"
   ) {
-    throw new RangeError(
-      "Only create_post, reply_to_content, and update_content claims can succeed here.",
-    );
+    throw new RangeError("Only content-write claims can succeed here.");
   }
   const expectedKeys =
     claim.operation === "reply_to_content"
       ? ["content_id", "revision_id", "resource_version", "root_content_id"]
-      : ["content_id", "revision_id", "resource_version"];
+      : claim.operation === "delete_content"
+        ? ["content_id", "lifecycle_state", "resource_version"]
+        : ["content_id", "revision_id", "resource_version"];
   assertExactDataObject(input.result, expectedKeys, "result");
   const contentId = input.result.content_id;
-  const revisionId = input.result.revision_id;
   const resourceVersion = input.result.resource_version;
   if (typeof contentId !== "string" || !UUID_PATTERN.test(contentId)) {
     throw new RangeError("result.content_id must be a valid UUID.");
-  }
-  if (
-    (claim.operation === "update_content" &&
-      revisionId !== null &&
-      (typeof revisionId !== "string" || !UUID_PATTERN.test(revisionId))) ||
-    (claim.operation !== "update_content" &&
-      (typeof revisionId !== "string" || !UUID_PATTERN.test(revisionId)))
-  ) {
-    throw new RangeError(
-      "result.revision_id must be a valid UUID, or null for update_content.",
-    );
   }
   if (!Number.isSafeInteger(resourceVersion) || resourceVersion < 1) {
     throw new RangeError("result.resource_version must be a positive safe integer.");
   }
   if (contentId !== resourceId) {
     throw new RangeError("resourceId must match result.content_id.");
+  }
+  if (claim.operation === "delete_content") {
+    if (input.result.lifecycle_state !== "deleted") {
+      throw new RangeError("result.lifecycle_state must be deleted.");
+    }
+    return {
+      correlatedOutboxEventId,
+      resourceId,
+      result: {
+        content_id: contentId,
+        lifecycle_state: "deleted",
+        resource_version: resourceVersion,
+      },
+    };
+  }
+  const rawRevisionId = input.result.revision_id;
+  let revisionId: string | null;
+  if (claim.operation === "update_content") {
+    if (
+      rawRevisionId !== null &&
+      (typeof rawRevisionId !== "string" || !UUID_PATTERN.test(rawRevisionId))
+    ) {
+      throw new RangeError(
+        "result.revision_id must be a valid UUID, or null for update_content.",
+      );
+    }
+    revisionId = rawRevisionId;
+  } else {
+    if (typeof rawRevisionId !== "string" || !UUID_PATTERN.test(rawRevisionId)) {
+      throw new RangeError(
+        "result.revision_id must be a valid UUID, or null for update_content.",
+      );
+    }
+    revisionId = rawRevisionId;
   }
   if (claim.operation === "reply_to_content") {
     const rootContentId = input.result.root_content_id;
@@ -541,7 +574,9 @@ function replayEnvelope(row: ActionProjectionRow): postgres.JSONValue {
       decision_id: row.decision_id,
       policy_version: row.policy_version,
       approval_summary: row.approval_summary,
-      ...(operation === "update_content" ? { expected_version: expectedVersion } : {}),
+      ...(operation === "update_content" || operation === "delete_content"
+        ? { expected_version: expectedVersion }
+        : {}),
     },
     error: terminalState === null ? null : terminalReplayError(terminalState),
   };
@@ -847,7 +882,9 @@ export class PostgresPendingActionExecutionRepository {
         ? "content.published"
         : claim.operation === "reply_to_content"
           ? "content.reply"
-          : "content.revised";
+          : claim.operation === "update_content"
+            ? "content.revised"
+            : "content.deleted";
     const correlations = await transaction<IdRow[]>`
       select event.id
       from system.outbox_events as event
@@ -882,7 +919,7 @@ export class PostgresPendingActionExecutionRepository {
         and action.lease_token_digest = ${leaseTokenDigest}
         and action.lease_expires_at > database_clock.now
         and (
-          action.operation <> 'update_content'
+          action.operation not in ('update_content', 'delete_content')
           or action.expected_version + 1 = ${snapshot.result.resource_version}
         )
       returning
@@ -915,12 +952,12 @@ export class PostgresPendingActionExecutionRepository {
       row.expected_version,
     );
     if (
-      claim.operation === "update_content" &&
+      (claim.operation === "update_content" || claim.operation === "delete_content") &&
       (expectedVersion === null ||
         snapshot.result.resource_version !== expectedVersion + 1)
     ) {
       throw new RangeError(
-        "An update_content result must advance expected_version by exactly one.",
+        "A content mutation result must advance expected_version by exactly one.",
       );
     }
 
@@ -1632,8 +1669,9 @@ export class PostgresPendingActionExecutionRepository {
       state === "expired" ||
       state === "failed" ||
       state === "invalidated";
+    const operation = parseOperation(action.operation);
     const successResponseCode =
-      parseOperation(action.operation) === "update_content" ? 200 : 201;
+      operation === "update_content" || operation === "delete_content" ? 200 : 201;
     let resourceId: string | null = null;
     if (state === "succeeded") {
       if (options.resourceId === undefined) {

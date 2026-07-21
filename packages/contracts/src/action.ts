@@ -2,15 +2,12 @@ import { z } from "zod";
 
 import { PolicyDecisionSchema, TimestampSchema, V1EnvelopeShape } from "./agent.ts";
 import { OpaqueIdSchema } from "./community.ts";
-import {
-  ContentLifecycleStateSchema,
-  ReactionCountsSchema,
-  ViewerContentStateSchema,
-} from "./content.ts";
+import { ReactionCountsSchema, ViewerContentStateSchema } from "./content.ts";
 import { SetFollowResultSchema } from "./follow.ts";
 import {
   ContentWriteOperationSchema,
   CreatePostResultSchema,
+  DeleteContentResultSchema,
   PendingActionStateSchema,
   ReplyToContentResultSchema,
   UpdateContentResultSchema,
@@ -74,13 +71,7 @@ export type PendingActionPublicError = z.infer<typeof PendingActionPublicErrorSc
 export const UpdateContentActionResultSchema = UpdateContentResultSchema;
 export type UpdateContentActionResult = UpdateContentResult;
 
-export const DeleteContentActionResultSchema = z
-  .object({
-    content_id: OpaqueIdSchema,
-    lifecycle_state: ContentLifecycleStateSchema.extract(["deleted"]),
-    resource_version: z.number().int().positive(),
-  })
-  .strict();
+export const DeleteContentActionResultSchema = DeleteContentResultSchema;
 export type DeleteContentActionResult = z.infer<typeof DeleteContentActionResultSchema>;
 
 export const SetReactionActionResultSchema = z
@@ -147,6 +138,7 @@ const PendingActionProjectionBaseSchema = z.discriminatedUnion("operation", [
     .object({
       ...PendingActionProjectionCommonShape,
       operation: z.literal("delete_content"),
+      expected_version: z.number().int().positive().safe(),
       result: DeleteContentActionResultSchema.nullable(),
     })
     .strict(),
@@ -326,14 +318,15 @@ export const PendingActionProjectionSchema =
       });
     }
     if (
-      action.operation === "update_content" &&
+      (action.operation === "update_content" || action.operation === "delete_content") &&
       action.result !== null &&
       action.result.resource_version !== action.expected_version + 1
     ) {
       context.addIssue({
         code: "custom",
         path: ["result", "resource_version"],
-        message: "A succeeded update must advance exactly one content resource version.",
+        message:
+          "A succeeded update or delete must advance exactly one content resource version.",
       });
     }
 

@@ -670,6 +670,164 @@ describe("PostgresPendingActionExecutionRepository recovery and completion", () 
     });
   });
 
+  it("finalizes a delete with its exact tombstone result against content.deleted", async () => {
+    const deleteClaim = claim(Buffer.alloc(32, 7), "delete_content");
+    const publicResult = {
+      content_id: contentId,
+      lifecycle_state: "deleted",
+      resource_version: 3,
+    } as const;
+    let replay: unknown = null;
+    const { calls, sql } = createTestSql((text, values) => {
+      if (text.includes("normalized_input_ciphertext") && !text.includes("for update")) {
+        return [
+          fencedRow({
+            expected_version: "2",
+            operation: "delete_content",
+            target_id: contentId,
+            target_type: "content",
+          }),
+        ];
+      }
+      if (text.startsWith("select event.id")) return [{ id: contentOutboxEventId }];
+      if (
+        text.startsWith("with database_clock as materialized") &&
+        text.includes("set state = 'succeeded'")
+      ) {
+        return [
+          projectionRow("succeeded", {
+            expected_version: "2",
+            operation: "delete_content",
+            result: publicResult,
+            terminal_at: terminalAt,
+            version: "4",
+          }),
+        ];
+      }
+      if (text.startsWith("select pg_catalog.pg_advisory_xact_lock")) return [];
+      if (text.startsWith("select coalesce(")) return [{ next_sequence: "2" }];
+      if (text.startsWith("insert into system.outbox_events")) {
+        return [{ aggregate_sequence: "2", id: resolvedOutboxEventId }];
+      }
+      if (text.startsWith("insert into platform.action_logs")) return [{ id: auditId }];
+      if (text.startsWith("update platform.pending_action_attempts")) {
+        return [{ id: actionId }];
+      }
+      if (text.startsWith("update platform.idempotency_records")) {
+        replay = values.find(
+          (value) =>
+            typeof value === "object" &&
+            value !== null &&
+            !Buffer.isBuffer(value) &&
+            "version" in value,
+        );
+        return [{ id: idempotencyId }];
+      }
+      if (text.startsWith("select action.id, action.operation")) {
+        return [
+          committedRow("succeeded", {
+            idempotency_response: replay,
+            operation: "delete_content",
+            resource_id: contentId,
+            result: publicResult,
+          }),
+        ];
+      }
+      throw new Error(`Unexpected SQL: ${text}`);
+    });
+    const repository = new PostgresPendingActionExecutionRepository(sql, {
+      leaseOwner: "worker-a",
+    });
+
+    await expect(
+      repository.withFencedClaim(deleteClaim, async (transaction, action) => {
+        expect(action.expectedVersion).toBe(2);
+        return repository.finalizeSucceeded(transaction, deleteClaim, {
+          correlatedOutboxEventId: contentOutboxEventId,
+          resourceId: contentId,
+          result: publicResult,
+        });
+      }),
+    ).resolves.toMatchObject({
+      action: { operation: "delete_content", result: publicResult },
+      resolvedOutboxEventId,
+    });
+
+    const correlation = calls.find((call) => call.text.startsWith("select event.id"));
+    expect(correlation?.values).toContain("content.deleted");
+    const successUpdate = calls.find((call) =>
+      call.text.includes("set state = 'succeeded'"),
+    );
+    expect(successUpdate?.text).toContain(
+      "action.operation not in ('update_content', 'delete_content')",
+    );
+    const idempotencyUpdate = calls.find((call) =>
+      call.text.startsWith("update platform.idempotency_records"),
+    );
+    expect(idempotencyUpdate?.values).toContain(200);
+    expect(idempotencyUpdate?.values).not.toContain(201);
+    expect(replay).toMatchObject({
+      operation: "delete_content",
+      pending_action: {
+        expected_version: 2,
+        operation: "delete_content",
+        state: "succeeded",
+      },
+      result: publicResult,
+      status: "succeeded",
+    });
+    expect(Object.keys((replay as { result: object }).result).sort()).toEqual([
+      "content_id",
+      "lifecycle_state",
+      "resource_version",
+    ]);
+  });
+
+  it("rejects a delete result that skips a resource version before audit", async () => {
+    const deleteClaim = claim(Buffer.alloc(32, 7), "delete_content");
+    const { calls, sql } = createTestSql((text) => {
+      if (text.startsWith("select event.id")) return [{ id: contentOutboxEventId }];
+      if (
+        text.startsWith("with database_clock as materialized") &&
+        text.includes("set state = 'succeeded'")
+      ) {
+        return [
+          projectionRow("succeeded", {
+            expected_version: "2",
+            operation: "delete_content",
+            result: {
+              content_id: contentId,
+              lifecycle_state: "deleted",
+              resource_version: 4,
+            },
+            terminal_at: terminalAt,
+            version: "4",
+          }),
+        ];
+      }
+      throw new Error(`Unexpected SQL: ${text}`);
+    });
+    const repository = new PostgresPendingActionExecutionRepository(sql, {
+      leaseOwner: "worker-a",
+    });
+
+    await expect(
+      repository.finalizeSucceeded(sql as never, deleteClaim, {
+        correlatedOutboxEventId: contentOutboxEventId,
+        resourceId: contentId,
+        result: {
+          content_id: contentId,
+          lifecycle_state: "deleted",
+          resource_version: 4,
+        },
+      }),
+    ).rejects.toThrow("advance expected_version by exactly one");
+
+    expect(
+      calls.some((call) => call.text.startsWith("insert into platform.action_logs")),
+    ).toBe(false);
+  });
+
   it("rejects an update result that skips a resource version before audit or idempotency", async () => {
     const updateClaim = claim(Buffer.alloc(32, 7), "update_content");
     const { calls, sql } = createTestSql((text) => {
@@ -820,6 +978,22 @@ describe("PostgresPendingActionExecutionRepository recovery and completion", () 
         },
       ),
     ).rejects.toThrow("revision_id");
+    await expect(
+      repository.finalizeSucceeded(
+        transaction,
+        claim(Buffer.alloc(32, 7), "delete_content"),
+        {
+          correlatedOutboxEventId: contentOutboxEventId,
+          resourceId: contentId,
+          result: {
+            content_id: contentId,
+            lifecycle_state: "deleted",
+            resource_version: 3,
+            revision_id: null,
+          } as never,
+        },
+      ),
+    ).rejects.toThrow("invalid public result shape");
     expect(calls).toHaveLength(0);
   });
 

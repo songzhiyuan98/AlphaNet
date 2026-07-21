@@ -243,15 +243,21 @@ GRANT UPDATE ON TABLE
   platform.registration_controls
 TO :"runtime_role";
 
--- Content writes can advance optimistic concurrency and select the immutable
--- current Revision, but cannot rewrite identity, placement, lifecycle, or
+-- Content writes can advance optimistic concurrency, select the immutable
+-- current Revision, or author-soft-delete by setting the lifecycle tombstone.
+-- Runtime cannot rewrite identity, placement, distribution, erasure, or
 -- database-owned timestamps. Classification sets are replaced as facts. The
--- deferred 000012 provenance guard requires every Runtime mutation to commit
--- with its ContentItem version, Outbox event, ActionLog, and succeeded
+-- deferred provenance guard requires every Runtime mutation to commit with its
+-- ContentItem version, Outbox event, ActionLog, and succeeded
 -- IdempotencyRecord; raw grants are not an independent write path. A source or
 -- reference fact is append-only except for closing its active Revision window
 -- exactly once under that same guard.
-GRANT UPDATE (version, current_revision_id) ON TABLE
+GRANT UPDATE (
+  version,
+  current_revision_id,
+  lifecycle_state,
+  deleted_at
+) ON TABLE
   platform.content_items
 TO :"runtime_role";
 

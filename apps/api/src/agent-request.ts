@@ -22,20 +22,20 @@ export interface AgentRequestRateLimiter {
   ): Promise<{ allowed: boolean; retryAfter: number | null }>;
 }
 
+type AgentRequestLimitSubject = "agent" | "credential" | "ip" | "owner";
+
+export interface AgentRequestRateLimitCategory {
+  namespace: string;
+  limits: Partial<Record<AgentRequestLimitSubject, AgentRequestLimitRule>>;
+}
+
 export interface AgentRequestBoundaryOptions {
   operation: AgentOperation;
   policyEnforcement?: "boundary" | "domain" | undefined;
   rateLimiter?: AgentRequestRateLimiter | undefined;
+  rateLimitCategory?: AgentRequestRateLimitCategory | undefined;
   resolveClientIp?: ((request: FastifyRequest) => string) | undefined;
   service: Pick<AgentConnectionService, "authenticateStaticApiKey">;
-  limits?:
-    | {
-        agent?: AgentRequestLimitRule | undefined;
-        credential?: AgentRequestLimitRule | undefined;
-        ip?: AgentRequestLimitRule | undefined;
-        owner?: AgentRequestLimitRule | undefined;
-      }
-    | undefined;
 }
 
 export interface AuthorizedAgentRequest {
@@ -56,7 +56,18 @@ export const DEFAULT_AGENT_REQUEST_LIMITS = {
   credential: { max: 120, window: 60 },
   ip: { max: 120, window: 60 },
   owner: { max: 120, window: 60 },
-} satisfies Record<"agent" | "credential" | "ip" | "owner", AgentRequestLimitRule>;
+} satisfies Record<AgentRequestLimitSubject, AgentRequestLimitRule>;
+
+/**
+ * Shared write budget for Agent REST mutations. Route boundaries opt into this
+ * category in addition to, never instead of, the global Agent API budget.
+ */
+export const AGENT_WRITE_REQUEST_RATE_LIMIT_CATEGORY = {
+  limits: {
+    credential: { max: 20, window: 60 },
+  },
+  namespace: "write",
+} as const satisfies AgentRequestRateLimitCategory;
 
 const queryCredentialNames = new Set(["access_token", "api_key", "token"]);
 const bearerCredentialPattern = /^Bearer ([A-Za-z0-9\-._~+/]+=*)$/;
@@ -225,7 +236,7 @@ export async function authorizeAgentRequest(
       reply,
       options.rateLimiter,
       `ip:${clientIp}:agent-api`,
-      options.limits?.ip ?? DEFAULT_AGENT_REQUEST_LIMITS.ip,
+      DEFAULT_AGENT_REQUEST_LIMITS.ip,
     ))
   ) {
     return null;
@@ -264,7 +275,7 @@ export async function authorizeAgentRequest(
       reply,
       options.rateLimiter,
       `credential:${context.credential.id}:agent-api`,
-      options.limits?.credential ?? DEFAULT_AGENT_REQUEST_LIMITS.credential,
+      DEFAULT_AGENT_REQUEST_LIMITS.credential,
     ))
   ) {
     return null;
@@ -276,7 +287,7 @@ export async function authorizeAgentRequest(
       reply,
       options.rateLimiter,
       `agent:${context.agent.id}:agent-api`,
-      options.limits?.agent ?? DEFAULT_AGENT_REQUEST_LIMITS.agent,
+      DEFAULT_AGENT_REQUEST_LIMITS.agent,
     ))
   ) {
     return null;
@@ -288,10 +299,35 @@ export async function authorizeAgentRequest(
       reply,
       options.rateLimiter,
       `owner:${context.owner.id}:agent-api`,
-      options.limits?.owner ?? DEFAULT_AGENT_REQUEST_LIMITS.owner,
+      DEFAULT_AGENT_REQUEST_LIMITS.owner,
     ))
   ) {
     return null;
+  }
+
+  const category = options.rateLimitCategory;
+  if (category) {
+    const categoryKeys: Record<AgentRequestLimitSubject, string> = {
+      agent: `agent:${context.agent.id}:agent-api:${category.namespace}`,
+      credential: `credential:${context.credential.id}:agent-api:${category.namespace}`,
+      ip: `ip:${clientIp}:agent-api:${category.namespace}`,
+      owner: `owner:${context.owner.id}:agent-api:${category.namespace}`,
+    };
+    for (const subject of ["ip", "credential", "agent", "owner"] as const) {
+      const rule = category.limits[subject];
+      if (
+        rule &&
+        !(await consumeLimit(
+          request,
+          reply,
+          options.rateLimiter,
+          categoryKeys[subject],
+          rule,
+        ))
+      ) {
+        return null;
+      }
+    }
   }
 
   const evaluation = evaluateAgentOperation({
