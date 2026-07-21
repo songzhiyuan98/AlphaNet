@@ -1,0 +1,140 @@
+name: Deploy AlphaNet release to Amazon ECS
+description: Run migrations, roll out five digest-pinned images, smoke-test, and verify running digests.
+
+inputs:
+  aws-region:
+    description: AWS region containing ECR and ECS.
+    required: true
+  deploy-sha:
+    description: Full release commit SHA.
+    required: true
+  deployment-mode:
+    description: forward for a normal release or application-rollback for an approved break-glass rollback.
+    required: false
+    default: forward
+  ecs-cluster:
+    description: ECS cluster name or ARN.
+    required: true
+  ecs-subnet-ids:
+    description: Comma-separated private subnet IDs for database one-shot tasks.
+    required: true
+  ecs-security-group-ids:
+    description: Comma-separated security group IDs for database one-shot tasks.
+    required: true
+  ecs-assign-public-ip:
+    description: Whether database one-shot tasks receive a public IP.
+    required: false
+    default: DISABLED
+  api-service:
+    description: ECS API service name or ARN.
+    required: true
+  api-baseline-task-definition-arn:
+    description: Exact ACTIVE Terraform baseline task definition ARN for API.
+    required: true
+  api-task-family:
+    description: ECS API task definition family.
+    required: true
+  mcp-service:
+    description: ECS MCP service name or ARN.
+    required: true
+  mcp-baseline-task-definition-arn:
+    description: Exact ACTIVE Terraform baseline task definition ARN for MCP.
+    required: true
+  mcp-task-family:
+    description: ECS MCP task definition family.
+    required: true
+  migrate-task-family:
+    description: ECS migration task definition family.
+    required: true
+  migrate-baseline-task-definition-arn:
+    description: Exact ACTIVE Terraform baseline task definition ARN for migrations.
+    required: true
+  runtime-smoke-task-family:
+    description: ECS runtime-role database smoke task definition family.
+    required: true
+  runtime-smoke-baseline-task-definition-arn:
+    description: Exact ACTIVE Terraform baseline task definition ARN for runtime DB smoke.
+    required: true
+  web-service:
+    description: ECS Web service name or ARN.
+    required: true
+  web-baseline-task-definition-arn:
+    description: Exact ACTIVE Terraform baseline task definition ARN for Web.
+    required: true
+  web-task-family:
+    description: ECS Web task definition family.
+    required: true
+  worker-service:
+    description: ECS worker service name or ARN.
+    required: true
+  worker-baseline-task-definition-arn:
+    description: Exact ACTIVE Terraform baseline task definition ARN for Worker.
+    required: true
+  worker-task-family:
+    description: ECS worker task definition family.
+    required: true
+  expected-image-prefix:
+    description: ECR registry/repository prefix before each target suffix.
+    required: true
+  expected-repository:
+    description: GitHub owner/repository recorded in the release manifest.
+    required: true
+  manifest-path:
+    description: Validated release manifest path.
+    required: true
+  public-base-url:
+    description: Public HTTPS origin used for post-deployment smoke checks.
+    required: true
+  smoke-paths:
+    description: Comma-separated API readiness and public social-read paths.
+    required: true
+  target-environment:
+    description: staging or production.
+    required: true
+  deploy-timeout-seconds:
+    description: Global deploy deadline including a reserved rollback window; max 3900.
+    required: false
+    default: "3900"
+  rollback-reserve-seconds:
+    description: Seconds reserved inside the global deadline for task stop and rollback.
+    required: false
+    default: "600"
+
+runs:
+  using: composite
+  steps:
+    - name: Deploy digest-pinned release
+      shell: bash
+      env:
+        AWS_REGION: ${{ inputs.aws-region }}
+        DEPLOYMENT_MODE: ${{ inputs.deployment-mode }}
+        DEPLOY_SHA: ${{ inputs.deploy-sha }}
+        DEPLOY_TIMEOUT_SECONDS: ${{ inputs.deploy-timeout-seconds }}
+        ECS_API_BASELINE_TASK_DEFINITION_ARN: ${{ inputs.api-baseline-task-definition-arn }}
+        ECS_API_SERVICE: ${{ inputs.api-service }}
+        ECS_API_TASK_FAMILY: ${{ inputs.api-task-family }}
+        ECS_ASSIGN_PUBLIC_IP: ${{ inputs.ecs-assign-public-ip }}
+        ECS_CLUSTER: ${{ inputs.ecs-cluster }}
+        ECS_MCP_SERVICE: ${{ inputs.mcp-service }}
+        ECS_MCP_BASELINE_TASK_DEFINITION_ARN: ${{ inputs.mcp-baseline-task-definition-arn }}
+        ECS_MCP_TASK_FAMILY: ${{ inputs.mcp-task-family }}
+        ECS_MIGRATE_TASK_FAMILY: ${{ inputs.migrate-task-family }}
+        ECS_MIGRATE_BASELINE_TASK_DEFINITION_ARN: ${{ inputs.migrate-baseline-task-definition-arn }}
+        ECS_RUNTIME_SMOKE_BASELINE_TASK_DEFINITION_ARN: ${{ inputs.runtime-smoke-baseline-task-definition-arn }}
+        ECS_RUNTIME_SMOKE_TASK_FAMILY: ${{ inputs.runtime-smoke-task-family }}
+        ECS_SECURITY_GROUP_IDS: ${{ inputs.ecs-security-group-ids }}
+        ECS_SUBNET_IDS: ${{ inputs.ecs-subnet-ids }}
+        ECS_WEB_SERVICE: ${{ inputs.web-service }}
+        ECS_WEB_BASELINE_TASK_DEFINITION_ARN: ${{ inputs.web-baseline-task-definition-arn }}
+        ECS_WEB_TASK_FAMILY: ${{ inputs.web-task-family }}
+        ECS_WORKER_SERVICE: ${{ inputs.worker-service }}
+        ECS_WORKER_BASELINE_TASK_DEFINITION_ARN: ${{ inputs.worker-baseline-task-definition-arn }}
+        ECS_WORKER_TASK_FAMILY: ${{ inputs.worker-task-family }}
+        EXPECTED_IMAGE_PREFIX: ${{ inputs.expected-image-prefix }}
+        EXPECTED_REPOSITORY: ${{ inputs.expected-repository }}
+        PUBLIC_BASE_URL: ${{ inputs.public-base-url }}
+        RELEASE_MANIFEST_PATH: ${{ inputs.manifest-path }}
+        ROLLBACK_RESERVE_SECONDS: ${{ inputs.rollback-reserve-seconds }}
+        SMOKE_PATHS: ${{ inputs.smoke-paths }}
+        TARGET_ENVIRONMENT: ${{ inputs.target-environment }}
+      run: bash "$GITHUB_WORKSPACE/.github/scripts/aws-ecs-deploy.sh"

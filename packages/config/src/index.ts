@@ -432,6 +432,43 @@ function validateAuthEnvironment(
   }
 }
 
+function validateProductionRedisTransport(
+  value: { NODE_ENV: z.infer<typeof NodeEnvironmentSchema>; REDIS_URL: string },
+  context: z.RefinementCtx,
+): void {
+  if (
+    value.NODE_ENV === "production" &&
+    new URL(value.REDIS_URL).protocol !== "rediss:"
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "must use rediss:// with TLS in production",
+      path: ["REDIS_URL"],
+    });
+  }
+}
+
+function validateProductionPostgresTransport(
+  value: { DATABASE_URL: string; NODE_ENV: z.infer<typeof NodeEnvironmentSchema> },
+  context: z.RefinementCtx,
+): void {
+  if (value.NODE_ENV !== "production") return;
+
+  const databaseUrl = new URL(value.DATABASE_URL);
+  if (
+    !["postgres:", "postgresql:"].includes(databaseUrl.protocol) ||
+    databaseUrl.searchParams.getAll("sslmode").length !== 1 ||
+    databaseUrl.searchParams.get("sslmode") !== "verify-full"
+  ) {
+    context.addIssue({
+      code: "custom",
+      message:
+        "must be a postgres URL with exactly one sslmode=verify-full setting in production",
+      path: ["DATABASE_URL"],
+    });
+  }
+}
+
 const AuthEnvironmentBaseSchema = z
   .object({
     NODE_ENV: NodeEnvironmentSchema.default("development"),
@@ -460,6 +497,8 @@ export const ApiEnvironmentSchema = CommonServiceEnvironmentSchema.extend({
 }).superRefine((value, context) => {
   validateAuthEnvironment(value, context);
   validatePendingActionCryptoEnvironment(value, context);
+  validateProductionPostgresTransport(value, context);
+  validateProductionRedisTransport(value, context);
 
   const corsOrigins = parseCommaSeparated(value.CORS_ORIGINS);
   const invalidCorsOrigin = corsOrigins.find((origin) => !isStaticHttpOrigin(origin));
@@ -587,6 +626,9 @@ export const McpEnvironmentSchema = CommonServiceEnvironmentSchema.extend({
   DATABASE_URL: UrlSchema,
   REDIS_URL: UrlSchema,
   MCP_ALLOWED_HOSTS: z.string().default("localhost,127.0.0.1,mcp"),
+}).superRefine((value, context) => {
+  validateProductionPostgresTransport(value, context);
+  validateProductionRedisTransport(value, context);
 });
 export type McpEnvironment = z.infer<typeof McpEnvironmentSchema>;
 
@@ -610,7 +652,10 @@ export const WorkerEnvironmentSchema = CommonServiceEnvironmentSchema.extend({
     .enum(["true", "false"])
     .default("false")
     .transform((value) => value === "true"),
-}).superRefine(validatePendingActionCryptoEnvironment);
+}).superRefine((value, context) => {
+  validatePendingActionCryptoEnvironment(value, context);
+  validateProductionPostgresTransport(value, context);
+});
 export type WorkerEnvironment = z.infer<typeof WorkerEnvironmentSchema>;
 
 export class EnvironmentValidationError extends Error {

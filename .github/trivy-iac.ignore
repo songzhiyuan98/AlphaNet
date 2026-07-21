@@ -1,0 +1,5 @@
+# Central AlphaNet IaC exceptions must be reviewed, documented with an expiry
+# date, and added here by exact Trivy misconfiguration ID. There are currently
+# no central exceptions. Prefer a narrowly scoped inline ignore beside the one
+# reviewed resource when the reason and expiry belong to that resource; three
+# such exceptions currently expire on 2026-10-31.

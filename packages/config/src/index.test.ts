@@ -4,6 +4,7 @@ import {
   EnvironmentValidationError,
   loadApiEnvironment,
   loadAuthEnvironment,
+  loadMcpEnvironment,
   loadWorkerEnvironment,
   parseCorsOrigins,
 } from "./index.js";
@@ -340,13 +341,54 @@ describe("Owner authentication environment parsing", () => {
       BETTER_AUTH_URL: "https://api.alphanet.example",
       CORS_ORIGINS: "https://api.alphanet.example",
       COMMUNITY_CURSOR_SIGNING_KEY: "Production-Community-Cursor-Key-Q4v8M2x7Lp5Rt9W3n6",
+      DATABASE_URL:
+        "postgresql://alphanet:secret@db.example.com:5432/alphanet?sslmode=verify-full",
       NODE_ENV: "production",
       PENDING_ACTION_ENCRYPTION_KEY:
         "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
       RESEND_API_KEY: "re_live_key",
+      REDIS_URL: "rediss://cache.example.com:6379/0",
       SSR_INTERNAL_REQUEST_SECRET: "Production-SSR-Request-Secret-J8m4V2s7X5n9K3p6T1w0",
     });
     expect(result.API_TRUSTED_PROXY_CIDRS).toEqual(["10.20.0.0/16", "fd00:1234::/48"]);
+  });
+
+  it("requires TLS for API and MCP Redis connections in production", () => {
+    expect(() =>
+      loadMcpEnvironment({
+        DATABASE_URL: baseEnvironment.DATABASE_URL,
+        NODE_ENV: "production",
+        REDIS_URL: "redis://cache.example.com:6379/0",
+      }),
+    ).toThrow(EnvironmentValidationError);
+
+    const mcp = loadMcpEnvironment({
+      DATABASE_URL:
+        "postgresql://alphanet:secret@db.example.com:5432/alphanet?sslmode=verify-full",
+      NODE_ENV: "production",
+      REDIS_URL: "rediss://alphanet-runtime:secret@cache.example.com:6379/0",
+    });
+    expect(mcp.REDIS_URL).toMatch(/^rediss:/);
+  });
+
+  it("requires PostgreSQL certificate and endpoint verification in production", () => {
+    const productionWorker = {
+      ...baseEnvironment,
+      NODE_ENV: "production",
+      PENDING_ACTION_ENCRYPTION_KEY:
+        "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+    } as const;
+
+    expect(() => loadWorkerEnvironment(productionWorker)).toThrow(
+      EnvironmentValidationError,
+    );
+
+    const worker = loadWorkerEnvironment({
+      ...productionWorker,
+      DATABASE_URL:
+        "postgresql://alphanet:secret@db.example.com:5432/alphanet?sslmode=verify-full",
+    });
+    expect(worker.DATABASE_URL).toContain("sslmode=verify-full");
   });
 
   it("rejects malformed and catch-all trusted proxy ranges", () => {

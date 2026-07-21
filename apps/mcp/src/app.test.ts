@@ -140,13 +140,28 @@ describe("MCP service", () => {
     });
   });
 
-  it("rejects an unexpected Host header", async () => {
+  it("allows task-IP Host headers only on health endpoints", async () => {
     const { app } = makeApp();
 
-    const response = await request(app)
+    const healthResponse = await request(app)
       .get("/health/live")
-      .set("host", "attacker.example");
+      .set("host", "10.0.12.34:4100");
 
-    expect(response.status).toBe(403);
+    expect(healthResponse.status).toBe(200);
+    expect(healthResponse.headers).not.toHaveProperty("x-powered-by");
+
+    const protocolResponse = await request(app)
+      .post("/mcp")
+      .set("host", "attacker.example")
+      .set("accept", "application/json, text/event-stream")
+      .send({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/list",
+        params: {},
+      });
+
+    expect(protocolResponse.status).toBe(403);
+    expect(protocolResponse.headers).not.toHaveProperty("x-powered-by");
   });
 });

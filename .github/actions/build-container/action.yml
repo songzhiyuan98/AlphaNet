@@ -1,26 +1,42 @@
 name: Build AlphaNet container
-description: Build one Dockerfile target and optionally publish it to GHCR.
+description: Build one Dockerfile target and optionally publish it to a registry.
 
 inputs:
   publish:
     description: Whether to authenticate and publish the image.
     required: true
+  registry:
+    description: Container registry hostname.
+    required: false
+    default: local.invalid
+  registry-login:
+    description: Whether this action should log in before publishing.
+    required: false
+    default: "true"
   registry-password:
-    description: GHCR credential; required only when publish is true.
+    description: Registry credential; required only when this action logs in.
     required: false
   registry-username:
-    description: GHCR username; required only when publish is true.
+    description: Registry username; required only when this action logs in.
     required: false
+  repository-prefix:
+    description: Repository path prefix before the target suffix.
+    required: false
+    default: ""
   target:
     description: Dockerfile target to build.
     required: true
+  shared-cache-scope:
+    description: Read-only cache scope populated once by the CI shared build job.
+    required: false
+    default: alphanet-shared-build
 
 outputs:
   digest:
     description: Registry digest returned by BuildKit when publishing.
     value: ${{ steps.build.outputs.digest }}
   repository:
-    description: Lowercase GHCR image repository.
+    description: Lowercase image repository.
     value: ${{ steps.image.outputs.repository }}
   tag:
     description: Commit traceability tag.
@@ -32,11 +48,11 @@ runs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
-    - name: Log in to GHCR
-      if: inputs.publish == 'true'
+    - name: Log in to container registry
+      if: inputs.publish == 'true' && inputs.registry-login == 'true'
       uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
       with:
-        registry: ghcr.io
+        registry: ${{ inputs.registry }}
         username: ${{ inputs.registry-username }}
         password: ${{ inputs.registry-password }}
 
@@ -44,10 +60,30 @@ runs:
       id: image
       shell: bash
       env:
+        REGISTRY: ${{ inputs.registry }}
+        REPOSITORY_PREFIX: ${{ inputs.repository-prefix }}
         TARGET: ${{ inputs.target }}
       run: |
-        repository="$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
-        image_repository="ghcr.io/${repository}-${TARGET}"
+        if [[ ! "$REGISTRY" =~ ^[a-z0-9.-]+(:[0-9]+)?$ ]]; then
+          echo "::error::registry must be a hostname with an optional port."
+          exit 1
+        fi
+
+        if [[ -n "$REPOSITORY_PREFIX" ]]; then
+          normalized_prefix="$(printf '%s' "$REPOSITORY_PREFIX" |
+            tr '[:upper:]' '[:lower:]' |
+            sed -E 's#^/+|/+$##g')"
+        else
+          normalized_prefix="$(printf '%s' "$GITHUB_REPOSITORY" |
+            tr '[:upper:]' '[:lower:]')"
+        fi
+
+        if [[ ! "$normalized_prefix" =~ ^[a-z0-9]+([._/-][a-z0-9]+)*$ ]]; then
+          echo "::error::repository-prefix is not a valid container repository path."
+          exit 1
+        fi
+
+        image_repository="${REGISTRY}/${normalized_prefix}-${TARGET}"
         {
           echo "repository=$image_repository"
           echo "tag=${image_repository}:sha-${GITHUB_SHA}"
@@ -69,8 +105,10 @@ runs:
         labels: |
           org.opencontainers.image.source=https://github.com/${{ github.repository }}
           org.opencontainers.image.revision=${{ github.sha }}
-        cache-from: type=gha,scope=${{ inputs.target }}
-        cache-to: type=gha,mode=max,scope=${{ inputs.target }}
+        cache-from: |
+          type=gha,scope=${{ inputs.shared-cache-scope }}
+          type=gha,scope=${{ inputs.target }}
+        cache-to: type=gha,mode=min,scope=${{ inputs.target }}
         # Docker's local image exporter cannot load the manifest list created by
         # attestations. Keep attestations on published images and disable them
         # only for the PR-only local-load path used by Trivy.

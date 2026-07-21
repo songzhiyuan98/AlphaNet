@@ -4,9 +4,11 @@ set -Eeuo pipefail
 manifest_path="${1:-}"
 expected_sha="${2:-}"
 expected_repository="${3:-}"
+expected_image_prefix="${4:-}"
 
-if [[ -z "$manifest_path" || -z "$expected_sha" || -z "$expected_repository" ]]; then
-  echo "usage: validate-release-manifest.sh MANIFEST SHA OWNER/REPOSITORY" >&2
+if [[ -z "$manifest_path" || -z "$expected_sha" || -z "$expected_repository" ||
+      -z "$expected_image_prefix" ]]; then
+  echo "usage: validate-release-manifest.sh MANIFEST SHA OWNER/REPOSITORY ECR_IMAGE_PREFIX" >&2
   exit 2
 fi
 
@@ -20,7 +22,11 @@ if [[ ! -f "$manifest_path" ]]; then
   exit 2
 fi
 
-expected_image_prefix="ghcr.io/$(printf '%s' "$expected_repository" | tr '[:upper:]' '[:lower:]')"
+expected_image_prefix="${expected_image_prefix%/}"
+if [[ ! "$expected_image_prefix" =~ ^[a-z0-9.-]+(:[0-9]+)?/[a-z0-9]+([._/-][a-z0-9]+)*$ ]]; then
+  echo "Expected image prefix is not a valid registry repository path." >&2
+  exit 2
+fi
 
 jq -e \
   --arg repository "$expected_repository" \
@@ -44,6 +50,8 @@ for target in web api mcp worker migrate; do
       .images[$target].repository == $repository and
       .images[$target].tag == $tag and
       (.images[$target].digest | type == "string" and
+        test("^sha256:[0-9a-f]{64}$")) and
+      (.images[$target].runtimeDigest | type == "string" and
         test("^sha256:[0-9a-f]{64}$")) and
       .images[$target].reference ==
         (.images[$target].repository + "@" + .images[$target].digest)

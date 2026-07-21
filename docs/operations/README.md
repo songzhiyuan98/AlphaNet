@@ -4,40 +4,57 @@ This directory defines AlphaNet's delivery and recovery baseline.
 
 - [CI/CD and repository protection](./ci-cd.md)
 - [Deployment and rollback runbook](./deployment-and-rollback.md)
+- [AWS database identities and release gate](./aws-database-access.md)
+- [AWS Valkey TLS contract](./aws-valkey-tls.md)
+- [AWS infrastructure bootstrap](../../infra/aws/README.md)
 
 ## Current delivery state
 
-CI and immutable artifact publication are implemented. CD is a provider-neutral
-scaffold because a hosting platform has not been selected:
+CI, immutable artifact publication, and AWS-native CD are implemented in the
+repository. Cloud resources remain deliberately disabled until the AWS account,
+state backend, runtime secrets, and first database bootstrap are complete:
 
 - Pull requests build, test, and build all five container targets without
   publishing; Trivy rejects fixable High/Critical runtime vulnerabilities.
-- A successful `main` run publishes `web`, `api`, `mcp`, `worker`, and
-  `migrate`, records their registry digests, and uploads one release manifest.
-- Automatic staging is explicitly disabled unless the repository variable
-  `ENABLE_STAGING_DEPLOY` is exactly `true`.
-- Once enabled, staging requires an authenticated HTTPS deployment hook.
-  Missing credentials or a non-terminal hook response fails the deployment; it
-  is never reported as a successful no-op.
-- Manual staging, production promotion, and rollback accept only an unexpired
-  digest manifest produced by a successful `main` CI run.
+- Before shared ECR exists, a successful `main` run locally builds, smokes, and
+  scans all five targets but publishes nothing and creates no release manifest.
+  With `AWS_ECR_PUBLISH_ENABLED=true`, the same branch-bound GitHub OIDC
+  identity publishes `web`, `api`, `mcp`, `worker`, and `migrate` to shared
+  immutable ECR repositories. The release manifest records both the OCI index
+  digest and the exact Linux/amd64 runtime digest.
+- `AWS_DEPLOY_ENABLED` is independent of image publication. Once it is `true`
+  and the complete environment coordinates are present, staging can deploy
+  automatically. A missing coordinate fails readiness when deployment has been
+  explicitly enabled; it is never reported as a successful no-op.
+- Deployment runs the forward-only database gate first, then rolls API/MCP,
+  Worker, and Web, executes a runtime-role SQL smoke test and public smoke
+  checks, and verifies task definitions and running image digests.
+- Production automation remains off until staging is proven. It is enabled only
+  with `AUTO_DEPLOY_PRODUCTION=true`; manual exact-SHA staging, promotion, and
+  rollback remain available.
+- Application rollout failure restores the previous ECS task definitions in
+  reverse order. Database migrations are not automatically reversed.
 
-The hook is a temporary integration boundary. After selecting a provider,
-replace it with the provider API, GitHub OIDC, terminal-state polling, and
-provider-specific smoke checks.
+Staging and Production use separate VPC, ECS, Aurora, Valkey, secret, and state
+boundaries while consuming the same ECR digest. The current private GitHub Free
+repository does not depend on GitHub Environments; OIDC trust is restricted to
+the repository API's exact immutable owner-ID/repository-ID `main` subject, and
+staging/production use separate AWS roles.
 
 ## Runtime baseline
 
 - pnpm workspace, exact pnpm pin, Node.js 22.
-- PostgreSQL 17 with pgvector and Redis 7.4.
+- Aurora PostgreSQL 17 with pgvector and TLS-verifying runtime URLs;
+  ElastiCache Valkey uses TLS and remains reconstructable state.
 - Root quality scripts: `format:check`, `lint`, `typecheck`, `test`,
   `test:integration`, and `build`.
 - One root Dockerfile with five targets: `web`, `api`, `mcp`, `worker`, and
-  `migrate`.
+  `migrate`; runtime images include the checksum-pinned regional RDS CA bundle.
 - API and MCP container health checks use readiness, not liveness.
 - Worker has no HTTP port. Container-process liveness plus queue/outbox metrics
   are its operational signals.
 
-Repository files cannot enable hosting credentials, GitHub plan features, or
-deployment infrastructure. Apply the settings in [ci-cd.md](./ci-cd.md) that the
-current repository plan supports.
+Repository files cannot create an AWS account, accept billing terms, verify a
+mail sender or OAuth client, or populate runtime secrets. Follow the explicit
+bootstrap order in the infrastructure README before enabling repository CD
+variables.

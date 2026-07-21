@@ -1,0 +1,56 @@
+environment = "production"
+aws_region  = "us-west-2"
+vpc_cidr    = "10.50.0.0/16"
+
+# Copy these two outputs from the shared stack. They are ARNs, not credentials.
+github_oidc_provider_arn = "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
+github_publish_role_arn  = "arn:aws:iam::123456789012:role/alphanet-github-publish"
+
+github_oidc_subjects  = ["repo:songzhiyuan98@123667992/AlphaNet@1306225890:ref:refs/heads/main"]
+ecr_repository_prefix = "alphanet"
+auth_email_from       = "AlphaNet <no-reply@alphanet.example>"
+
+# The viewer certificate must be issued in us-east-1. Terraform issues the ALB
+# origin certificate in us-west-2 through this Route53 zone.
+domain_name                = "app.alphanet.example"
+cloudfront_certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/00000000-0000-0000-0000-000000000000"
+alb_origin_domain_name     = "origin.alphanet.example"
+alb_origin_certificate_arn = ""
+route53_zone_id            = "ZREPLACE_WITH_PUBLIC_ZONE"
+cloudfront_price_class     = "PriceClass_200"
+mcp_public_enabled         = false
+allow_direct_alb_cidrs     = []
+
+nat_gateway_mode                   = "one_per_az"
+enable_vpc_flow_logs               = true
+enable_enhanced_container_insights = false
+alb_deletion_protection            = true
+database_deletion_protection       = true
+database_skip_final_snapshot       = false
+database_backup_retention_days     = 14
+database_cloudwatch_log_exports    = ["postgresql"]
+database_performance_insights      = false
+
+aurora_instance_count = 2
+aurora_min_acu        = 0.5
+aurora_max_acu        = 16
+
+valkey_node_type               = "cache.t4g.micro"
+valkey_multi_az                = true
+valkey_snapshot_retention_days = 7
+
+service_desired_count = {
+  api    = 2
+  mcp    = 1
+  web    = 2
+  worker = 1
+}
+
+enable_service_autoscaling = true
+cpu_architecture           = "X86_64"
+log_retention_days         = 30
+operations_alert_emails    = ["ops@alphanet.example"]
+
+tags = {
+  Owner = "AlphaNet"
+}

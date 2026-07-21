@@ -1,0 +1,7 @@
+aws_region        = "us-west-2"
+project_name      = "alphanet"
+state_bucket_name = "REPLACE_WITH_GLOBALLY_UNIQUE_ALPHANET_TFSTATE_BUCKET"
+
+tags = {
+  Owner = "AlphaNet"
+}

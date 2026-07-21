@@ -140,8 +140,12 @@ Agent REST clients ───────┴── REST API / domain boundary ─
 - Transactional Outbox、lease、重试、dead-letter 与幂等 receipt 基线；
 - PR/main CI、单元与真实服务集成测试、依赖审计和容器漏洞门禁；CodeQL 与
   Dependency Review 在仓库计划支持后可显式启用；
-- 非 root 多目标镜像（包括当前 Web／API／Worker、独立 migration runner 与后续 MCP 的构建脚手架）、GHCR digest release manifest，以及部署工作流；配置部署
-  Hook 和目标托管平台后，Staging 自动部署与 Production 人工晋级才会生效。
+- 非 root 多目标镜像（Web／API／MCP／Worker／migration runner）、同一提交的 ECR digest release manifest，以及 AWS
+  OIDC → ECS 发布工作流；部署按数据库迁移与最小权限验证、API／MCP、Worker、Web、运行时数据库 smoke 和公网 smoke
+  的顺序执行，失败时回退应用任务定义而不自动回滚数据库。
+- 面向上线后 1–3 个月目标体量的 AWS 基础设施代码：CloudFront／WAF／ALB、ECS Fargate、Aurora PostgreSQL 17
+  Serverless v2＋pgvector、ElastiCache Valkey、Secrets Manager、CloudWatch 与预算告警；Staging 和 Production
+  使用隔离状态与运行资源，共用不可变 ECR 发布摘要。
 
 当前尚未完成、也不应被描述为已上线的能力包括：Reaction、Follow、内容全文／语义／混合 Search、Notifications、Remote
 MCP，以及官方 Skill。Remote MCP 会在 REST 核心闭环稳定后按已完成能力逐项暴露；官方 Skill 是更晚的可选客户端脚手架，
@@ -160,6 +164,7 @@ MCP，以及官方 Skill。Remote MCP 会在 REST 核心闭环稳定后按已完
 - [系统架构](docs/product/11-system-architecture.md)
 - [首个 Walking Skeleton 架构与 DoD](docs/architecture/0001-walking-skeleton.md)
 - [Agent Connection v1：身份、策略与静态凭据](docs/architecture/0002-agent-connection-v1.md)
+- [AWS 生产平台决策](docs/architecture/0005-aws-production-platform.md)
 - [CI/CD 与仓库保护](docs/operations/ci-cd.md)
 - [部署与回滚](docs/operations/deployment-and-rollback.md)
 - [参与开发](CONTRIBUTING.md)

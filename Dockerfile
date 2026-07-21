@@ -8,25 +8,44 @@ FROM ${NODE_IMAGE} AS build
 RUN npm install --global pnpm@10.34.5
 
 WORKDIR /workspace
-COPY . .
+
+# Dependency metadata changes far less often than application source. Keep the
+# frozen install in its own reusable layer so a documentation or source-only
+# commit does not download and link the entire workspace again for every image.
+COPY .npmrc package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/api/package.json ./apps/api/package.json
+COPY apps/mcp/package.json ./apps/mcp/package.json
+COPY apps/web/package.json ./apps/web/package.json
+COPY apps/worker/package.json ./apps/worker/package.json
+COPY packages/auth/package.json ./packages/auth/package.json
+COPY packages/config/package.json ./packages/config/package.json
+COPY packages/contracts/package.json ./packages/contracts/package.json
+COPY packages/database/package.json ./packages/database/package.json
+COPY packages/domain/package.json ./packages/domain/package.json
+COPY packages/observability/package.json ./packages/observability/package.json
 
 RUN pnpm install --frozen-lockfile
 
-FROM build AS build-web
+COPY . .
+
+FROM build AS build-packages
+RUN pnpm --filter './packages/*' --if-present build
+
+FROM build-packages AS build-web
 ARG NEXT_PUBLIC_API_URL=""
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
-RUN pnpm --filter @alphanet/web... build
+RUN pnpm --filter @alphanet/web build
 
-FROM build AS build-api
-RUN pnpm --filter @alphanet/api... build
+FROM build-packages AS build-api
+RUN pnpm --filter @alphanet/api build
 RUN pnpm --filter @alphanet/api deploy --prod --legacy /opt/alphanet/api
 
-FROM build AS build-mcp
-RUN pnpm --filter @alphanet/mcp... build
+FROM build-packages AS build-mcp
+RUN pnpm --filter @alphanet/mcp build
 RUN pnpm --filter @alphanet/mcp deploy --prod --legacy /opt/alphanet/mcp
 
-FROM build AS build-worker
-RUN pnpm --filter @alphanet/worker... build
+FROM build-packages AS build-worker
+RUN pnpm --filter @alphanet/worker build
 RUN pnpm --filter @alphanet/worker deploy --prod --legacy /opt/alphanet/worker
 
 FROM ${NODE_IMAGE} AS node-runtime
@@ -42,7 +61,16 @@ RUN apk upgrade --no-cache \
     /usr/local/bin/npm \
     /usr/local/bin/npx \
     /usr/local/bin/yarn \
-    /usr/local/bin/yarnpkg
+    /usr/local/bin/yarnpkg \
+  && install -d -m 0755 /opt/alphanet/certs
+
+# Aurora presents certificates from the regional Amazon RDS CA hierarchy.
+# Keep the public bundle checksum-pinned so a trust-store rotation is an
+# explicit, reviewed image change instead of an unverified network download.
+ADD --chmod=0444 --checksum=sha256:733b52e4b589586377e3e00f7c4625b61e14cbf0b5e08cace28b4f8aecc27c66 \
+  https://truststore.pki.rds.amazonaws.com/us-west-2/us-west-2-bundle.pem \
+  /opt/alphanet/certs/aws-rds-us-west-2-bundle.pem
+ENV NODE_EXTRA_CA_CERTS=/opt/alphanet/certs/aws-rds-us-west-2-bundle.pem
 
 FROM node-runtime AS web
 
@@ -119,11 +147,17 @@ ENV MIGRATIONS_DIR=/opt/alphanet/db/migrations
 USER root
 RUN apt-get update \
   && apt-get upgrade --yes \
-  && rm -rf /var/lib/apt/lists/* /usr/local/bin/gosu
+  && rm -rf /var/lib/apt/lists/* /usr/local/bin/gosu \
+  && install -d -m 0755 /opt/alphanet/certs
+
+ADD --chmod=0444 --checksum=sha256:733b52e4b589586377e3e00f7c4625b61e14cbf0b5e08cace28b4f8aecc27c66 \
+  https://truststore.pki.rds.amazonaws.com/us-west-2/us-west-2-bundle.pem \
+  /opt/alphanet/certs/aws-rds-us-west-2-bundle.pem
 
 WORKDIR /opt/alphanet
 COPY --chown=postgres:postgres db/migrations ./db/migrations
-COPY --chown=postgres:postgres db/scripts/migrate.sh ./db/scripts/migrate.sh
+COPY --chown=postgres:postgres db/aws ./db/aws
+COPY --chown=postgres:postgres db/scripts ./db/scripts
 
 USER postgres
 ENTRYPOINT ["/bin/bash", "/opt/alphanet/db/scripts/migrate.sh"]

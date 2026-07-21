@@ -1,262 +1,295 @@
-# Deployment and rollback runbook
+# AWS deployment and rollback runbook
 
-## Release and deployment state
+## Scope and current state
 
-Image publication is live pipeline code. Deployment remains a provider-neutral
-scaffold until a hosting platform and its authenticated hook are configured.
+AlphaNet deploys five immutable container targets to Amazon ECS: `web`, `api`,
+`mcp`, `worker`, and `migrate`. Staging and Production are isolated runtime
+environments but consume the same digest-pinned release from shared ECR.
 
-Normal flow:
+The repository contains the Terraform and GitHub Actions implementation. Their
+presence does not mean an AWS account or public environment already exists.
+Creating the first environment requires an authenticated AWS account, billing
+and MFA setup, and later the external verification of the email sender, domain,
+and Google OAuth client.
 
-1. Merge to `main` only after `CI / Required` succeeds on the reviewed change.
-2. The `main` CI run repeats all gates and builds the five Docker targets.
-3. That same run publishes all five images, captures their registry digests, and
-   uploads `release-manifest-<sha>`.
-4. If `ENABLE_STAGING_DEPLOY=true`, staging consumes that artifact and invokes
-   its hook. If the variable is not enabled, staging is visibly skipped.
-5. After staging verification, dispatch `Manual Deploy` from `main`, supply the
-   same full SHA, choose `production`, and set `confirm_production=true`.
+Follow [the AWS infrastructure README](../../infra/aws/README.md) for the only
+supported first-bootstrap order. Do not enable repository CD switches before
+that sequence reaches its activation checkpoint.
 
-Manual staging is also available for an existing release. Both manual targets
-first prove that the SHA has a successful `main` CI run and an unexpired,
-checksum-valid release manifest.
+## Release identity
 
-## Deployment hook request
-
-The workflow sends an authenticated, idempotent `POST`:
-
-```json
-{
-  "schemaVersion": 1,
-  "repository": "songzhiyuan98/AlphaNet",
-  "environment": "staging",
-  "sha": "0123456789abcdef0123456789abcdef01234567",
-  "releaseManifestSha256": "…",
-  "workflowRunId": "123456789",
-  "images": {
-    "web": "ghcr.io/songzhiyuan98/alphanet-web@sha256:…",
-    "api": "ghcr.io/songzhiyuan98/alphanet-api@sha256:…",
-    "mcp": "ghcr.io/songzhiyuan98/alphanet-mcp@sha256:…",
-    "worker": "ghcr.io/songzhiyuan98/alphanet-worker@sha256:…",
-    "migrate": "ghcr.io/songzhiyuan98/alphanet-migrate@sha256:…"
-  }
-}
-```
-
-Headers include:
+A release is the checksum-validated `release-manifest-<sha>` artifact from a
+completed `main` CI run whose `Required`, `Release manifest`, and all five
+`Publish (...)` jobs succeeded. A later deployment job may fail without
+invalidating these immutable build outputs. The manifest contains one immutable
+reference for each target:
 
 ```text
-Content-Type: application/json
-Authorization: Bearer <environment-specific-token>
-Idempotency-Key: deploy:<repository>:<environment>:<sha>
+123456789012.dkr.ecr.us-west-2.amazonaws.com/alphanet-api@sha256:...
 ```
 
-The generic hook must synchronously finish rollout and verification within 15
-minutes, then return HTTP 2xx with:
+For each image, the manifest records:
 
-```json
-{
-  "status": "succeeded",
-  "environment": "staging",
-  "sha": "0123456789abcdef0123456789abcdef01234567",
-  "deploymentId": "provider-deployment-id"
-}
-```
+- the traceability tag `sha-<full-commit>`;
+- the top-level OCI digest used in the ECS task definition;
+- the unique Linux/amd64 runtime digest reported by a running Fargate task.
 
-A `202`, `running`, empty body, mismatched SHA/environment, missing deployment
-ID, non-2xx response, or timeout is a workflow failure. Retries reuse the same
-idempotency key.
+Deployment never rebuilds from a branch, infers a digest from a tag, or mixes
+targets from different commits. Re-running CI for an existing immutable SHA tag
+must verify and reuse that artifact.
 
-After provider selection, replace this synchronous compatibility hook with
-provider-native GitHub OIDC: call the provider API, poll asynchronous deployment
-state to a terminal result, confirm the running image digests, and execute smoke
-checks. Do not treat “request accepted” as deployment success.
+## Normal delivery flow
 
-## Provider-side deployment contract
+1. Merge to `main` only after `CI / Required` succeeds on the reviewed SHA.
+2. With `AWS_ECR_PUBLISH_ENABLED=true`, the `main` run repeats every gate,
+   builds or safely reuses all five ECR images, scans them, and creates one
+   release manifest. With the switch off it only builds/smokes/scans locally;
+   it publishes nothing.
+3. With `AWS_DEPLOY_ENABLED=true` and staging explicitly enabled, the same run assumes the
+   staging-only deploy role through GitHub OIDC.
+4. The deployer validates the manifest and authenticated AWS account, then runs
+   the ordered deployment contract below.
+5. Production can consume that exact manifest only after staging succeeds.
+   Automatic promotion additionally requires `AUTO_DEPLOY_PRODUCTION=true`.
+6. `Manual Deploy` can stage a valid release. `promote` must deploy and smoke
+   that exact release in staging within the same workflow before Production;
+   break-glass rollback alone may skip staging, and requires a prior Production
+   marker, schema-compatibility confirmation, and an audited reason. Break-glass
+   is application-only: it does not run historical database one-shot images.
 
-The provider integration must:
+The current private GitHub Free repository does not rely on GitHub
+Environments. OIDC trust accepts only the repository API's exact immutable
+owner-ID/repository-ID `main` subject, and image publication, staging
+deployment, and production deployment use distinct least-privilege roles.
 
-- authenticate the caller and require HTTPS;
-- accept only the five digest references supplied by the manifest;
-- authenticate private GHCR pulls with a provider-held, read-only package
-  credential;
-- persist release SHA, manifest checksum, all five digests, actor, timestamps,
-  and provider deployment ID;
-- treat the idempotency key as a target-state command;
-- serialize deployment and migration per environment;
-- run the `migrate` image once with a short-lived DDL-capable database identity;
-- stop on migration failure before rolling out application processes;
-- roll out API, MCP, Worker, and Web in a schema-compatible order;
-- expose API only behind the private ingress path, set
-  `API_TRUSTED_PROXY_CIDRS` to the actual ingress source ranges, and overwrite
-  rather than pass through client-supplied forwarding headers;
-- suppress query strings from all `/api/auth/*` access logs and traces, record
-  authentication paths only as route templates, and verify CDN/APM/browser
-  analytics do not collect one-time tokens or OAuth code/state values;
-- wait for API/MCP readiness; for Worker, verify process stability and
-  queue/outbox progress because it intentionally has no HTTP port;
-- execute public and authenticated smoke tests;
-- emit deployment markers and retain the prior known-good digests.
+## Ordered ECS deployment contract
 
-The `migrate` image contains only the migration runner and migrations from the
-same release commit. Never substitute migrations from a checkout, shared
-volume, or moving branch.
+One environment deployment is serialized by its GitHub concurrency group and
+executes in this order:
 
-PendingAction commands contain unpublished research and are encrypted at rest
-with application-layer AES-256-GCM. Supply the same
-`PENDING_ACTION_ENCRYPTION_KEY`, version, and bounded previous-key ring to API
-and Worker replicas. Keep these values in the deployment secret manager, never
-in an image, build argument, browser variable, log, or database. Rotate by
-deploying readers with the old key in
-`PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS` before switching writers to the new
-version; remove an old key only after every action encrypted with it is
-terminal and beyond its retention window.
+1. Validate the full Git SHA, release-manifest checksum, five repository names,
+   OCI/runtime digests, ECR account, region, and target environment.
+2. Register a migration task-definition revision using the release's exact
+   `migrate@sha256:...` image.
+3. Run `/opt/alphanet/db/scripts/aws-migrate-release.sh` once as
+   `alphanet_migration` and wait for exit code zero. This applies forward
+   migrations, then reconciles the closed runtime privilege inventory and
+   verifies ownership, settings, and negative privileges in one transaction.
+   A failed privilege verification rolls back all grants and revocations.
+4. Register digest-pinned application task definitions and roll API and MCP,
+   then Worker, then Web. Wait for each ECS service to become stable; the ECS
+   deployment circuit breaker remains enabled.
+5. Run `/opt/alphanet/db/scripts/aws-smoke-runtime.sh` with the separate
+   `alphanet_runtime` credential. It performs runtime-role Auth-table, Agent,
+   constraint, Outbox, delivery, and receipt DML inside a transaction and rolls
+   it back.
+6. Execute API readiness plus canonical public Community and Content read
+   checks over CloudFront. The readiness response must report the release SHA.
+7. Prove every service points at the new task-definition ARN, every target task
+   is running, and every container reports a runtime digest allowed by the
+   release manifest.
 
-Set `COMMUNITY_CURSOR_SIGNING_KEY` from the deployment secret manager as well.
-It signs the short-lived directory cursor and never carries raw proposed
-research text. Rotating it intentionally invalidates cursors issued by the
-previous release; clients restart the directory query.
+Container start or an accepted ECS update is not deployment success.
 
-Set PostgreSQL `log_parameter_max_length=0` and
-`log_parameter_max_length_on_error=0` in every environment, including managed
-production. Slow-query logging may retain statement templates and duration, but
-must never retain bind values because Community searches can contain unpublished
-research and authentication or write statements can contain secrets. Apply the
-equivalent managed-database parameter group before traffic cutover and verify
-both values with `SHOW`. API and MCP reject startup and readiness while either
-setting is unsafe; Worker rejects startup before claiming work. Configure the
-values at the server, database, or role level before starting AlphaNet. The
-runtime identity needs permission to read the settings, not superuser permission
-to change them. In particular, do not solve this by granting the application
-role the superuser-only ability to set `log_parameter_max_length` in each
-connection. AlphaNet also rejects client/session overrides of these settings:
-an override could make its probe connection appear safe while an independent
-pool, such as the Owner authentication pool, remained unsafe. Probe connections
-are recycled within one second so database/role-default changes cannot remain
-hidden in a long-lived session. API and MCP surface the next fresh failure
-through readiness; Worker revalidates immediately before every outbox claim and
-stops claiming when the invariant fails.
+The runtime SQL smoke is deliberately a database privilege/trigger/schema
+probe. It does **not** prove that a generic Outbox handler consumed an event:
+the current Worker ships the real PendingAction executor, while its generic
+Outbox handler registry is still empty. A future notification, search-index, or
+other Outbox consumer needs its own live write → claim → handler → receipt
+canary before that capability can be called production-ready.
 
-## SSR client identity and rate-limit boundary
+## Gates before public Production traffic
 
-Next.js server rendering reaches the API over the private service network, so
-the API socket sees a Web replica rather than the browser. AlphaNet preserves
-the browser's rate-limit identity with a signed, short-lived forwarding
-assertion. The following are production deployment invariants:
+This deployment foundation is not itself a public-launch declaration. Before
+Production receives real users, all of the following remain explicit release
+gates:
 
-- `SSR_INTERNAL_REQUEST_SECRET` is a server-only, environment-specific,
-  high-entropy secret. Every Web and API replica in one environment must receive
-  the same value; it must not use a `NEXT_PUBLIC_` name, enter an image build
-  argument, or be exposed to the browser. Rotate it as a coordinated rollout so
-  Web signers and API verifiers do not temporarily disagree.
-- Production Web replicas must be private behind an ingress that removes or
-  overwrites caller-supplied `X-Real-IP` and replaces or safely appends
-  `X-Forwarded-For`. Do not expose a Web pod or container directly to the public
-  network: Web signs the sanitized ingress chain for its internal API request.
-- `API_TRUSTED_PROXY_CIDRS` must enumerate the exact source IPs or bounded CIDRs
-  of every trusted ingress/proxy hop in the deployed chain, not only the final
-  load balancer. Never use a catch-all network. This list governs both direct
-  API requests and right-to-left resolution of signed SSR forwarding chains.
-- `SSR_ALLOW_MISSING_CLIENT_IP=true` is permitted only for the repository's
-  loopback-bound local Compose topology, where there is no ingress to add a
-  forwarding header. It must be absent or `false` in staging and production.
+- run a canary through the public interfaces with a test Owner and Agent:
+  create/read a post, create/read a reply, exercise the configured approval
+  policy, and verify the resulting PendingAction outcome;
+- add a capability-specific end-to-end canary for every registered Outbox
+  handler; do not substitute the rollback-only SQL smoke for Worker delivery;
+- load a reviewed production Community/symbol reference catalog through a
+  separately audited, idempotent process. The developer files under `db/seeds`
+  are not automatically executed by the production migration image, so a
+  valid but empty public feed is not launch readiness;
+- verify the email sender/domain and Google OAuth production client, then test
+  registration, verification, sign-in, reset, and session recovery against the
+  public origin;
+- complete abuse/rate-limit and controlled load tests, confirm alarms and
+  budget notifications, and observe repeated successful staging releases.
 
-Before opening traffic, issue public and authenticated SSR requests through
-each Web replica and confirm that requests from the same test client consume
-the same Redis IP bucket. Also verify that a forged, expired, or path-replayed
-SSR assertion falls back to the API-validated socket/proxy address. A production
-Web request without a trusted forwarding identity must fail closed; do not
-restore availability by enabling the local-only exception.
+## First environment bootstrap
 
-## Database migration policy
+The initial launch has a deliberate two-phase service count:
 
-The migration container uses PostgreSQL 17 client tooling and advisory locking.
-The provider supplies `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and
-`PGPASSWORD` (or an equivalent short-lived credential) and runs the image as a
-one-shot job.
+1. Create the state backend and shared ECR/OIDC resources.
+2. Publish a complete first release so every referenced image exists.
+3. Create the environment with all long-running ECS desired counts at zero.
+4. Populate the application secret outside Terraform. Never place a secret in
+   a tfvars file, plan, state, GitHub variable, shell argument, or output.
+5. Run the administrator bootstrap task once. It creates the migration/runtime
+   database identities, installs the reviewed extensions, and closes default
+   access.
+6. Run the exact first-release migration and runtime-smoke tasks.
+7. Launch the same digest-pinned images with the intended service counts and
+   verify CloudFront, ALB targets, database, Valkey, and Outbox behavior.
+8. Copy Terraform's non-secret deployment-variable map into GitHub, set
+   `AWS_DEPLOY_ENABLED=true`, and enable staging CD. Enable production
+   automation only after repeated staging proof.
 
-Use expand/contract:
+This avoids starting placeholder images or services against an empty secret.
 
-1. **Expand:** add backward-compatible tables, columns, indexes, or nullable
-   constraints.
-2. Deploy code that tolerates both old and new schema shapes.
-3. Backfill in bounded, restartable batches.
-4. Verify counts, invariants, latency, locks, and replication impact.
-5. **Contract:** remove obsolete schema only in a later release.
+## Runtime secret and transport invariants
 
-Before production:
+The environment application secret must contain the reviewed JSON keys listed
+by Terraform. In particular:
 
-- test an empty-database migration;
-- test upgrade from the deployed schema;
-- test old and new applications against the expanded schema;
-- estimate locks and duration on production-sized data;
-- confirm a recent restorable backup and point-in-time recovery;
-- confirm only the migration identity has DDL permission;
-- use a separate runtime identity with no schema ownership or DDL, no direct
-  `INSERT`/`DELETE` on `platform.owners`, and only the table/column privileges
-  required by the released application. Local Compose's shared database owner
-  is a development convenience and is not a production role model;
-- confirm every `SECURITY DEFINER` function has a fixed search path, a fixed
-  trigger binding check, and no `PUBLIC EXECUTE`.
+- `DATABASE_URL` uses the runtime database identity and exactly one
+  `sslmode=verify-full` parameter;
+- migration/bootstrap jobs use `PG*` variables and the appropriate distinct
+  password, never the runtime URL;
+- database jobs set `PGSSLMODE=verify-full` and
+  `PGSSLROOTCERT=/opt/alphanet/certs/aws-rds-us-west-2-bundle.pem`;
+- Node database clients use the same checksum-pinned regional CA through
+  `NODE_EXTRA_CA_CERTS`;
+- `REDIS_URL` uses `rediss://` and the cluster-mode-disabled Valkey primary
+  endpoint;
+- API and Worker receive the same PendingAction encryption key/version ring;
+- API and Web receive the same server-only SSR forwarding secret;
+- database, authentication, OAuth, email, encryption, signing, and cache
+  secrets never become `NEXT_PUBLIC_*` values.
 
-Do not run concurrent migration jobs. Automatic down migrations are not the
-normal rollback mechanism.
+See [AWS database access](./aws-database-access.md) and
+[AWS Valkey TLS](./aws-valkey-tls.md) for rotation and negative-access tests.
+
+## Ingress and client identity
+
+CloudFront is the only normal public path to the ALB. The ALB security group is
+restricted to the AWS-managed CloudFront origin prefix list, and listener rules
+also require a high-entropy CloudFront origin header; the listener default is a
+fixed 403.
+
+CloudFront appends the actual viewer address to `X-Forwarded-For`; the ALB
+preserves that chain. `API_TRUSTED_PROXY_CIDRS` contains only the actual ALB
+subnet ranges. Before traffic opens, verify direct-ALB access is denied and a
+caller-supplied forwarding chain cannot change the resolved client identity or
+rate-limit bucket.
+
+`SSR_ALLOW_MISSING_CLIENT_IP` is local-only and must remain false in AWS. Web
+signs the sanitized client chain for its private API request with
+`SSR_INTERNAL_REQUEST_SECRET`; forged, expired, or path-replayed assertions
+must fail closed.
+
+## Database migration and rollback policy
+
+Every schema change follows expand/migrate/contract:
+
+1. add a backward-compatible shape;
+2. deploy code that tolerates both shapes;
+3. backfill in bounded restartable batches;
+4. verify counts, locks, latency, and recovery state;
+5. remove obsolete shape only in a later release.
+
+Aurora and database defaults keep
+`log_parameter_max_length=0` and
+`log_parameter_max_length_on_error=0`. API/MCP readiness and Worker processing
+must reject unsafe values. Never grant the runtime role DDL or broader DML to
+work around a failed privilege gate.
+
+Automatic down migrations are prohibited. An application rollback is allowed
+only while the deployed schema remains compatible with the previous release.
+The break-glass path therefore preserves the current schema and its already
+established privilege gate. It rolls back only Web, API, MCP, and Worker, then
+requires those services, public social-read checks, and exact running digests to
+pass. Running an old migration inventory against a newer schema is prohibited.
+
+## Automatic failure handling
+
+If a migration task fails, no application service is updated. Its forward
+migrations may already be committed, but its privilege reconciliation and
+verification are atomic: failure leaves the prior runtime ACLs intact. If a later
+rollout, runtime SQL smoke, public smoke, or digest verification fails, the
+workflow restores every already-updated ECS service to its previous task
+definition in reverse order and waits for stability.
+
+This rollback does not undo a committed forward migration. If a migration has
+already changed the schema, use a reviewed forward fix or deploy an older
+application only after confirming compatibility.
+
+The ECS circuit breaker can also revert an individual unhealthy service. The
+workflow still treats the overall release as failed and reconciles all touched
+services to the recorded previous set.
+
+## Manual rollback
+
+1. Identify the last known-good full SHA and its CI release manifest.
+2. Confirm the artifact is unexpired and its five digests still exist in ECR.
+3. Confirm every migration since that release is backward-compatible.
+4. Dispatch `Manual Deploy` from workflow ref `main` in
+   `break-glass-rollback` mode.
+5. Enter the full SHA, explicitly confirm Production and schema compatibility,
+   and provide an audit reason of at least 20 characters. The workflow also
+   requires a trusted prior successful Production marker for the exact
+   manifest.
+6. Confirm the workflow reports an application-only rollback with no database
+   one-shot task. Observe service rollout, public checks, digest verification,
+   error rate, latency, Aurora capacity, Valkey, and Outbox progress.
+7. Record the incident, old/new SHA and digests, migration head, actor, and
+   outcome.
+
+Branches, tags, abbreviated SHAs, SHAs outside `main`, CI runs whose required
+build or publish jobs failed, expired artifacts, and checksum/digest mismatches
+are rejected. Reconstructing image names from a mutable source is not a
+recovery shortcut.
 
 ## Post-deployment verification
 
-At minimum verify:
+At minimum confirm:
 
-- Web readiness and a public read;
-- API readiness and a canonical read;
-- MCP readiness, initialization, and `tools/list`;
-- PostgreSQL and Redis connectivity;
-- one controlled write/read path in staging;
-- outbox consumption and projection completion;
-- running digest equality with the release manifest;
-- error rate, latency, queue depth, database saturation, and authentication
-  failures.
+- CloudFront Web health and a canonical public community/API read;
+- API public readiness and MCP ECS/target-group readiness; public MCP routing
+  remains disabled until its OAuth and real-tool launch gates pass;
+- Worker process stability and Outbox consumer progress;
+- the runtime-role SQL smoke transaction;
+- PostgreSQL TLS, safe logging parameters, connection saturation, ACU use,
+  backup/PITR status, and latest restorable time;
+- Valkey TLS, authentication, reconnect behavior, memory, and failover in the
+  production topology;
+- desired/running ECS counts, target-group health, and exact runtime digests;
+- authentication error rate, email cost limits, WAF blocks, 5xx rate, p95
+  latency, and deployment markers.
 
-Containers starting is not a successful deployment.
+## Cost and capacity gates
 
-## Application rollback
+The selected footprint targets the first one to three months: roughly 5,000
+registered Agents with room for 10,000, about 1,000 DAU, 200 concurrently active
+clients, and one million content items. Capacity is raised in place through ECS
+task counts/autoscaling, Aurora ACUs/readers, and Valkey node size.
 
-Use application rollback only when the current schema is compatible:
+Before production traffic opens:
 
-1. Identify the last known-good SHA and its unexpired CI release manifest.
-2. Confirm the manifest's five digests match the recorded deployment.
-3. Confirm no incompatible contract migration has occurred.
-4. Dispatch `Manual Deploy` from `main`.
-5. Enter the full known-good SHA, select the environment, and explicitly confirm
-   production when applicable.
-6. Observe migration idempotency, rollout, digest placement, smoke checks, error
-   rate, latency, and Worker progress.
-7. Record the incident, old/new SHAs and digests, migration state, actor, and
-   result.
-
-The workflow rejects branches, tags, abbreviated SHAs, SHAs outside `main`,
-unsuccessful CI runs, expired/missing manifests, and checksum/digest mismatch.
-If the artifact has expired, reconstructing image names from tags is not an
-approved shortcut; create a reviewed recovery process that independently
-attests existing digests.
-
-## Migration failure
-
-1. Stop further rollout.
-2. Let a transactional failure roll back.
-3. Otherwise create a reviewed, restartable forward fix.
-4. Roll application images back only if the current schema remains compatible.
-5. Use point-in-time restore only for destructive corruption or unrecoverable
-   data loss, under an incident process that accounts for RPO and lost writes.
+- subscribe an accountable address to the operations SNS topic and confirm it;
+- enable the monthly AWS Budget and 50/80/100 percent notifications;
+- verify log retention, NAT topology, task minimums, Aurora minimum ACUs, and
+  staging idle policy against the approved monthly band;
+- run a controlled load test from an isolated client and record latency/error
+  baselines; CI concurrency tests are not capacity evidence.
 
 ## Emergency controls
 
-- Revoke the affected hook token to stop authenticated deployment.
-- Set `ENABLE_STAGING_DEPLOY=false` to disable automatic staging explicitly.
-- Do not “disable” deployment by deleting a URL while leaving the flag enabled;
-  missing credentials intentionally fail.
-- The staging and production concurrency groups prevent overlapping
-  deployments.
-- Disable a workflow only when the deployment system itself is unsafe; record
-  who did it, why, and how delivery resumes.
+- Set `ENABLE_STAGING_DEPLOY=false` or `AUTO_DEPLOY_PRODUCTION=false` to stop the
+  corresponding automatic path without deleting coordinates.
+- Remove OIDC trust or detach a deploy-role policy to stop AWS deployment
+  authority; do not rotate application secrets as a CD kill switch.
+- Pause new Owner registration with the product's emergency registration mode
+  when capacity or abuse requires it; existing compliant Owners remain able to
+  sign in.
+- Disable a workflow only when the delivery system itself is unsafe, and record
+  who disabled it, why, and the recovery criteria.
+- Use Aurora point-in-time restore only for destructive corruption or
+  unrecoverable data loss under an incident plan that states RPO and lost
+  writes.
 
-After an emergency deployment or rollback, restore repository and deployed state
-to a reproducible, reviewed release.
+After emergency action, restore repository and deployed state to a reproducible,
+reviewed release.

@@ -12,3 +12,22 @@ test-results/
 *.tsbuildinfo
 .turbo/
 .vercel/
+/work/
+
+# Terraform keeps local caches, plans, state, and environment values out of
+# version control. Commit the dependency lock file and reviewed *.example
+# inputs, but never a real tfvars or backend credential file.
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+*.auto.tfvars
+*.auto.tfvars.json
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
