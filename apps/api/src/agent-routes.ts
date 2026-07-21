@@ -3,11 +3,13 @@ import {
   CreateAgentRequestSchema,
   CreateCredentialRequestSchema,
   AgentHandleSchema,
+  AgentPolicyRulesSchema,
   RotateCredentialRequestSchema,
   UpdateAgentRequestSchema,
   type AgentContextResponse,
   type AgentCredentialSummary,
   type AgentEffectiveCapabilities,
+  type AgentPolicySummary,
   type V1ErrorDetail,
   type OwnerAgentSummary,
   type PublicAgentProfileResponse,
@@ -19,8 +21,10 @@ import {
   type AgentConnectionService,
   type AgentCredentialContext,
   type AgentOperation,
+  type AgentPolicyView,
   type CredentialView,
   evaluateAgentOperation,
+  materializeAgentPolicyRules,
   type OwnerAgentView,
 } from "@alphanet/domain";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -263,7 +267,21 @@ async function consumeLimit(
   }
 }
 
-function serializeAgent(agent: OwnerAgentView): OwnerAgentSummary {
+export function serializeAgentPolicy(policy: AgentPolicyView): AgentPolicySummary {
+  return {
+    id: policy.id,
+    tier: policy.tier,
+    defaults_version: policy.defaultsVersion,
+    policy_schema_version: String(policy.schemaVersion),
+    version: Number(policy.version),
+    rules: AgentPolicyRulesSchema.parse(
+      materializeAgentPolicyRules(policy.tier, policy.rules),
+    ),
+    effective_from: policy.effectiveFrom.toISOString(),
+  };
+}
+
+export function serializeAgent(agent: OwnerAgentView): OwnerAgentSummary {
   return {
     id: agent.id,
     actor_id: agent.actorId,
@@ -274,14 +292,7 @@ function serializeAgent(agent: OwnerAgentView): OwnerAgentSummary {
     discovery_tags: agent.discoveryTags,
     status: agent.status,
     restriction_reason_code: agent.restrictionReasonCode,
-    policy: {
-      id: agent.policy.id,
-      tier: agent.policy.tier,
-      defaults_version: agent.policy.defaultsVersion,
-      policy_schema_version: String(agent.policy.schemaVersion),
-      version: Number(agent.policy.version),
-      effective_from: agent.policy.effectiveFrom.toISOString(),
-    },
+    policy: serializeAgentPolicy(agent.policy),
     credential_count: agent.credentialCount,
     created_at: agent.createdAt.toISOString(),
     updated_at: agent.updatedAt.toISOString(),
@@ -291,6 +302,16 @@ function serializeAgent(agent: OwnerAgentView): OwnerAgentSummary {
 }
 
 function serializeCredential(credential: CredentialView): AgentCredentialSummary {
+  if (
+    !credential.policyCeilingDefaultsVersion ||
+    !credential.policyCeilingRules ||
+    credential.policyCeilingSchemaVersion === undefined
+  ) {
+    throw new Error("The Credential policy ceiling snapshot is unavailable.");
+  }
+  const policyCeilingRules = AgentPolicyRulesSchema.parse(
+    materializeAgentPolicyRules(credential.policyCeiling, credential.policyCeilingRules),
+  );
   return {
     id: credential.id,
     agent_id: credential.agentId,
@@ -299,6 +320,10 @@ function serializeCredential(credential: CredentialView): AgentCredentialSummary
     token_prefix: credential.prefix,
     scopes: credential.scopes,
     audience: credential.audience,
+    policy_ceiling: credential.policyCeiling,
+    policy_ceiling_defaults_version: credential.policyCeilingDefaultsVersion,
+    policy_ceiling_schema_version: String(credential.policyCeilingSchemaVersion),
+    policy_ceiling_rules: policyCeilingRules,
     status: credential.status,
     issued_at: credential.issuedAt.toISOString(),
     expires_at: credential.expiresAt?.toISOString() ?? null,
@@ -337,7 +362,14 @@ function effectiveCapabilities(
   ) =>
     evaluateAgentOperation({
       credentialPolicyCeiling: context.credential.policyCeiling,
+      credentialPolicyCeilingDefaultsVersion:
+        context.credential.policyCeilingDefaultsVersion,
+      credentialPolicyCeilingRules: context.credential.policyCeilingRules,
+      credentialPolicyCeilingSchemaVersion: context.credential.policyCeilingSchemaVersion,
       operation,
+      policyDefaultsVersion: context.agent.policy.defaultsVersion,
+      policyRules: context.agent.policy.rules,
+      policySchemaVersion: context.agent.policy.schemaVersion,
       policyTier: context.agent.policy.tier,
       scopes: context.credential.scopes,
     }).decision;

@@ -34,6 +34,18 @@ const agent: OwnerAgentSummary = {
     effective_from: timestamp,
     id: ids.policy,
     policy_schema_version: "1",
+    rules: {
+      browse: "allow",
+      content_read: "allow",
+      content_write: "require_approval",
+      delete_own_content: "require_approval",
+      edit_own_content: "require_approval",
+      follow_write: "allow",
+      notification_read: "allow",
+      reaction_write: "allow",
+      reply_write: "require_approval",
+      search: "allow",
+    },
     tier: "assisted",
     version: 1,
   },
@@ -51,6 +63,10 @@ const credential: AgentCredentialSummary = {
   issued_at: timestamp,
   last_used_at: null,
   name: "Primary workflow",
+  policy_ceiling: "assisted",
+  policy_ceiling_defaults_version: "agent-permission-defaults-v1",
+  policy_ceiling_rules: agent.policy.rules,
+  policy_ceiling_schema_version: "1",
   revoked_at: null,
   rotated_at: null,
   scopes: ["research:read", "community:read", "notifications:read", "actions:read"],
@@ -145,5 +161,36 @@ describe("CredentialWorkspace", () => {
     });
     expect(screen.getByRole("status").textContent).toContain("完整密钥已从页面清除");
     expect(screen.getByText("Primary workflow")).toBeTruthy();
+    expect(screen.getByText("辅助（签发时固定）")).toBeTruthy();
+  });
+
+  it("explains the frozen rules for a Custom credential", async () => {
+    const customCredential: AgentCredentialSummary = {
+      ...credential,
+      policy_ceiling: "custom",
+      policy_ceiling_rules: {
+        ...credential.policy_ceiling_rules,
+        content_write: "allow",
+        reaction_write: "deny",
+      },
+    };
+
+    const user = userEvent.setup();
+    render(
+      <CredentialWorkspace
+        agents={[agent]}
+        initialAgentId={ids.agent}
+        initialCredentials={[customCredential]}
+      />,
+    );
+
+    await user.click(screen.getByText("查看冻结的 Custom 权限规则"));
+    expect(screen.getByText("发布研究").parentElement?.textContent).toContain("允许");
+    expect(screen.getByText("Reaction").parentElement?.textContent).toContain("拒绝");
+
+    await user.click(screen.getByRole("button", { name: "轮换" }));
+    expect(screen.getByRole("alert").textContent).toContain(
+      "上限及冻结规则快照原样保留，不会升级",
+    );
   });
 });

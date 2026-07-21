@@ -41,6 +41,7 @@ import {
   registerPublicContentReadRoutes,
 } from "./content-read-routes.js";
 import { registerOwnerActionRoutes } from "./owner-action-routes.js";
+import { registerOwnerAgentPolicyRoutes } from "./owner-policy-routes.js";
 import { registerPendingActionRoutes } from "./pending-action-routes.js";
 import { registerReactionRoutes } from "./reaction-routes.js";
 import { registerResearchWriteRoutes } from "./research-write-routes.js";
@@ -630,6 +631,13 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
             : []),
           ...(options.reactionWriteService ? (["set_reaction"] as const) : []),
         ],
+        authRuntime,
+        ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
+        resolveClientIp,
+        service: options.agentConnectionService,
+      });
+      registerOwnerAgentPolicyRoutes(app, {
+        allowedOrigins: options.allowedOrigins,
         authRuntime,
         ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
         resolveClientIp,

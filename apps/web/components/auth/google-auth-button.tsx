@@ -5,7 +5,13 @@ import { useState } from "react";
 import { authClient, webCallbackUrl } from "../../lib/auth-client";
 import { friendlyAuthError } from "../../lib/auth-errors";
 
-export function GoogleAuthButton({ intent }: Readonly<{ intent: "login" | "register" }>) {
+export function GoogleAuthButton({
+  callbackPath = "/home",
+  intent,
+}: Readonly<{
+  callbackPath?: `/${string}`;
+  intent: "login" | "register";
+}>) {
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
@@ -15,7 +21,7 @@ export function GoogleAuthButton({ intent }: Readonly<{ intent: "login" | "regis
 
     try {
       const result = await authClient.signIn.social({
-        callbackURL: webCallbackUrl("/home"),
+        callbackURL: webCallbackUrl(callbackPath),
         errorCallbackURL: webCallbackUrl("/auth/error"),
         provider: "google",
       });

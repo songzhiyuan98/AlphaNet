@@ -10,7 +10,7 @@ import {
   type OwnerAgentSummary,
 } from "@alphanet/contracts";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   formatUtcDateTime,
@@ -20,6 +20,7 @@ import {
   statusLabels,
 } from "../../lib/agent-ui";
 import { friendlyOwnerApiError, ownerApiRequest } from "../../lib/browser-owner-api";
+import { AgentPolicyControl, tierLabels } from "./agent-policy-control";
 
 const tagPattern = /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/;
 
@@ -54,20 +55,32 @@ export function AgentManager({
   const [editDisplayName, setEditDisplayName] = useState("");
   const [editBio, setEditBio] = useState("");
   const [editTags, setEditTags] = useState("");
+  const [policyId, setPolicyId] = useState<string | null>(null);
+  const [policyFocusTarget, setPolicyFocusTarget] = useState<string | null>(null);
   const [archiveId, setArchiveId] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const policyButtons = useRef(new Map<string, HTMLButtonElement>());
 
   const createBlocked =
     !emailVerified || data.quota.created_last_24_hours >= data.quota.create_limit;
 
-  async function refreshAgents(): Promise<void> {
+  useEffect(() => {
+    if (!policyFocusTarget || policyId !== null) return;
+    const trigger = policyButtons.current.get(policyFocusTarget);
+    if (!trigger) return;
+    trigger.focus();
+    setPolicyFocusTarget(null);
+  }, [policyFocusTarget, policyId]);
+
+  async function refreshAgents(): Promise<OwnerAgentListResponse> {
     const response = await ownerApiRequest(
       "/v1/owner/agents",
       OwnerAgentListResponseSchema,
     );
     setData(response);
+    return response;
   }
 
   function validateTags(rawTags: string): string[] | null {
@@ -130,9 +143,35 @@ export function AgentManager({
     setEditDisplayName(agent.display_name);
     setEditBio(agent.bio ?? "");
     setEditTags(agent.discovery_tags.join(", "));
+    setPolicyId(null);
     setArchiveId(null);
     setError(null);
     setNotice(null);
+  }
+
+  function beginPolicyEdit(agent: OwnerAgentSummary): void {
+    setPolicyId(agent.id);
+    setEditingId(null);
+    setArchiveId(null);
+    setError(null);
+    setNotice(null);
+  }
+
+  function closePolicyEdit(agentId: string): void {
+    setPolicyId(null);
+    setPolicyFocusTarget(agentId);
+  }
+
+  function policyUpdated(agent: OwnerAgentSummary, message: string): void {
+    setData((current) => ({
+      ...current,
+      agents: current.agents.map((candidate) =>
+        candidate.id === agent.id ? agent : candidate,
+      ),
+    }));
+    closePolicyEdit(agent.id);
+    setError(null);
+    setNotice(message);
   }
 
   async function updateAgent(event: React.FormEvent<HTMLFormElement>, agentId: string) {
@@ -256,7 +295,7 @@ export function AgentManager({
 
       {!emailVerified ? (
         <p className="inlineWarning pageWarning" role="alert">
-          请先完成邮箱验证，再创建 Agent 或签发凭证。
+          请先完成邮箱验证，再创建 Agent、签发凭证或更改权限策略。
         </p>
       ) : null}
       {error ? (
@@ -457,8 +496,12 @@ export function AgentManager({
                   <dl className="agentMetadata">
                     <div>
                       <dt>权限策略</dt>
-                      <dd>
-                        {agent.policy.tier} · v{agent.policy.version}
+                      <dd className="agentPolicySummary">
+                        <strong>{tierLabels[agent.policy.tier]}</strong>
+                        <span>
+                          v{agent.policy.version} ·{" "}
+                          {formatUtcDateTime(agent.policy.effective_from)} UTC
+                        </span>
                       </dd>
                     </div>
                     <div>
@@ -477,7 +520,7 @@ export function AgentManager({
                 </>
               )}
 
-              {editingId !== agent.id ? (
+              {editingId !== agent.id && policyId !== agent.id ? (
                 <div className="agentCardActions">
                   {agent.status === "active" ? (
                     <>
@@ -510,6 +553,18 @@ export function AgentManager({
                     <>
                       <button
                         className="smallGhostButton"
+                        disabled={pendingAction !== null || !emailVerified}
+                        onClick={() => beginPolicyEdit(agent)}
+                        ref={(element) => {
+                          if (element) policyButtons.current.set(agent.id, element);
+                          else policyButtons.current.delete(agent.id);
+                        }}
+                        type="button"
+                      >
+                        管理权限
+                      </button>
+                      <button
+                        className="smallGhostButton"
                         disabled={pendingAction !== null}
                         onClick={() => beginEdit(agent)}
                         type="button"
@@ -522,6 +577,7 @@ export function AgentManager({
                         onClick={() => {
                           setArchiveId(agent.id);
                           setEditingId(null);
+                          setPolicyId(null);
                         }}
                         type="button"
                       >
@@ -530,6 +586,33 @@ export function AgentManager({
                     </>
                   ) : null}
                 </div>
+              ) : null}
+
+              {policyId === agent.id ? (
+                <AgentPolicyControl
+                  agent={agent}
+                  disabled={
+                    pendingAction !== null && pendingAction !== `policy:${agent.id}`
+                  }
+                  onClose={() => closePolicyEdit(agent.id)}
+                  onPendingChange={(pending) =>
+                    setPendingAction((current) =>
+                      pending
+                        ? `policy:${agent.id}`
+                        : current === `policy:${agent.id}`
+                          ? null
+                          : current,
+                    )
+                  }
+                  onPolicyUpdated={policyUpdated}
+                  onReload={async () => {
+                    const response = await refreshAgents();
+                    return (
+                      response.agents.find((candidate) => candidate.id === agent.id) ??
+                      null
+                    );
+                  }}
+                />
               ) : null}
 
               {archiveId === agent.id ? (

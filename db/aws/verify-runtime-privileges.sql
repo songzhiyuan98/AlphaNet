@@ -81,6 +81,7 @@ SELECT 'platform', table_name, 'UPDATE'
 FROM (
   VALUES
     ('actors'::name),
+    ('agent_policies'::name),
     ('agents'::name),
     ('content_items'::name),
     ('credentials'::name),
@@ -135,6 +136,7 @@ INSERT INTO expected_function_privileges (
   identity_arguments
 )
 VALUES
+  ('platform', 'agent_policy_rules_are_valid', 'tier text, defaults_version text, policy_schema_version integer, rules jsonb'),
   ('platform', 'agent_scopes_are_valid', 'candidate text[]'),
   ('platform', 'audit_json_is_secret_free', 'document jsonb'),
   ('platform', 'audit_json_is_secret_free_v2', 'document jsonb'),

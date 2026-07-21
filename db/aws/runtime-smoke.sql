@@ -14,6 +14,9 @@ SELECT
   pg_catalog.gen_random_uuid()::text AS actor_id,
   pg_catalog.gen_random_uuid()::text AS agent_id,
   pg_catalog.gen_random_uuid()::text AS policy_id,
+  pg_catalog.gen_random_uuid()::text AS replacement_policy_id,
+  pg_catalog.gen_random_uuid()::text AS credential_id,
+  pg_catalog.gen_random_uuid()::text AS replacement_credential_id,
   pg_catalog.gen_random_uuid()::text AS aggregate_id,
   pg_catalog.gen_random_uuid()::text AS consumer_suffix
 \gset
@@ -74,7 +77,7 @@ VALUES (
   :'owner_id',
   'smoke-' || left(replace(:'actor_id', '-', ''), 20),
   'AWS runtime smoke Agent',
-  'draft'
+  'active'
 );
 
 INSERT INTO platform.agents (
@@ -82,14 +85,16 @@ INSERT INTO platform.agents (
   actor_id,
   owner_id,
   discovery_tags,
-  status
+  status,
+  activated_at
 )
 VALUES (
   :'agent_id',
   :'actor_id',
   :'owner_id',
   ARRAY['risk']::text[],
-  'draft'
+  'active',
+  clock_timestamp()
 );
 
 INSERT INTO platform.agent_policies (
@@ -115,6 +120,45 @@ VALUES (
   :'owner_id'
 );
 
+UPDATE platform.registration_controls
+SET active_agent_count = active_agent_count + 1
+WHERE id = true;
+
+INSERT INTO platform.credentials (
+  id,
+  owner_id,
+  agent_id,
+  name,
+  credential_type,
+  token_prefix,
+  secret_digest,
+  pepper_version,
+  scopes,
+  audience,
+  policy_ceiling,
+  policy_ceiling_defaults_version,
+  policy_ceiling_schema_version,
+  policy_ceiling_rules,
+  expires_at
+)
+VALUES (
+  :'credential_id',
+  :'owner_id',
+  :'agent_id',
+  'AWS runtime smoke credential',
+  'static_api_key',
+  'aln_v1_' || left(replace(:'credential_id', '-', ''), 12),
+  public.digest('runtime-smoke:' || :'credential_id', 'sha256'),
+  1,
+  ARRAY['research:read']::text[],
+  'urn:alphanet:api:v1',
+  'assisted',
+  'agent-permission-defaults-v1',
+  1,
+  '{}'::jsonb,
+  clock_timestamp() + interval '1 day'
+);
+
 UPDATE platform.actors
 SET bio = 'Least-privilege runtime smoke test'
 WHERE id = :'actor_id';
@@ -122,6 +166,83 @@ WHERE id = :'actor_id';
 UPDATE platform.agents
 SET discovery_tags = ARRAY['risk', 'valuation']::text[]
 WHERE id = :'agent_id';
+
+UPDATE platform.agent_policies
+SET is_active = false
+WHERE id = :'policy_id'
+  AND agent_id = :'agent_id'
+  AND is_active;
+
+INSERT INTO platform.agent_policies (
+  id,
+  agent_id,
+  tier,
+  defaults_version,
+  policy_schema_version,
+  version,
+  rules,
+  is_active,
+  configured_by_owner_id
+)
+VALUES (
+  :'replacement_policy_id',
+  :'agent_id',
+  'read_only',
+  'agent-permission-defaults-v1',
+  1,
+  2,
+  '{}'::jsonb,
+  true,
+  :'owner_id'
+);
+
+UPDATE platform.credentials
+SET revoked_at = clock_timestamp()
+WHERE id = :'credential_id'
+  AND owner_id = :'owner_id'
+  AND agent_id = :'agent_id';
+
+INSERT INTO platform.credentials (
+  id,
+  owner_id,
+  agent_id,
+  name,
+  credential_type,
+  token_prefix,
+  secret_digest,
+  pepper_version,
+  scopes,
+  audience,
+  policy_ceiling,
+  policy_ceiling_defaults_version,
+  policy_ceiling_schema_version,
+  policy_ceiling_rules,
+  expires_at,
+  replaces_credential_id
+)
+SELECT
+  :'replacement_credential_id',
+  credential.owner_id,
+  credential.agent_id,
+  credential.name,
+  credential.credential_type,
+  'aln_v1_' || left(replace(:'replacement_credential_id', '-', ''), 12),
+  public.digest(
+    'runtime-smoke:' || :'replacement_credential_id',
+    'sha256'
+  ),
+  credential.pepper_version,
+  credential.scopes,
+  credential.audience,
+  credential.policy_ceiling,
+  credential.policy_ceiling_defaults_version,
+  credential.policy_ceiling_schema_version,
+  credential.policy_ceiling_rules,
+  credential.expires_at,
+  credential.id
+FROM platform.credentials AS credential
+WHERE credential.id = :'credential_id'
+  AND credential.revoked_at IS NOT NULL;
 
 SET CONSTRAINTS ALL IMMEDIATE;
 
@@ -191,6 +312,39 @@ SELECT (
     FROM platform.agents
     WHERE id = :'agent_id'
       AND discovery_tags = ARRAY['risk', 'valuation']::text[]
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM platform.agent_policies
+    WHERE id = :'replacement_policy_id'
+      AND agent_id = :'agent_id'
+      AND tier = 'read_only'
+      AND version = 2
+      AND is_active
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM platform.credentials AS replacement
+    JOIN platform.credentials AS predecessor
+      ON predecessor.id = replacement.replaces_credential_id
+    WHERE replacement.id = :'replacement_credential_id'
+      AND replacement.owner_id = :'owner_id'
+      AND replacement.agent_id = :'agent_id'
+      AND replacement.policy_ceiling = 'assisted'
+      AND replacement.policy_ceiling_defaults_version =
+        'agent-permission-defaults-v1'
+      AND replacement.policy_ceiling_schema_version = 1
+      AND replacement.policy_ceiling_rules = '{}'::jsonb
+      AND replacement.revoked_at IS NULL
+      AND predecessor.id = :'credential_id'
+      AND predecessor.revoked_at IS NOT NULL
+      AND predecessor.policy_ceiling = replacement.policy_ceiling
+      AND predecessor.policy_ceiling_defaults_version =
+        replacement.policy_ceiling_defaults_version
+      AND predecessor.policy_ceiling_schema_version =
+        replacement.policy_ceiling_schema_version
+      AND predecessor.policy_ceiling_rules =
+        replacement.policy_ceiling_rules
   )
   AND EXISTS (
     SELECT 1

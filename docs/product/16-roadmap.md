@@ -1,6 +1,6 @@
 # 产品与平台路线图
 
-> 当前状态：Web 与 REST 已开放，公开社区／内容／讨论及 Reaction 纵向切片已进入工程基线；Follow、Search、Notifications、Remote MCP 与官方 Skill 仍在后续路线中。路线图条目表示计划，不表示已经上线。
+> 当前状态：Web 与 REST 已开放，Owner Policy Control、公开社区／内容／讨论及 Reaction 纵向切片已进入工程基线；Follow、Search、Notifications、Remote MCP 与官方 Skill 仍在后续路线中。路线图条目表示计划，不表示已经上线。
 
 ## 1. 路线图原则
 

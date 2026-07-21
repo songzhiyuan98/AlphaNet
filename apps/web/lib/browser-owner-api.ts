@@ -88,6 +88,8 @@ const friendlyMessages: Record<string, string> = {
   AGENT_CREATE_RATE_LIMITED: "过去 24 小时创建 Agent 的次数已达上限。",
   AGENT_HANDLE_TAKEN: "这个 Handle 已被使用，请换一个。",
   AGENT_NOT_FOUND: "找不到这个 Agent，它可能已被移除。",
+  AGENT_POLICY_VERSION_CONFLICT: "Agent 权限策略已发生变化，请检查最新版本。",
+  AUTONOMOUS_ACKNOWLEDGEMENT_REQUIRED: "请明确确认无需逐项审批的内容写入风险。",
   RESOURCE_NOT_FOUND: "找不到这个资源，或它不属于当前账户。",
   AGENT_STATE_CONFLICT: "Agent 当前状态不允许执行此操作。",
   ACTION_DECISION_CONFLICT: "这个动作已经被处理，无法重复决策。",
@@ -101,11 +103,15 @@ const friendlyMessages: Record<string, string> = {
   CREDENTIAL_QUOTA_EXCEEDED: "已达到有效凭证数量上限。",
   CREDENTIAL_REVOKED: "这个凭证已经撤销。",
   CSRF_VALIDATION_FAILED: "请求来源校验失败，请从 AlphaNet 控制面重试。",
+  INVALID_ARGUMENT: "提交的权限设置不符合要求，请检查后重试。",
   NETWORK_ERROR: "无法连接控制面，请检查网络后重试。",
   OWNER_EMAIL_VERIFICATION_REQUIRED: "请先完成 Owner 邮箱验证。",
   OWNER_NOT_ACTIVE: "Owner 账户当前不能执行此操作。",
+  OWNER_REAUTHENTICATION_REQUIRED: "需要重新登录以确认这次高权限变更。",
   OWNER_ACTION_UNAVAILABLE: "审批服务暂时不可用，请稍后重试。",
+  OWNER_POLICY_UNAVAILABLE: "权限策略服务暂时不可用，请稍后重试。",
   PLATFORM_AGENT_CAPACITY_EXCEEDED: "平台容量暂时已满，请稍后重试。",
+  POLICY_RULES_INVALID: "自定义权限规则无效，请检查每项设置。",
   TOKEN_EXPIRED: "这个凭证已经过期。",
   VALIDATION_FAILED: "提交内容不符合要求，请检查后重试。",
 };
@@ -120,9 +126,10 @@ export function friendlyOwnerApiError(error: unknown): string {
   }
 
   const base = friendlyMessages[error.code] ?? error.message;
+  const requestId = error.requestId ? ` Request ID：${error.requestId}` : "";
   if (error.retryAfterMs && error.retryAfterMs > 0) {
     const seconds = Math.max(1, Math.ceil(error.retryAfterMs / 1_000));
-    return `${base} 约 ${seconds} 秒后可重试。`;
+    return `${base} 约 ${seconds} 秒后可重试。${requestId}`;
   }
-  return base;
+  return `${base}${requestId}`;
 }

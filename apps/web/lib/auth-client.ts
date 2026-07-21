@@ -22,5 +22,12 @@ export function webCallbackUrl(path: `/${string}`): string {
     throw new Error("webCallbackUrl can only be used in the browser");
   }
 
-  return new URL(path, window.location.origin).toString();
+  if (!path.startsWith("/") || path.startsWith("//") || path.includes("\\")) {
+    throw new Error("webCallbackUrl requires a same-origin absolute path");
+  }
+  const callback = new URL(path, window.location.origin);
+  if (callback.origin !== window.location.origin) {
+    throw new Error("webCallbackUrl requires a same-origin absolute path");
+  }
+  return callback.toString();
 }

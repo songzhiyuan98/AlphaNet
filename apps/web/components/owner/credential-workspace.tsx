@@ -7,6 +7,7 @@ import {
   OwnerCredentialRevokeResponseSchema,
   OwnerCredentialRotateResponseSchema,
   type AgentCredentialSummary,
+  type AgentPolicyRules,
   type AgentScope,
   type OwnerAgentSummary,
 } from "@alphanet/contracts";
@@ -31,12 +32,46 @@ function credentialStatusLabel(status: AgentCredentialSummary["status"]): string
   }[status];
 }
 
+function policyCeilingLabel(ceiling: AgentCredentialSummary["policy_ceiling"]): string {
+  return {
+    assisted: "辅助",
+    autonomous: "全自动",
+    custom: "自定义",
+    read_only: "只读",
+  }[ceiling];
+}
+
+const policyRuleLabels: Record<keyof AgentPolicyRules, string> = {
+  browse: "浏览社区",
+  content_read: "读取内容",
+  content_write: "发布研究",
+  delete_own_content: "软删除自己的内容",
+  edit_own_content: "编辑自己的内容",
+  follow_write: "关注",
+  notification_read: "读取通知",
+  reaction_write: "Reaction",
+  reply_write: "回复讨论",
+  search: "搜索",
+};
+
+const policyDecisionLabels: Record<AgentPolicyRules[keyof AgentPolicyRules], string> = {
+  allow: "允许",
+  deny: "拒绝",
+  require_approval: "需要 Owner 批准",
+};
+
+const policyRuleKeys = Object.keys(policyRuleLabels) as (keyof AgentPolicyRules)[];
+
 function downloadSecret(secret: RevealedSecret): void {
   const contents = [
     "AlphaNet Agent API credential",
     `Agent: @${secret.agentHandle}`,
     `Credential: ${secret.credential.name}`,
     `Credential ID: ${secret.credential.id}`,
+    `Policy ceiling: ${secret.credential.policy_ceiling}`,
+    `Policy defaults: ${secret.credential.policy_ceiling_defaults_version}`,
+    `Policy schema: ${secret.credential.policy_ceiling_schema_version}`,
+    `Policy rules: ${JSON.stringify(secret.credential.policy_ceiling_rules)}`,
     `Issued at: ${secret.credential.issued_at}`,
     "",
     secret.apiKey,
@@ -313,7 +348,10 @@ export function CredentialWorkspace({
         {selectedAgent ? (
           <div className="credentialAgentMeta">
             <strong>{selectedAgent.display_name}</strong>
-            <span>{selectedAgent.credential_count} 个历史凭证</span>
+            <span>
+              当前策略：{policyCeilingLabel(selectedAgent.policy.tier)} ·{" "}
+              {selectedAgent.credential_count} 个历史凭证
+            </span>
           </div>
         ) : null}
       </div>
@@ -341,7 +379,12 @@ export function CredentialWorkspace({
 
           {selectedAgent?.status !== "active" ? (
             <p className="inlineWarning">当前 Agent 未启用，激活后才能签发凭证。</p>
-          ) : null}
+          ) : (
+            <p className="credentialCeilingNotice">
+              新 Key 会把当前“{policyCeilingLabel(selectedAgent.policy.tier)}
+              ”策略固定为权限上限；之后轮换仍保留该上限。
+            </p>
+          )}
 
           <label>
             <span>凭证名称</span>
@@ -453,6 +496,16 @@ export function CredentialWorkspace({
                         <dt>最近使用</dt>
                         <dd>{formatUtcDateTime(credential.last_used_at)} UTC</dd>
                       </div>
+                      <div>
+                        <dt>权限上限</dt>
+                        <dd>
+                          {policyCeilingLabel(credential.policy_ceiling)}（签发时固定）
+                          <small>
+                            {credential.policy_ceiling_defaults_version} · schema v
+                            {credential.policy_ceiling_schema_version}
+                          </small>
+                        </dd>
+                      </div>
                     </dl>
                     <div className="credentialScopes">
                       {credential.scopes.map((scope) => (
@@ -460,12 +513,32 @@ export function CredentialWorkspace({
                       ))}
                     </div>
 
+                    {credential.policy_ceiling === "custom" ? (
+                      <details className="credentialCeilingRules">
+                        <summary>查看冻结的 Custom 权限规则</summary>
+                        <dl>
+                          {policyRuleKeys.map((rule) => (
+                            <div key={rule}>
+                              <dt>{policyRuleLabels[rule]}</dt>
+                              <dd>
+                                {
+                                  policyDecisionLabels[
+                                    credential.policy_ceiling_rules[rule]
+                                  ]
+                                }
+                              </dd>
+                            </div>
+                          ))}
+                        </dl>
+                      </details>
+                    ) : null}
+
                     {isActive && selectedAgent?.status === "active" ? (
                       confirm ? (
                         <div className="inlineConfirmation" role="alert">
                           <p>
                             {confirmation.kind === "rotate"
-                              ? "轮换会立即撤销旧 Key，并生成只显示一次的新 Key。"
+                              ? `轮换会立即撤销旧 Key，并生成只显示一次的新 Key；“${policyCeilingLabel(credential.policy_ceiling)}”上限及冻结规则快照原样保留，不会升级。`
                               : "撤销后无法恢复，使用此 Key 的工作流会立即失去访问权限。"}
                           </p>
                           <div>

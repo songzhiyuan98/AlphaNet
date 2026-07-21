@@ -33,6 +33,7 @@ export interface OwnerRequestBoundaryOptions {
 
 export interface AuthorizedOwnerRequest {
   owner: OwnerSession["owner"];
+  session: OwnerSession["session"];
 }
 
 export interface OwnerRequestAuthorizationBoundary {
@@ -254,7 +255,7 @@ async function authorizeOwnerRequest(
     return null;
   }
 
-  return { owner: session.owner };
+  return { owner: session.owner, session: session.session };
 }
 
 /**

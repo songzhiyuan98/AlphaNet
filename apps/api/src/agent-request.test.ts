@@ -4,6 +4,7 @@ import {
   type AgentConnectionService,
   type AgentCredentialContext,
   type AgentOperation,
+  type AgentPolicyRules,
   type AgentPolicyTier,
   type AgentScope,
 } from "@alphanet/domain";
@@ -29,6 +30,8 @@ const apiKey = "aln_v1_abcdefghijkl_abcdefghijklmnopqrstuvwxyz0123456789ABCDE";
 
 function context(options?: {
   ceiling?: AgentPolicyTier;
+  ceilingRules?: AgentPolicyRules;
+  policyRules?: AgentPolicyRules;
   scopes?: AgentScope[];
   tier?: AgentPolicyTier;
 }): AgentCredentialContext {
@@ -55,6 +58,7 @@ function context(options?: {
         schemaVersion: 1,
         version: "1",
         effectiveFrom: createdAt,
+        rules: options?.policyRules ?? { operations: {} },
       },
     },
     credential: {
@@ -67,6 +71,9 @@ function context(options?: {
       scopes: options?.scopes ?? ["research:read", "content:write"],
       audience: "https://api.alphanet.test/v1",
       policyCeiling: options?.ceiling ?? "assisted",
+      policyCeilingDefaultsVersion: "agent-permission-defaults-v1",
+      policyCeilingRules: options?.ceilingRules ?? { operations: {} },
+      policyCeilingSchemaVersion: 1,
       issuedAt: createdAt,
       expiresAt: null,
       lastUsedAt: null,
@@ -443,7 +450,11 @@ describe("authorizeAgentRequest", () => {
     {
       label: "unavailable custom read rules",
       operation: "browse_content" as const,
-      requestContext: context({ ceiling: "autonomous", tier: "custom" }),
+      requestContext: (() => {
+        const requestContext = context({ ceiling: "autonomous", tier: "custom" });
+        requestContext.agent.policy.rules = undefined as unknown as AgentPolicyRules;
+        return requestContext;
+      })(),
     },
   ])("fails closed with POLICY_DENIED for $label", async (testCase) => {
     const { result, reply } = await runBoundary({
@@ -456,6 +467,41 @@ describe("authorizeAgentRequest", () => {
     expect(result).toBeNull();
     expect(reply.statusCode()).toBe(403);
     expectV1Error(reply.payload(), "POLICY_DENIED");
+  });
+
+  it("passes Custom policy rules and immutable Credential ceiling rules to evaluation", async () => {
+    const directWrite = await runBoundary({
+      authorization: `Bearer ${apiKey}`,
+      context: context({
+        ceiling: "autonomous",
+        policyRules: { operations: { content_write: "allow" } },
+        tier: "custom",
+      }),
+      operation: "create_post",
+      rateLimiter: allowAllLimiter(),
+    });
+    expect(directWrite.result?.evaluation).toMatchObject({
+      decision: "allow",
+      ownerPolicyDecision: "allow",
+      policyRuleSource: "custom_override",
+    });
+
+    const ceilingLimited = await runBoundary({
+      authorization: `Bearer ${apiKey}`,
+      context: context({
+        ceiling: "custom",
+        ceilingRules: { operations: { content_write: "require_approval" } },
+        policyRules: { operations: { content_write: "allow" } },
+        tier: "custom",
+      }),
+      operation: "create_post",
+      rateLimiter: allowAllLimiter(),
+    });
+    expect(ceilingLimited.result?.evaluation).toMatchObject({
+      credentialCeilingDecision: "require_approval",
+      decision: "require_approval",
+      ownerPolicyDecision: "allow",
+    });
   });
 
   it("defers a write policy denial to the transactional domain boundary", async () => {

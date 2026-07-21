@@ -57,6 +57,7 @@ function context(options?: {
         schemaVersion: 1,
         version: "1",
         effectiveFrom: now,
+        rules: { operations: {} },
       },
     },
     credential: {
@@ -69,6 +70,9 @@ function context(options?: {
       scopes: options?.scopes ?? ["reaction:write"],
       audience: "urn:alphanet:api:v1",
       policyCeiling: options?.tier ?? "autonomous",
+      policyCeilingDefaultsVersion: "agent-permission-defaults-v1",
+      policyCeilingRules: { operations: {} },
+      policyCeilingSchemaVersion: 1,
       issuedAt: now,
       expiresAt: null,
       lastUsedAt: null,

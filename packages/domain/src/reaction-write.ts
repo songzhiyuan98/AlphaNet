@@ -9,7 +9,10 @@ import type {
   AgentPolicyTier,
   AgentScope,
 } from "./agent-connection.js";
-import { CONTENT_REACTIONS_MIGRATION_CHECKSUM } from "./schema-migrations.js";
+import {
+  AGENT_POLICY_CONTROL_MIGRATION_CHECKSUM,
+  CONTENT_REACTIONS_MIGRATION_CHECKSUM,
+} from "./schema-migrations.js";
 
 const CONTENT_REACTIONS_MIGRATION_NAME = "content_reactions";
 const CONTENT_REACTIONS_MIGRATION_VERSION = "000009";
@@ -160,12 +163,16 @@ interface AuthorizationRow {
   actor_id: string;
   agent_activated_at: Date;
   credential_policy_ceiling: AgentPolicyTier;
+  credential_policy_ceiling_defaults_version: string;
+  credential_policy_ceiling_rules: unknown;
+  credential_policy_ceiling_schema_version: number;
   credential_scopes: AgentScope[];
   defaults_version: string;
   policy_id: string;
   policy_schema_version: number;
   policy_tier: AgentPolicyTier;
   policy_version: string;
+  policy_rules: unknown;
 }
 
 interface ContentTargetRow {
@@ -374,6 +381,7 @@ function policySnapshot(
   decisionId: string,
 ): postgres.JSONValue {
   return {
+    credential_ceiling_decision: evaluation.credentialCeilingDecision,
     decision: evaluation.decision,
     decision_id: decisionId,
     defaults_version: authorization.defaults_version,
@@ -382,6 +390,8 @@ function policySnapshot(
     policy_schema_version: authorization.policy_schema_version,
     policy_tier: authorization.policy_tier,
     policy_version: authorization.policy_version,
+    owner_policy_decision: evaluation.ownerPolicyDecision,
+    policy_rule_source: evaluation.policyRuleSource,
     reason: evaluation.reason,
     required_scopes: [...evaluation.requiredScopes],
     scope_satisfied: evaluation.scopeSatisfied,
@@ -675,6 +685,21 @@ export class PostgresReactionWriteService implements ReactionWriteService {
               and name = ${CONTENT_REACTIONS_MIGRATION_NAME}
               and checksum = ${CONTENT_REACTIONS_MIGRATION_CHECKSUM}
           )
+          and exists (
+            select 1
+            from system.schema_migrations
+            where version = '000010'
+              and name = 'agent_policy_control'
+              and checksum = ${AGENT_POLICY_CONTROL_MIGRATION_CHECKSUM}
+          )
+          and exists (
+            select 1
+            from pg_catalog.pg_attribute
+            where attrelid = to_regclass('platform.credentials')
+              and attname = 'policy_ceiling_rules'
+              and attnotnull
+              and not attisdropped
+          )
           and to_regclass('platform.reactions') is not null
           and to_regclass('platform.reactions_content_type_created_idx') is not null
           and to_regclass('platform.reactions_actor_created_idx') is not null
@@ -716,7 +741,14 @@ export class PostgresReactionWriteService implements ReactionWriteService {
     validateAuthorityContext(context);
     const preliminary = evaluateAgentOperation({
       credentialPolicyCeiling: context.credential.policyCeiling,
+      credentialPolicyCeilingDefaultsVersion:
+        context.credential.policyCeilingDefaultsVersion,
+      credentialPolicyCeilingRules: context.credential.policyCeilingRules,
+      credentialPolicyCeilingSchemaVersion: context.credential.policyCeilingSchemaVersion,
       operation: "set_reaction",
+      policyDefaultsVersion: context.agent.policy.defaultsVersion,
+      policyRules: context.agent.policy.rules,
+      policySchemaVersion: context.agent.policy.schemaVersion,
       policyTier: context.agent.policy.tier,
       scopes: context.credential.scopes,
     });
@@ -758,7 +790,15 @@ export class PostgresReactionWriteService implements ReactionWriteService {
         const authorization = await this.#loadAuthorization(transaction, context);
         currentEvaluation = evaluateAgentOperation({
           credentialPolicyCeiling: authorization.credential_policy_ceiling,
+          credentialPolicyCeilingDefaultsVersion:
+            authorization.credential_policy_ceiling_defaults_version,
+          credentialPolicyCeilingRules: authorization.credential_policy_ceiling_rules,
+          credentialPolicyCeilingSchemaVersion:
+            authorization.credential_policy_ceiling_schema_version,
           operation: "set_reaction",
+          policyDefaultsVersion: authorization.defaults_version,
+          policyRules: authorization.policy_rules,
+          policySchemaVersion: authorization.policy_schema_version,
           policyTier: authorization.policy_tier,
           scopes: authorization.credential_scopes,
         });
@@ -957,11 +997,17 @@ export class PostgresReactionWriteService implements ReactionWriteService {
         agent.activated_at as agent_activated_at,
         credential.scopes as credential_scopes,
         credential.policy_ceiling as credential_policy_ceiling,
+        credential.policy_ceiling_defaults_version
+          as credential_policy_ceiling_defaults_version,
+        credential.policy_ceiling_schema_version
+          as credential_policy_ceiling_schema_version,
+        credential.policy_ceiling_rules as credential_policy_ceiling_rules,
         policy.id::text as policy_id,
         policy.tier as policy_tier,
         policy.defaults_version,
         policy.policy_schema_version,
-        policy.version::text as policy_version
+        policy.version::text as policy_version,
+        policy.rules as policy_rules
       from platform.credentials as credential
       join platform.agents as agent
         on agent.id = credential.agent_id

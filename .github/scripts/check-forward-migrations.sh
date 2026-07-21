@@ -14,6 +14,7 @@ readonly repository_root
 readonly full_migrations_dir="${repository_root}/db/migrations"
 readonly published_agent_v1_checksum="8d2aa4d3fe53bfda58b644460b386763350b38e7aaf666fb239ee7ba03a56528"
 readonly content_reactions_checksum="da6750692823bb082c1c417d266fd9e1c3585356fd5a25eae256fc6e7c5441bf"
+readonly agent_policy_control_checksum="5311bfde7d77bd2ddf6d7207675284a3259db1722b20e21cecb97f69b9fb6826"
 readonly suffix="${GITHUB_RUN_ID:-local}_${RANDOM}_$$"
 readonly empty_database="alphanet_migration_empty_${suffix}"
 readonly owner_database="alphanet_migration_owner_${suffix}"
@@ -754,9 +755,10 @@ for database in \
     PGDATABASE="${database}" psql -X -At \
       --set=ON_ERROR_STOP=1 \
       --set=published_agent_database="${published_agent_database}" \
-      --set=content_reactions_checksum="${content_reactions_checksum}" <<'SQL'
+      --set=content_reactions_checksum="${content_reactions_checksum}" \
+      --set=agent_policy_control_checksum="${agent_policy_control_checksum}" <<'SQL'
 SELECT
-  (SELECT count(*) FROM system.schema_migrations) = 9
+  (SELECT count(*) FROM system.schema_migrations) = 10
   AND EXISTS (
     SELECT 1
     FROM system.schema_migrations
@@ -787,6 +789,13 @@ SELECT
     WHERE version = '000009'
       AND name = 'content_reactions'
       AND checksum = :'content_reactions_checksum'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM system.schema_migrations
+    WHERE version = '000010'
+      AND name = 'agent_policy_control'
+      AND checksum = :'agent_policy_control_checksum'
   )
   AND to_regclass('platform.owners') IS NOT NULL
   AND to_regclass('platform.agents') IS NOT NULL
@@ -894,6 +903,76 @@ SELECT
       AND column_name = 'pepper_version'
       AND data_type = 'smallint'
   )
+  AND (
+    SELECT count(*) = 3
+    FROM information_schema.columns
+    WHERE table_schema = 'platform'
+      AND table_name = 'credentials'
+      AND is_nullable = 'NO'
+      AND (
+        (
+          column_name = 'policy_ceiling_defaults_version'
+          AND data_type = 'text'
+          AND column_default = '''agent-permission-defaults-v1''::text'
+        )
+        OR (
+          column_name = 'policy_ceiling_schema_version'
+          AND data_type = 'integer'
+          AND column_default = '1'
+        )
+        OR (
+          column_name = 'policy_ceiling_rules'
+          AND data_type = 'jsonb'
+          AND column_default = '''{}''::jsonb'
+        )
+      )
+  )
+  AND (
+    SELECT count(*) = 2
+    FROM pg_constraint AS constraint_record
+    WHERE constraint_record.contype = 'c'
+      AND constraint_record.convalidated
+      AND (
+        (
+          constraint_record.conrelid = 'platform.agent_policies'::regclass
+          AND constraint_record.conname = 'agent_policies_rules_valid'
+        )
+        OR (
+          constraint_record.conrelid = 'platform.credentials'::regclass
+          AND constraint_record.conname =
+            'credentials_policy_ceiling_rules_valid'
+        )
+      )
+  )
+  AND (
+    SELECT count(*) = 3
+    FROM pg_trigger AS trigger_record
+    WHERE NOT trigger_record.tgisinternal
+      AND trigger_record.tgenabled IN ('O', 'A')
+      AND (
+        (
+          trigger_record.tgrelid = 'platform.agent_policies'::regclass
+          AND trigger_record.tgname = 'agent_policies_validate_insert'
+          AND trigger_record.tgfoid =
+            'platform.validate_agent_policy_insert()'::regprocedure
+          AND trigger_record.tgtype = 7
+        )
+        OR (
+          trigger_record.tgrelid = 'platform.credentials'::regclass
+          AND trigger_record.tgname = 'credentials_validate_insert'
+          AND trigger_record.tgfoid =
+            'platform.validate_credential_insert()'::regprocedure
+          AND trigger_record.tgtype = 7
+        )
+        OR (
+          trigger_record.tgrelid = 'platform.credentials'::regclass
+          AND trigger_record.tgname = 'credentials_prepare_update'
+          AND trigger_record.tgfoid =
+            'platform.prepare_credential_update()'::regprocedure
+          AND trigger_record.tgtype = 19
+        )
+      )
+  )
   AND EXISTS (
     SELECT 1
     FROM information_schema.columns
@@ -937,6 +1016,10 @@ SELECT
           ON actor.id = agent.actor_id
         WHERE credential.name = 'CI legacy static key'
           AND credential.pepper_version = 1
+          AND credential.policy_ceiling_defaults_version =
+            'agent-permission-defaults-v1'
+          AND credential.policy_ceiling_schema_version = 1
+          AND credential.policy_ceiling_rules = '{}'::jsonb
           AND actor.handle = 'forward.migration-agent'
           AND actor.display_name = 'Updated Forward Migration Agent'
           AND actor.bio =
@@ -995,4 +1078,4 @@ SQL
   fi
 done
 
-echo "Empty, Owner-schema, and published Agent-v1 paths all reach the Reaction-enabled content schema."
+echo "Empty, Owner-schema, and published Agent-v1 paths all reach the Agent policy-control schema."

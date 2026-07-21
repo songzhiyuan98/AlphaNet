@@ -195,6 +195,7 @@ TO :"runtime_role";
 
 GRANT UPDATE ON TABLE
   platform.actors,
+  platform.agent_policies,
   platform.agents,
   platform.content_items,
   platform.credentials,
@@ -229,6 +230,7 @@ TO :"runtime_role";
 -- functions, especially SECURITY DEFINER functions, remain non-callable by the
 -- runtime role and execute only through their reviewed trigger bindings.
 GRANT EXECUTE ON FUNCTION
+  platform.agent_policy_rules_are_valid(text, text, integer, jsonb),
   platform.agent_scopes_are_valid(text[]),
   platform.audit_json_is_secret_free(jsonb),
   platform.audit_json_is_secret_free_v2(jsonb),

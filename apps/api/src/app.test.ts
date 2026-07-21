@@ -716,6 +716,7 @@ describe("API service", () => {
           status: "active",
         },
         session: {
+          createdAt: new Date("2026-07-21T23:55:00.000Z"),
           expiresAt: new Date("2026-08-01T00:00:00.000Z"),
           id: "bb944bd4-001f-443f-a642-e1f7d47b902c",
         },

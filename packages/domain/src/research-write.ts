@@ -37,7 +37,10 @@ import {
   type NormalizedResearchCommand,
   type ReplyCommandInput,
 } from "./research-command.js";
-import { PENDING_ACTION_EXECUTION_MIGRATION_CHECKSUM } from "./schema-migrations.js";
+import {
+  AGENT_POLICY_CONTROL_MIGRATION_CHECKSUM,
+  PENDING_ACTION_EXECUTION_MIGRATION_CHECKSUM,
+} from "./schema-migrations.js";
 
 const BODY_BYTES_LIMIT = 160 * 1_024;
 const COMMAND_BYTES_LIMIT = 1_024 * 1_024;
@@ -265,12 +268,16 @@ export interface PostgresResearchWriteOptions {
 interface AuthorizationRow {
   actor_id: string;
   credential_policy_ceiling: AgentPolicyTier;
+  credential_policy_ceiling_defaults_version: string;
+  credential_policy_ceiling_rules: unknown;
+  credential_policy_ceiling_schema_version: number;
   credential_scopes: AgentScope[];
   defaults_version: string;
   policy_id: string;
   policy_schema_version: number;
   policy_tier: AgentPolicyTier;
   policy_version: string;
+  policy_rules: unknown;
 }
 
 interface IdempotencyRow {
@@ -633,6 +640,7 @@ function policySnapshot(
   decisionId: string,
 ): postgres.JSONValue {
   return {
+    credential_ceiling_decision: evaluation.credentialCeilingDecision,
     decision: evaluation.decision,
     decision_id: decisionId,
     defaults_version: authorization.defaults_version,
@@ -641,6 +649,8 @@ function policySnapshot(
     policy_schema_version: authorization.policy_schema_version,
     policy_tier: authorization.policy_tier,
     policy_version: authorization.policy_version,
+    owner_policy_decision: evaluation.ownerPolicyDecision,
+    policy_rule_source: evaluation.policyRuleSource,
     reason: evaluation.reason,
     required_scopes: [...evaluation.requiredScopes],
     scope_satisfied: evaluation.scopeSatisfied,
@@ -659,6 +669,7 @@ function approvedExecutionPolicySnapshot(
     decision: "require_approval",
     decision_id: decisionId,
     live_revalidation: {
+      credential_ceiling_decision: currentEvaluation.credentialCeilingDecision,
       decision: currentEvaluation.decision,
       defaults_version: currentAuthorization.defaults_version,
       matched_scope: currentEvaluation.matchedScope,
@@ -666,6 +677,8 @@ function approvedExecutionPolicySnapshot(
       policy_schema_version: currentAuthorization.policy_schema_version,
       policy_tier: currentAuthorization.policy_tier,
       policy_version: currentAuthorization.policy_version,
+      owner_policy_decision: currentEvaluation.ownerPolicyDecision,
+      policy_rule_source: currentEvaluation.policyRuleSource,
       reason: currentEvaluation.reason,
       required_scopes: [...currentEvaluation.requiredScopes],
       scope_satisfied: currentEvaluation.scopeSatisfied,
@@ -1176,6 +1189,21 @@ export class PostgresResearchWriteService implements ResearchWriteService {
               and name = 'pending_action_execution'
               and checksum = ${PENDING_ACTION_EXECUTION_MIGRATION_CHECKSUM}
           )
+          and exists (
+            select 1
+            from system.schema_migrations
+            where version = '000010'
+              and name = 'agent_policy_control'
+              and checksum = ${AGENT_POLICY_CONTROL_MIGRATION_CHECKSUM}
+          )
+          and exists (
+            select 1
+            from pg_catalog.pg_attribute
+            where attrelid = to_regclass('platform.credentials')
+              and attname = 'policy_ceiling_rules'
+              and attnotnull
+              and not attisdropped
+          )
           and to_regclass('platform.content_items') is not null
           and to_regclass('platform.content_revisions') is not null
           and to_regclass('platform.idempotency_records') is not null
@@ -1286,7 +1314,15 @@ export class PostgresResearchWriteService implements ResearchWriteService {
           );
           const evaluation = evaluateAgentOperation({
             credentialPolicyCeiling: authorization.credential_policy_ceiling,
+            credentialPolicyCeilingDefaultsVersion:
+              authorization.credential_policy_ceiling_defaults_version,
+            credentialPolicyCeilingRules: authorization.credential_policy_ceiling_rules,
+            credentialPolicyCeilingSchemaVersion:
+              authorization.credential_policy_ceiling_schema_version,
             operation: command.operation,
+            policyDefaultsVersion: authorization.defaults_version,
+            policyRules: authorization.policy_rules,
+            policySchemaVersion: authorization.policy_schema_version,
             policyTier: authorization.policy_tier,
             scopes: authorization.credential_scopes,
           });
@@ -1476,7 +1512,14 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     validateAuthorityContext(context);
     const preliminary = evaluateAgentOperation({
       credentialPolicyCeiling: context.credential.policyCeiling,
+      credentialPolicyCeilingDefaultsVersion:
+        context.credential.policyCeilingDefaultsVersion,
+      credentialPolicyCeilingRules: context.credential.policyCeilingRules,
+      credentialPolicyCeilingSchemaVersion: context.credential.policyCeilingSchemaVersion,
       operation,
+      policyDefaultsVersion: context.agent.policy.defaultsVersion,
+      policyRules: context.agent.policy.rules,
+      policySchemaVersion: context.agent.policy.schemaVersion,
       policyTier: context.agent.policy.tier,
       scopes: context.credential.scopes,
     });
@@ -1523,7 +1566,15 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       const authorization = await this.#loadAuthorization(transaction, context);
       const evaluation = evaluateAgentOperation({
         credentialPolicyCeiling: authorization.credential_policy_ceiling,
+        credentialPolicyCeilingDefaultsVersion:
+          authorization.credential_policy_ceiling_defaults_version,
+        credentialPolicyCeilingRules: authorization.credential_policy_ceiling_rules,
+        credentialPolicyCeilingSchemaVersion:
+          authorization.credential_policy_ceiling_schema_version,
         operation: command.operation,
+        policyDefaultsVersion: authorization.defaults_version,
+        policyRules: authorization.policy_rules,
+        policySchemaVersion: authorization.policy_schema_version,
         policyTier: authorization.policy_tier,
         scopes: authorization.credential_scopes,
       });
@@ -1808,11 +1859,17 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         actor.id as actor_id,
         credential.scopes as credential_scopes,
         credential.policy_ceiling as credential_policy_ceiling,
+        credential.policy_ceiling_defaults_version
+          as credential_policy_ceiling_defaults_version,
+        credential.policy_ceiling_schema_version
+          as credential_policy_ceiling_schema_version,
+        credential.policy_ceiling_rules as credential_policy_ceiling_rules,
         policy.id as policy_id,
         policy.tier as policy_tier,
         policy.defaults_version,
         policy.policy_schema_version,
-        policy.version::text as policy_version
+        policy.version::text as policy_version,
+        policy.rules as policy_rules
       from platform.credentials as credential
       join platform.agents as agent
         on agent.id = credential.agent_id
@@ -1864,11 +1921,17 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         actor.id as actor_id,
         credential.scopes as credential_scopes,
         credential.policy_ceiling as credential_policy_ceiling,
+        credential.policy_ceiling_defaults_version
+          as credential_policy_ceiling_defaults_version,
+        credential.policy_ceiling_schema_version
+          as credential_policy_ceiling_schema_version,
+        credential.policy_ceiling_rules as credential_policy_ceiling_rules,
         policy.id as policy_id,
         policy.tier as policy_tier,
         policy.defaults_version,
         policy.policy_schema_version,
-        policy.version::text as policy_version
+        policy.version::text as policy_version,
+        policy.rules as policy_rules
       from platform.credentials as credential
       join platform.agents as agent
         on agent.id = credential.agent_id

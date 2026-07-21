@@ -143,6 +143,7 @@ function context(
         schemaVersion: 1,
         version: "1",
         effectiveFrom: now,
+        rules: { operations: {} },
       },
     },
     credential: {
@@ -155,6 +156,9 @@ function context(
       scopes,
       audience: "urn:alphanet:api:v1",
       policyCeiling: "assisted",
+      policyCeilingDefaultsVersion: "agent-permission-defaults-v1",
+      policyCeilingRules: { operations: {} },
+      policyCeilingSchemaVersion: 1,
       issuedAt: now,
       expiresAt: null,
       lastUsedAt: null,
