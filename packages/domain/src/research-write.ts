@@ -38,6 +38,11 @@ import {
   type ReplyCommandInput,
 } from "./research-command.js";
 import {
+  extractMarkdownMentionHandles,
+  MarkdownComplexityLimitError,
+  MarkdownMentionLimitError,
+} from "./markdown-mentions.js";
+import {
   AGENT_POLICY_CONTROL_MIGRATION_CHECKSUM,
   PENDING_ACTION_EXECUTION_MIGRATION_CHECKSUM,
 } from "./schema-migrations.js";
@@ -526,7 +531,7 @@ function validateAuthorityContext(context: AgentCredentialContext): void {
   }
 }
 
-function validateCommandBudgets(command: NormalizedResearchCommand): void {
+function validateCommandBudgets(command: NormalizedResearchCommand): string[] {
   const isPost = command.operation === "create_post";
   const titleLength = isPost ? unicodeLength(command.title) : 0;
   const bodyLength = unicodeLength(command.bodyMarkdown);
@@ -547,6 +552,30 @@ function validateCommandBudgets(command: NormalizedResearchCommand): void {
     throw new ResearchWriteError(
       "VALIDATION_ERROR",
       "The normalized Markdown body is outside the operation limits.",
+      { details: { field: "body_markdown" } },
+    );
+  }
+
+  let mentionHandles: string[];
+  try {
+    mentionHandles = extractMarkdownMentionHandles(command.bodyMarkdown, 100);
+  } catch (error) {
+    if (error instanceof MarkdownComplexityLimitError) {
+      throw new ResearchWriteError(
+        "VALIDATION_ERROR",
+        "The Markdown body exceeds the safe structural complexity limit.",
+        {
+          details: {
+            field: "body_markdown",
+            reason_code: "MARKDOWN_TOO_COMPLEX",
+          },
+        },
+      );
+    }
+    if (!(error instanceof MarkdownMentionLimitError)) throw error;
+    throw new ResearchWriteError(
+      "VALIDATION_ERROR",
+      "A Revision cannot contain more than 100 distinct mention candidates.",
       { details: { field: "body_markdown" } },
     );
   }
@@ -604,6 +633,7 @@ function validateCommandBudgets(command: NormalizedResearchCommand): void {
   for (const reference of command.references) {
     assertUuid(reference.targetContentId, "references.target_content_id");
   }
+  return mentionHandles;
 }
 
 function parsePostingRules(value: unknown): CommunityPostingRules {
@@ -1063,20 +1093,6 @@ function plainTextFromMarkdown(markdown: string): string {
   return plain.length > 0 ? plain : markdown.trim();
 }
 
-function mentionHandles(markdown: string): string[] {
-  const found: string[] = [];
-  const seen = new Set<string>();
-  const pattern = /(?:^|[^\p{L}\p{N}_])@([a-zA-Z0-9][a-zA-Z0-9_.-]{1,30}[a-zA-Z0-9])/gu;
-  for (const match of markdown.matchAll(pattern)) {
-    const handle = match[1]?.toLocaleLowerCase("en-US");
-    if (handle && !seen.has(handle)) {
-      seen.add(handle);
-      found.push(handle);
-    }
-  }
-  return found;
-}
-
 function prepareRevision(command: NormalizedResearchCommand): PreparedRevision {
   const title = command.operation === "create_post" ? command.title : null;
   const bodyPlainText = plainTextFromMarkdown(command.bodyMarkdown);
@@ -1289,7 +1305,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
             },
             this.#keyRing,
           );
-          validateCommandBudgets(command);
+          const mentionHandles = validateCommandBudgets(command);
           if (
             !sameDigest(digestResearchCommandBytes(command), frozenAction.inputDigest) ||
             command.operation !== frozenAction.operation ||
@@ -1382,7 +1398,11 @@ export class PostgresResearchWriteService implements ResearchWriteService {
             );
           }
 
-          const facts = await this.#resolveWriteFacts(transaction, command);
+          const facts = await this.#resolveWriteFacts(
+            transaction,
+            command,
+            mentionHandles,
+          );
           const preparedRevision = prepareRevision(command);
           const persisted = await this.#insertResearchContent(transaction, {
             authorization,
@@ -1554,7 +1574,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     dispatchState: ResearchWriteDispatchState,
   ): Promise<ResearchWriteOutcome> {
     validateIdempotencyKey(idempotencyKey);
-    validateCommandBudgets(command);
+    const mentionHandles = validateCommandBudgets(command);
     const channel = validateRequestContext(request);
 
     const digestBytes = digestResearchCommandBytes(command);
@@ -1779,7 +1799,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         throw error;
       }
 
-      const facts = await this.#resolveWriteFacts(transaction, command);
+      const facts = await this.#resolveWriteFacts(transaction, command, mentionHandles);
       const preparedRevision = prepareRevision(command);
       const idempotencyId = this.#newId("idempotency_record_id");
       await this.#insertIdempotency(transaction, {
@@ -2522,6 +2542,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
   async #resolveWriteFacts(
     transaction: TransactionSql,
     command: NormalizedResearchCommand,
+    handles: string[],
   ): Promise<ResolvedWriteFacts> {
     const symbolIds: string[] = [];
     if (command.symbols.length > 0) {
@@ -2598,7 +2619,6 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       }
     }
 
-    const handles = mentionHandles(command.bodyMarkdown);
     let mentionActorIds: string[] = [];
     if (handles.length > 0) {
       const rows = await transaction<MentionRow[]>`
@@ -2613,13 +2633,6 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       mentionActorIds = handles
         .map((handle) => byHandle.get(handle))
         .filter((id): id is string => id !== undefined);
-      if (mentionActorIds.length > 100) {
-        throw new ResearchWriteError(
-          "VALIDATION_ERROR",
-          "A Revision cannot contain more than 100 resolved mentions.",
-          { details: { field: "body_markdown" } },
-        );
-      }
     }
 
     return { mentionActorIds, referenceTargetIds, symbolIds, topicIds };

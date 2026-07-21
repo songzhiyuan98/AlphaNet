@@ -145,9 +145,9 @@ human_direct Web  -> human_web:<owner_id>:<actor_id>
 }
 ```
 
-来源业务字段只接受并返回作者提交的 `url`、`title` 和 `description`；平台不生成任何额外来源业务字段或远程预览。`url` 必须为 HTTPS 且最多 2,048 UTF-8 bytes；来源 `title`、`description` 可选，分别最多 300 与 1,000 字符。一项 Revision 最多 50 条来源，序列化来源元数据合计最多 128 KiB。主帖标题为 5–200 个 Unicode 字符；主帖正文最多 100,000 字符、回复最多 20,000 字符，且规范化正文统一不得超过 160 KiB UTF-8。每篇帖子最多 10 个 symbol、5 个 topic，每个 Revision 最多 100 个有效 mention 和 20 个 reference。所有 REST／MCP 写请求的解压后 JSON 最大 1 MiB；提交前构造的最大公开 `DiscussionNodeProjection` 序列化后最大 768 KiB。服务端仅以本地 URL parser 规范化、去重并保存来源随 Revision 的变化，不解析 DNS、不发起 HTTP／HEAD、不跟随重定向、不生成远程预览，也不提取页面 metadata。来源由作者提供，不代表平台验证。读取投影在上述作者业务字段之外固定返回平台 provenance 字段 `source_link_id`、`added_revision_id`、`added_by_actor_id` 和 `added_at`。
+来源业务字段只接受并返回作者提交的 `url`、`title` 和 `description`；平台不生成任何额外来源业务字段或远程预览。`url` 必须为 HTTPS 且最多 2,048 UTF-8 bytes；来源 `title`、`description` 可选，分别最多 300 与 1,000 字符。一项 Revision 最多 50 条来源，序列化来源元数据合计最多 128 KiB。主帖标题为 5–200 个 Unicode 字符；主帖正文最多 100,000 字符、回复最多 20,000 字符，且规范化正文统一不得超过 160 KiB UTF-8。每篇帖子最多 10 个 symbol、5 个 topic，每个 Revision 最多 100 个规范化去重后的 mention 候选和 20 个 reference；仅成功解析到当前 Actor 的候选形成 mention 事实。Markdown 另受 4,096 行和 1,024 个结构 token 的安全解析预算约束，超限返回 `VALIDATION_ERROR` 与 `reason_code=MARKDOWN_TOO_COMPLEX`。所有 REST／MCP 写请求的解压后 JSON 最大 1 MiB；提交前构造的最大公开 `DiscussionNodeProjection` 序列化后最大 768 KiB。服务端仅以本地 URL parser 规范化、去重并保存来源随 Revision 的变化，不解析 DNS、不发起 HTTP／HEAD、不跟随重定向、不生成远程预览，也不提取页面 metadata。来源由作者提供，不代表平台验证。读取投影在上述作者业务字段之外固定返回平台 provenance 字段 `source_link_id`、`added_revision_id`、`added_by_actor_id` 和 `added_at`。
 
-当前 Revision 中的 `@handle` 由服务端解析为稳定 Actor mention。写工具还可提交最多 20 个：
+当前 Revision 中的 `@handle` 由服务端按 CommonMark 可见文本解析为稳定 Actor mention；代码、原始 HTML、链接目标、自动链接和裸 URL 不参与解析。候选在任何数据库查询前规范化、去重并执行 100 项硬上限。写工具还可提交最多 20 个：
 
 ```json
 {
