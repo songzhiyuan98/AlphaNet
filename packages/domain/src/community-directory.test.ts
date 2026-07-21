@@ -321,6 +321,140 @@ describe("PostgresCommunityDirectoryService", () => {
     });
   });
 
+  it("projects anonymous list, search, and detail as readable but never writable", async () => {
+    const database = directorySql([catalogRow()]);
+    const service = new PostgresCommunityDirectoryService(database.sql, {
+      cursorSigningKey: signingKey,
+    });
+
+    const listing = await service.listPublicCommunities({
+      limit: 10,
+      symbols: ["amd"],
+    });
+    const search = await service.searchPublicCommunities({ symbols: ["amd"] });
+    const explicitlyStateFilteredSearch = await service.searchPublicCommunities({
+      states: ["active", "archived", "read_only"],
+      symbols: ["amd"],
+    });
+    const detail = await service.getPublicCommunity({ communityId: candidateId });
+
+    expect(listing.items[0]?.viewerEligibility).toEqual({
+      canPost: false,
+      canRead: true,
+      writeGate: "deny",
+    });
+    expect(search.items[0]?.viewerEligibility).toEqual({
+      canPost: false,
+      canRead: true,
+      writeGate: "deny",
+    });
+    expect(search.items[0]).toMatchObject({
+      matchedFields: ["symbols"],
+      matchReasons: ["symbol_filter_match"],
+    });
+    expect(explicitlyStateFilteredSearch.items[0]).toMatchObject({
+      matchedFields: ["symbols", "state"],
+      matchReasons: ["symbol_filter_match", "state_filter_match"],
+    });
+    expect(detail.viewerEligibility).toEqual({
+      canPost: false,
+      canRead: true,
+      writeGate: "deny",
+    });
+  });
+
+  it("keeps suspended Communities out of every anonymous directory operation", async () => {
+    const rejectedDatabase = directorySql([topicRow({ state: "suspended" })]);
+    const rejectedService = new PostgresCommunityDirectoryService(rejectedDatabase.sql, {
+      cursorSigningKey: signingKey,
+    });
+
+    await expect(
+      rejectedService.listPublicCommunities({ states: ["suspended"] }),
+    ).rejects.toMatchObject({ code: "INVALID_ARGUMENT", statusCode: 400 });
+    await expect(
+      rejectedService.searchPublicCommunities({
+        query: "semiconductors",
+        states: ["active", "suspended"],
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_ARGUMENT", statusCode: 400 });
+    expect(rejectedDatabase.calls).toHaveLength(0);
+
+    await expect(
+      rejectedService.getPublicCommunity({ slug: "semiconductors" }),
+    ).rejects.toMatchObject({ code: "COMMUNITY_NOT_FOUND", statusCode: 404 });
+
+    const defaultDatabase = directorySql([topicRow()]);
+    const defaultService = new PostgresCommunityDirectoryService(defaultDatabase.sql, {
+      cursorSigningKey: signingKey,
+    });
+    await defaultService.listPublicCommunities();
+    const pageQuery = defaultDatabase.calls.find((query) =>
+      query.text.includes("with candidates as"),
+    );
+    expect(pageQuery?.values).toContainEqual(["active", "archived", "read_only"]);
+  });
+
+  it("isolates anonymous cursors from Agent principals and query changes", async () => {
+    const database = directorySql([catalogRow(), topicRow()]);
+    const service = new PostgresCommunityDirectoryService(database.sql, {
+      clock: () => asOf,
+      cursorSigningKey: signingKey,
+    });
+    const context = viewer("autonomous", ["research:read", "content:write"]);
+
+    const publicFirst = await service.listPublicCommunities({ limit: 1 });
+    const publicCursor = publicFirst.page.nextCursor;
+    expect(publicCursor).toBeTruthy();
+    await expect(
+      service.listPublicCommunities({ cursor: publicCursor, limit: 1 }),
+    ).resolves.toMatchObject({
+      items: [
+        {
+          viewerEligibility: {
+            canPost: false,
+            canRead: true,
+            writeGate: "deny",
+          },
+        },
+      ],
+    });
+
+    const encodedPublicCursor = publicCursor?.split(".")[0];
+    if (!encodedPublicCursor) {
+      throw new Error("The public directory did not return a cursor payload");
+    }
+    const decodedPublicCursor = Buffer.from(encodedPublicCursor, "base64url").toString(
+      "utf8",
+    );
+    expect(decodedPublicCursor).not.toContain(ownerId);
+    expect(decodedPublicCursor).not.toContain(agentId);
+    expect(decodedPublicCursor).not.toContain(credentialId);
+    expect(decodedPublicCursor).not.toContain("ownerId");
+    expect(decodedPublicCursor).not.toContain("agentId");
+    expect(decodedPublicCursor).not.toContain("credentialId");
+
+    await expect(
+      service.listPublicCommunities({
+        cursor: publicCursor,
+        limit: 1,
+        states: ["active"],
+      }),
+    ).rejects.toMatchObject({ code: "CURSOR_INVALID" });
+    await expect(
+      service.listCommunities(context, { cursor: publicCursor, limit: 1 }),
+    ).rejects.toMatchObject({ code: "CURSOR_INVALID" });
+
+    const agentFirst = await service.listCommunities(context, { limit: 1 });
+    expect(agentFirst.page.nextCursor).toBeTruthy();
+    await expect(
+      service.listPublicCommunities({
+        cursor: agentFirst.page.nextCursor,
+        limit: 1,
+      }),
+    ).rejects.toMatchObject({ code: "CURSOR_INVALID" });
+  });
+
   it("issues signed keyset cursors with private HMAC query binding", async () => {
     let page = 0;
     const database = fakePostgres((query) => {

@@ -37,18 +37,23 @@ matrix; a skipped or failed required gate cannot be hidden by the aggregator.
   and an ActionLog value accepted by the shipped audit rule. The last path
   proves those rows remain readable and editable where appropriate, then
   verifies `000005` rejects equivalent new writes and backfills
-  `pepper_version=1`. Every path then reaches `000006`, where CI verifies the
-  canonical Community/Content/Revision, principal-scoped idempotency, encrypted
-  PendingAction, catalog-only symbol candidate, audit, and Outbox schema shape.
+  `pepper_version=1`. Every path then reaches the current `000008` head, where
+  CI verifies the canonical Community/Content/Revision, principal-scoped
+  idempotency, encrypted PendingAction, catalog-only symbol candidate, stable
+  Content read snapshots, audit, and Outbox schema shape.
   The suite includes a real-auth API Credential lifecycle E2E and bounded,
   independent-pool concurrency consistency load.
 - Build compiles the workspace.
-- Web E2E builds the production Next.js application and runs two Chromium
-  journeys with Playwright 1.61.1. The matching browser cache is version-keyed;
-  Playwright still verifies browser and runner system dependencies every run.
+- Web E2E builds the current production Next.js application and runs 17
+  Chromium checks against a strict versioned public-API stub with Playwright
+  1.61.1. The matching browser cache is version-keyed; Playwright still
+  verifies browser and runner system dependencies every run.
 - The container matrix waits for Quality, Integration, Build, Secret scan, and
   Web E2E, then builds `web`, `api`, `mcp`, `worker`, and `migrate`; a failed
   security or browser gate cannot publish a release image.
+- Every built target is smoke-checked before scanning or manifest inclusion:
+  Web is started and probed, API/MCP modules are loaded, Worker entry modules
+  are parsed and loaded, and the migration entrypoint is syntax-checked.
 - Every target is scanned with Trivy; fixable High or Critical OS/library
   vulnerabilities fail the job. Unfixed findings remain visible for review but
   do not create a permanently unresolvable gate.

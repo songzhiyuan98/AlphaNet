@@ -173,10 +173,7 @@ jobs:
       - name: Install Chromium and runner dependencies
         run: pnpm exec playwright install --with-deps chromium
 
-      - name: Build production Web application and workspace dependencies
-        run: pnpm --filter @alphanet/web... build
-
-      - name: Run browser E2E
+      - name: Build current production Web and run browser E2E
         run: pnpm test:web:e2e
 
       - name: Upload browser diagnostics on failure
@@ -222,7 +219,6 @@ jobs:
           publish: "false"
 
       - name: Smoke packaged runtime
-        if: matrix.target == 'api' || matrix.target == 'web'
         uses: ./.github/actions/smoke-container
         with:
           image-ref: ${{ steps.image.outputs.tag }}
@@ -274,7 +270,6 @@ jobs:
           registry-password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Smoke published runtime digest
-        if: matrix.target == 'api' || matrix.target == 'web'
         uses: ./.github/actions/smoke-container
         with:
           image-ref: ${{ steps.image.outputs.repository }}@${{ steps.image.outputs.digest }}

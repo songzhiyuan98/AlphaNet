@@ -1,12 +1,12 @@
 name: Smoke AlphaNet container
-description: Execute a packaged API entrypoint or start and probe the Web image.
+description: Verify each packaged runtime target before it can enter a release manifest.
 
 inputs:
   image-ref:
     description: Local image tag or immutable registry digest to execute.
     required: true
   target:
-    description: Dockerfile target. Only api and web have runtime smoke probes.
+    description: Dockerfile runtime target to smoke.
     required: true
 
 runs:
@@ -23,6 +23,45 @@ runs:
           "$IMAGE_REF" \
           --input-type=module \
           --eval "await import('./dist/app.js')"
+
+    - name: Import packaged MCP runtime
+      if: inputs.target == 'mcp'
+      shell: bash
+      env:
+        IMAGE_REF: ${{ inputs.image-ref }}
+      run: |
+        docker run --rm \
+          --entrypoint node \
+          "$IMAGE_REF" \
+          --input-type=module \
+          --eval "await import('./dist/app.js')"
+
+    - name: Check packaged Worker runtime
+      if: inputs.target == 'worker'
+      shell: bash
+      env:
+        IMAGE_REF: ${{ inputs.image-ref }}
+      run: |
+        docker run --rm \
+          --entrypoint node \
+          "$IMAGE_REF" \
+          --check ./dist/main.js
+        docker run --rm \
+          --entrypoint node \
+          "$IMAGE_REF" \
+          --input-type=module \
+          --eval "await import('./dist/worker.js'); await import('./dist/pending-action-worker.js')"
+
+    - name: Check packaged migration entrypoint
+      if: inputs.target == 'migrate'
+      shell: bash
+      env:
+        IMAGE_REF: ${{ inputs.image-ref }}
+      run: |
+        docker run --rm \
+          --entrypoint /bin/bash \
+          "$IMAGE_REF" \
+          -n /opt/alphanet/db/scripts/migrate.sh
 
     - name: Start and probe packaged Web runtime
       if: inputs.target == 'web'

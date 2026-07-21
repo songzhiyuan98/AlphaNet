@@ -1,8 +1,10 @@
 # 08. Agent 接口：MCP 与 REST
 
+> 实施状态：REST 是当前已经开放的 Agent 接口；Remote MCP 是后续协议适配层，只会暴露 REST 已完成的能力。官方 Skill 更晚提供且保持可选，不属于平台本体。
+
 ## 1. 接口原则
 
-Agent 可通过 Remote MCP 或 REST 使用同一组平台能力。Web、REST 与 MCP 是适配层，不是三套产品：
+目标状态下，Agent 可通过 Remote MCP 或 REST 使用同一组平台能力。Web、REST 与 MCP 是适配层，不是三套产品：
 
 ```text
 Web / REST / MCP
@@ -100,7 +102,7 @@ Application Commands and Queries
 | `require_approval` | `pending_approval` | `pending_approval`、`succeeded`、`denied` 或 `failed` |
 | `deny` | `denied` | `denied` |
 
-`require_approval` 以及基于权限、平台硬规则的非暂时性 `deny` 是正常业务结果，不作为 MCP 协议错误。调用已经通过认证、scope 与请求级防护并进入写工具后，领域限流是暂时性 `deny`：写工具返回 `decision=deny`、`status=denied`、`error.code=RATE_LIMITED`、`error.retryable=true` 和正整数 `retry_after_ms`；MCP 返回 `isError: true`，REST 返回 `429`。这个 `denied` 只描述当次 admission，不是幂等逻辑操作的终态。发生在工具 dispatch 之前的 IP／Credential 请求限流没有可信的领域决策上下文，REST 返回通用 V1 `RATE_LIMITED` 错误，Remote MCP 返回 HTTP 429 且不生成 tool result。dispatch 后的 not-found、验证、幂等冲突／处理中和安全重放损坏等预期失败保留当次可执行策略类别，返回 `allow/failed` 或 `require_approval/failed` 的 operation-specific 写结果；`failed` 由 MCP 设置 `isError: true`，使调用方能够根据可重试性做有界重试。
+`require_approval` 以及基于权限、平台硬规则的非暂时性 `deny` 是正常业务结果，不作为 MCP 协议错误。调用已经通过认证、scope 与请求级防护并进入写工具后，领域限流是暂时性 `deny`：写工具返回 `decision=deny`、`status=denied`、`error.code=RATE_LIMITED`、`error.retryable=true` 和正整数 `retry_after_ms`；MCP 返回 `isError: true`，REST 返回 `429`。这个 `denied` 只描述当次 admission，不是幂等逻辑操作的终态。发生在工具 dispatch 之前的 IP／Credential／Agent／Owner 请求限流没有可信的领域决策上下文，REST 返回通用 V1 `RATE_LIMITED` 错误，Remote MCP 返回 HTTP 429 且不生成 tool result。dispatch 后的 not-found、验证、幂等冲突／处理中和安全重放损坏等预期失败保留当次可执行策略类别，返回 `allow/failed` 或 `require_approval/failed` 的 operation-specific 写结果；`failed` 由 MCP 设置 `isError: true`，使调用方能够根据可重试性做有界重试。
 
 ### 2.3 幂等与并发
 
@@ -1756,7 +1758,7 @@ Retry-After: 5
 - 缺少必需 scope 在工具 dispatch 前终止：Remote MCP 返回 HTTP 403 + 标准 challenge 且没有 tool envelope，REST 返回 403 授权错误体。
 - 写工具通过 scope 校验后，Owner policy 或平台硬规则产生的 `deny/denied` 是已完成的非暂时决策，返回统一写入结果与 `isError: false`，REST 返回 `403`；模型不应通过参数微调绕过。
 - 读取工具通过 scope 校验后的操作级 `POLICY_DENIED` 不得伪装为空结果；它返回结构化工具错误、`isError: true`，REST 返回 `403`。资源级可见性仍按 not-found 最小披露规则处理。
-- `RATE_LIMITED` 是暂时性治理拒绝的明确例外。已经通过 pre-dispatch 防护的写工具固定返回 `decision=deny`、`status=denied`、`error.retryable=true` 和正整数 `retry_after_ms`；MCP 返回 `isError: true`，REST 返回 `429`。发生在 dispatch 前的 IP／Credential 限流只返回 HTTP 429 与通用版本化错误，不伪造领域 decision/status。读取工具没有 `decision/status`，但同样返回该错误对象、`isError: true` 和 HTTP `429`。
+- `RATE_LIMITED` 是暂时性治理拒绝的明确例外。已经通过 pre-dispatch 防护的写工具固定返回 `decision=deny`、`status=denied`、`error.retryable=true` 和正整数 `retry_after_ms`；MCP 返回 `isError: true`，REST 返回 `429`。发生在 dispatch 前的 IP／Credential／Agent／Owner 限流只返回 HTTP 429 与通用版本化错误，不伪造领域 decision/status。读取工具没有 `decision/status`，但同样返回该错误对象、`isError: true` 和 HTTP `429`。
 - `allow/failed` 或 `require_approval/failed` 返回 `isError: true`，并以 `retryable`、`retry_after_ms` 指导有界重试。REST body 仍必须通过对应 operation 的统一写结果 schema，并按错误 code 映射为 `404/409/422/503`，不得降级为通用 V1 错误体。
 - 对已经 dispatch 的调用，REST 与 MCP 记录相同 `request_id`、审计事件、策略版本和错误 code；pre-dispatch 授权失败只生成授权边界 request ID 与安全审计，不伪造领域工具结果。
 

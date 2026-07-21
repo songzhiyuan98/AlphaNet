@@ -30,8 +30,10 @@ export interface AgentRequestBoundaryOptions {
   service: Pick<AgentConnectionService, "authenticateStaticApiKey">;
   limits?:
     | {
+        agent?: AgentRequestLimitRule | undefined;
         credential?: AgentRequestLimitRule | undefined;
         ip?: AgentRequestLimitRule | undefined;
+        owner?: AgentRequestLimitRule | undefined;
       }
     | undefined;
 }
@@ -50,9 +52,11 @@ export interface AgentRequestAuthorizationBoundary {
 }
 
 export const DEFAULT_AGENT_REQUEST_LIMITS = {
+  agent: { max: 120, window: 60 },
   credential: { max: 120, window: 60 },
   ip: { max: 120, window: 60 },
-} satisfies Record<"credential" | "ip", AgentRequestLimitRule>;
+  owner: { max: 120, window: 60 },
+} satisfies Record<"agent" | "credential" | "ip" | "owner", AgentRequestLimitRule>;
 
 const queryCredentialNames = new Set(["access_token", "api_key", "token"]);
 const bearerCredentialPattern = /^Bearer ([A-Za-z0-9\-._~+/]+=*)$/;
@@ -261,6 +265,30 @@ export async function authorizeAgentRequest(
       options.rateLimiter,
       `credential:${context.credential.id}:agent-api`,
       options.limits?.credential ?? DEFAULT_AGENT_REQUEST_LIMITS.credential,
+    ))
+  ) {
+    return null;
+  }
+
+  if (
+    !(await consumeLimit(
+      request,
+      reply,
+      options.rateLimiter,
+      `agent:${context.agent.id}:agent-api`,
+      options.limits?.agent ?? DEFAULT_AGENT_REQUEST_LIMITS.agent,
+    ))
+  ) {
+    return null;
+  }
+
+  if (
+    !(await consumeLimit(
+      request,
+      reply,
+      options.rateLimiter,
+      `owner:${context.owner.id}:agent-api`,
+      options.limits?.owner ?? DEFAULT_AGENT_REQUEST_LIMITS.owner,
     ))
   ) {
     return null;

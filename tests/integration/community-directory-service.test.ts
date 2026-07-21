@@ -378,6 +378,112 @@ describeCommunityServices("Community directory and Agent action status", () => {
     });
   });
 
+  it("serves the same directory anonymously with a fixed read-only eligibility", async () => {
+    const listing = await directoryService.listPublicCommunities({ limit: 100 });
+    const amd = listing.items.find((item) => item.id === amdCommunityId);
+    const semiconductors = listing.items.find(
+      (item) => item.id === semiconductorsCommunityId,
+    );
+
+    expect(amd).toMatchObject({
+      canonicalTarget: { id: amdSymbolId, symbol: "AMD", type: "symbol" },
+      id: amdCommunityId,
+      viewerEligibility: {
+        canPost: false,
+        canRead: true,
+        writeGate: "deny",
+      },
+    });
+    expect(semiconductors?.viewerEligibility).toEqual({
+      canPost: false,
+      canRead: true,
+      writeGate: "deny",
+    });
+
+    const search = await directoryService.searchPublicCommunities({
+      symbols: ["amd"],
+    });
+    expect(search.items).toHaveLength(1);
+    expect(search.items[0]).toMatchObject({
+      id: amdCommunityId,
+      matchReasons: ["symbol_filter_match"],
+      matchedFields: ["symbols"],
+      viewerEligibility: {
+        canPost: false,
+        canRead: true,
+        writeGate: "deny",
+      },
+    });
+
+    await expect(
+      directoryService.getPublicCommunity({ slug: "semiconductors" }),
+    ).resolves.toMatchObject({
+      id: semiconductorsCommunityId,
+      viewerEligibility: {
+        canPost: false,
+        canRead: true,
+        writeGate: "deny",
+      },
+    });
+  });
+
+  it("binds anonymous cursors to public queries without credential metadata", async () => {
+    const first = await directoryService.listPublicCommunities({ limit: 3 });
+    const cursor = first.page.nextCursor;
+    expect(first.page).toMatchObject({ hasMore: true, limit: 3 });
+    expect(cursor).toBeTruthy();
+
+    const second = await directoryService.listPublicCommunities({ cursor, limit: 3 });
+    expect(second.ordering).toEqual(first.ordering);
+    expect(
+      second.items.some((item) =>
+        first.items.some((firstItem) => firstItem.id === item.id),
+      ),
+    ).toBe(false);
+
+    const [encoded, signature] = cursor!.split(".");
+    if (!encoded || !signature) {
+      throw new Error("The public directory did not return a signed cursor");
+    }
+    const decodedPayload = Buffer.from(encoded, "base64url").toString("utf8");
+    expect(decodedPayload).not.toContain(primaryApiKey);
+    expect(decodedPayload).not.toContain(primaryContext.owner.id);
+    expect(decodedPayload).not.toContain(primaryContext.agent.id);
+    expect(decodedPayload).not.toContain(primaryContext.credential.id);
+    expect(decodedPayload).not.toContain("agentId");
+    expect(decodedPayload).not.toContain("credentialId");
+    expect(decodedPayload).not.toContain("ownerId");
+
+    const tamperedSignature = `${signature[0] === "A" ? "B" : "A"}${signature.slice(1)}`;
+    await expect(
+      directoryService.listPublicCommunities({
+        cursor: `${encoded}.${tamperedSignature}`,
+        limit: 3,
+      }),
+    ).rejects.toMatchObject({ code: "CURSOR_INVALID" });
+    await expect(
+      directoryService.listPublicCommunities({
+        cursor,
+        limit: 3,
+        states: ["active"],
+      }),
+    ).rejects.toMatchObject({ code: "CURSOR_INVALID" });
+    await expect(
+      directoryService.listCommunities(primaryContext, { cursor, limit: 3 }),
+    ).rejects.toMatchObject({ code: "CURSOR_INVALID" });
+
+    const agentFirst = await directoryService.listCommunities(primaryContext, {
+      limit: 3,
+    });
+    expect(agentFirst.page.nextCursor).toBeTruthy();
+    await expect(
+      directoryService.listPublicCommunities({
+        cursor: agentFirst.page.nextCursor,
+        limit: 3,
+      }),
+    ).rejects.toMatchObject({ code: "CURSOR_INVALID" });
+  });
+
   it("continues a stable signed cursor and rejects tampering or filter reuse", async () => {
     const first = await directoryService.listCommunities(primaryContext, { limit: 3 });
     const cursor = first.page.nextCursor;

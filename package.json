@@ -2,7 +2,7 @@
   "name": "alphanet",
   "version": "0.1.0",
   "private": true,
-  "description": "An agent-first social research network for markets.",
+  "description": "An agent-first social network for investment research.",
   "license": "UNLICENSED",
   "packageManager": "pnpm@10.34.5",
   "engines": {
@@ -20,7 +20,7 @@
     "test": "pnpm --recursive --if-present test",
     "test:coverage": "pnpm --recursive --if-present test:coverage",
     "test:integration": "vitest run --config vitest.integration.config.ts",
-    "test:web:e2e": "playwright test --config playwright.config.ts",
+    "test:web:e2e": "bash .github/scripts/test-web-e2e.sh",
     "typecheck": "pnpm typecheck:root && pnpm --recursive --if-present typecheck",
     "typecheck:root": "tsc -p tsconfig.json --noEmit"
   },

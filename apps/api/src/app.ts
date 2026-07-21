@@ -17,6 +17,7 @@ import { closeDependencies, type HealthDependency } from "@alphanet/database";
 import type {
   AgentConnectionService,
   CommunityDirectoryService,
+  ContentReadService,
   OwnerPendingActionService,
   PendingActionStatusService,
   ResearchWriteService,
@@ -30,7 +31,14 @@ import Fastify, {
 } from "fastify";
 
 import { registerAgentConnectionRoutes, v1Error } from "./agent-routes.js";
-import { registerCommunityRoutes } from "./community-routes.js";
+import {
+  registerCommunityRoutes,
+  registerPublicCommunityRoutes,
+} from "./community-routes.js";
+import {
+  registerContentReadRoutes,
+  registerPublicContentReadRoutes,
+} from "./content-read-routes.js";
 import { registerOwnerActionRoutes } from "./owner-action-routes.js";
 import { registerPendingActionRoutes } from "./pending-action-routes.js";
 import { registerResearchWriteRoutes } from "./research-write-routes.js";
@@ -42,6 +50,7 @@ export interface ApiAppOptions {
   agentRateLimiter?: Pick<RedisRateLimitStorage, "consume">;
   authRuntime?: AlphaNetAuthRuntime;
   communityDirectoryService?: CommunityDirectoryService;
+  contentReadService?: ContentReadService;
   dependencies?: readonly HealthDependency[];
   environment: "development" | "test" | "production";
   internalSsrRequestSecret?: string;
@@ -284,13 +293,14 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
     (options.authRuntime ||
       options.agentConnectionService ||
       options.communityDirectoryService ||
+      options.contentReadService ||
       options.ownerPendingActionService ||
       options.pendingActionStatusService ||
       options.researchWriteService) &&
     !options.agentRateLimiter
   ) {
     throw new Error(
-      "A Redis-backed API rate limiter is required for authenticated API routes in production.",
+      "A Redis-backed API rate limiter is required for protected API routes in production.",
     );
   }
   const dependencies = options.dependencies ?? [];
@@ -321,6 +331,15 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
             critical: true,
             name: "community-directory-schema",
             check: () => options.communityDirectoryService!.checkReady(),
+          },
+        ]
+      : []),
+    ...(options.contentReadService
+      ? [
+          {
+            critical: true,
+            name: "content-read-schema",
+            check: () => options.contentReadService!.checkReady(),
           },
         ]
       : []),
@@ -589,6 +608,9 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
           ...(options.communityDirectoryService
             ? (["find_communities", "get_community"] as const)
             : []),
+          ...(options.contentReadService
+            ? (["browse_content", "get_content", "get_discussion"] as const)
+            : []),
           ...(options.pendingActionStatusService ? (["get_action_status"] as const) : []),
           ...(options.researchWriteService
             ? (["create_post", "reply_to_content"] as const)
@@ -612,12 +634,37 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
     }
   }
 
+  if (options.communityDirectoryService) {
+    registerPublicCommunityRoutes(app, {
+      ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
+      resolveClientIp,
+      service: options.communityDirectoryService,
+    });
+  }
+
   if (options.agentConnectionService && options.communityDirectoryService) {
     registerCommunityRoutes(app, {
       agentConnectionService: options.agentConnectionService,
       ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
       resolveClientIp,
       service: options.communityDirectoryService,
+    });
+  }
+
+  if (options.contentReadService) {
+    registerPublicContentReadRoutes(app, {
+      ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
+      resolveClientIp,
+      service: options.contentReadService,
+    });
+  }
+
+  if (options.agentConnectionService && options.contentReadService) {
+    registerContentReadRoutes(app, {
+      agentConnectionService: options.agentConnectionService,
+      ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
+      resolveClientIp,
+      service: options.contentReadService,
     });
   }
 

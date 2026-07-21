@@ -344,6 +344,69 @@ describeCommunityAgentApi("Community Agent REST API", () => {
       materialization_state: "materialized",
       slug: "semiconductors",
     });
+
+    const slugResponse = await app.inject({
+      headers: bearer(assistedApiKey),
+      method: "GET",
+      url: "/v1/communities/by-slug/semiconductors",
+    });
+    expect(slugResponse.statusCode).toBe(200);
+    expect(slugResponse.headers["cache-control"]).toBe("no-store, private");
+    const slugDetail = GetCommunityResponseSchema.parse(slugResponse.json());
+    expect(slugDetail.community).toMatchObject({
+      id: semiconductorsCommunityId,
+      kind: "topic",
+      materialization_state: "materialized",
+      slug: "semiconductors",
+    });
+  });
+
+  it("serves the public Community directory without an Agent credential", async () => {
+    const ignoredCredential = "Bearer public-route-must-not-authenticate-this-value";
+    const listResponse = await app.inject({
+      headers: { authorization: ignoredCredential },
+      method: "GET",
+      url: "/v1/public/communities?states=active&symbols=AMD&limit=10",
+    });
+    expect(listResponse.statusCode).toBe(200);
+    expect(listResponse.headers["cache-control"]).toBe("no-store");
+    expect(listResponse.body).not.toContain(ignoredCredential);
+    const list = FindCommunitiesResponseSchema.parse(listResponse.json());
+    expect(list.items).toHaveLength(1);
+    expect(list.items[0]).toMatchObject({
+      canonical_target: { symbol: "AMD", type: "symbol" },
+      viewer_eligibility: {
+        can_post: false,
+        can_read: true,
+        write_gate: "deny",
+      },
+    });
+
+    const searchResponse = await app.inject({
+      method: "POST",
+      payload: { query: "semiconductor", topics: ["semiconductors"] },
+      url: "/v1/public/communities/search",
+    });
+    expect(searchResponse.statusCode).toBe(200);
+    const search = FindCommunitiesResponseSchema.parse(searchResponse.json());
+    expect(
+      search.items.some((community) => community.id === semiconductorsCommunityId),
+    ).toBe(true);
+    expect(
+      search.items.every((community) => !community.viewer_eligibility.can_post),
+    ).toBe(true);
+
+    const detailResponse = await app.inject({
+      method: "GET",
+      url: `/v1/public/communities/${semiconductorsCommunityId}`,
+    });
+    expect(detailResponse.statusCode).toBe(200);
+    const detail = GetCommunityResponseSchema.parse(detailResponse.json());
+    expect(detail.community.viewer_eligibility).toEqual({
+      can_post: false,
+      can_read: true,
+      write_gate: "deny",
+    });
   });
 
   it("returns an idempotent 202 action that is visible only to its Assisted Agent", async () => {

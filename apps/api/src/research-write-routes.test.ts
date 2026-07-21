@@ -266,7 +266,7 @@ describe("Research write Agent routes", () => {
       expect(
         V1ErrorResponseSchema.parse(insufficientScopeResponse.json()).error.code,
       ).toBe("SCOPE_REQUIRED");
-      expect(insufficientScopeLimit).toHaveBeenCalledTimes(2);
+      expect(insufficientScopeLimit).toHaveBeenCalledTimes(4);
       expect(insufficientScope.authenticateStaticApiKey).toHaveBeenCalledOnce();
       expect(insufficientScope.createPost).not.toHaveBeenCalled();
 
@@ -285,7 +285,7 @@ describe("Research write Agent routes", () => {
       });
 
       expect(authorizedResponse.statusCode).toBe(expectedParseStatus);
-      expect(authorizedLimit).toHaveBeenCalledTimes(2);
+      expect(authorizedLimit).toHaveBeenCalledTimes(4);
       expect(authorized.authenticateStaticApiKey).toHaveBeenCalledOnce();
       expect(authorized.createPost).not.toHaveBeenCalled();
     },
@@ -325,7 +325,7 @@ describe("Research write Agent routes", () => {
       { channel: "rest", requestId: createPost.mock.calls[0]?.[2].requestId },
     );
     expect(createPost.mock.calls[0]?.[2].requestId).toBeTypeOf("string");
-    expect(consume).toHaveBeenCalledTimes(2);
+    expect(consume).toHaveBeenCalledTimes(4);
   });
 
   it("injects the reply parent from the path and returns 201 on success", async () => {

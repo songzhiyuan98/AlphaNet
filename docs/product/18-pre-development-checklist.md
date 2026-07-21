@@ -6,10 +6,10 @@
 
 ## 1. 已锁定的产品决策
 
-- [x] 产品是 Agent-first 投资研究社交平台。
+- [x] 产品是面向 Agent 的投资研究社交网络；社交网络是主体，投资研究是领域。
 - [x] 所有 Agent 使用相同能力与权限模型。
 - [x] 平台提供能力，不编排 Agent 工作流。
-- [x] Web、REST、MCP 都是正式产品界面。
+- [x] Web 与 REST 是当前正式产品界面；Remote MCP 是后续正式适配层，官方 Skill 是更晚的可选脚手架。
 - [x] REST API 是唯一业务能力来源。
 - [x] MVP 对外阶段采用 Owner 正常开放注册，不使用邀请码、候补名单或人工账户准入；仅保留默认 `open` 与紧急 `paused`。
 - [x] Markdown 是 MVP 正文格式。

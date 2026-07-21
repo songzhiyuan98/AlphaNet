@@ -27,6 +27,7 @@ const DEFAULT_QUERY_TIMEOUT_MILLISECONDS = 3_000;
 const MAXIMUM_CURSOR_LENGTH = 4_096;
 const MAXIMUM_CLOCK_SKEW_MILLISECONDS = 60_000;
 const communityStates = ["active", "read_only", "suspended", "archived"] as const;
+const anonymousPublicCommunityStates = ["active", "read_only", "archived"] as const;
 const communityKinds = ["general", "symbol", "topic"] as const;
 export type CommunityState = (typeof communityStates)[number];
 export type CommunityKind = (typeof communityKinds)[number];
@@ -175,14 +176,17 @@ export interface CommunityDirectoryService {
     viewer: AgentCredentialContext,
     lookup: CommunityLookup,
   ): Promise<CommunityDetailProjection>;
+  getPublicCommunity(lookup: CommunityLookup): Promise<CommunityDetailProjection>;
   listCommunities(
     viewer: AgentCredentialContext,
     input?: CommunityListInput,
   ): Promise<CommunityDirectoryPage>;
+  listPublicCommunities(input?: CommunityListInput): Promise<CommunityDirectoryPage>;
   searchCommunities(
     viewer: AgentCredentialContext,
     input: CommunitySearchInput,
   ): Promise<CommunityDirectoryPage>;
+  searchPublicCommunities(input: CommunitySearchInput): Promise<CommunityDirectoryPage>;
 }
 
 export interface PostgresCommunityDirectoryOptions {
@@ -207,6 +211,7 @@ interface NormalizedDirectoryQuery {
   proposedTitleTokens: string[];
   query: string | null;
   queryTokens: string[];
+  stateFilterExplicit: boolean;
   states: CommunityState[];
   symbols: string[];
   topics: string[];
@@ -412,6 +417,7 @@ export function normalizeCommunityListInput(
     proposedTitleTokens: [],
     query: null,
     queryTokens: [],
+    stateFilterExplicit: input.states !== undefined,
     states: normalizeStates(input.states),
     symbols: normalizeSymbols(input.symbols),
     topics: normalizeTopics(input.topics),
@@ -450,6 +456,7 @@ export function normalizeCommunitySearchInput(
     proposedTitleTokens: searchTokens(proposedTitle, 32),
     query,
     queryTokens: searchTokens(query, 32),
+    stateFilterExplicit: input.states !== undefined,
     states,
     symbols,
     topics,
@@ -588,6 +595,31 @@ function cursorBinding(
         proposedSummary: input.proposedSummary,
         proposedTitle: input.proposedTitle,
         query: input.query,
+        stateFilterExplicit: input.stateFilterExplicit,
+        states: input.states,
+        symbols: input.symbols,
+        topics: input.topics,
+        wildcard: input.wildcard,
+      },
+    }),
+  );
+}
+
+function publicCursorBinding(input: NormalizedDirectoryQuery, key: Buffer): string {
+  return keyedDigest(
+    key,
+    CURSOR_BINDING_DOMAIN,
+    JSON.stringify({
+      public: {
+        audience: "anonymous-community-directory",
+      },
+      query: {
+        limit: input.limit,
+        mode: input.mode,
+        proposedSummary: input.proposedSummary,
+        proposedTitle: input.proposedTitle,
+        query: input.query,
+        stateFilterExplicit: input.stateFilterExplicit,
         states: input.states,
         symbols: input.symbols,
         topics: input.topics,
@@ -887,7 +919,7 @@ function mapSearchItem(
     matchedFields.push("topics");
     matchReasons.push("topic_filter_match");
   }
-  if (input.states.length !== communityStates.length) {
+  if (input.stateFilterExplicit) {
     matchedFields.push("state");
     matchReasons.push("state_filter_match");
   }
@@ -1021,7 +1053,29 @@ export class PostgresCommunityDirectoryService implements CommunityDirectoryServ
     input: CommunityListInput = {},
   ): Promise<CommunityDirectoryPage> {
     assertReadAllowed(viewer, "find_communities");
-    return this.#find(viewer, normalizeCommunityListInput(input, this.#defaultLimit));
+    const normalized = normalizeCommunityListInput(input, this.#defaultLimit);
+    return this.#find(
+      normalized,
+      cursorBinding(viewer, normalized, this.#cursorSigningKey),
+      writeDecision(viewer),
+    );
+  }
+
+  async listPublicCommunities(
+    input: CommunityListInput = {},
+  ): Promise<CommunityDirectoryPage> {
+    const normalized = normalizeCommunityListInput(input, this.#defaultLimit);
+    if (input.states === undefined) {
+      normalized.states = uniqueSorted(anonymousPublicCommunityStates);
+    }
+    if (normalized.states.includes("suspended")) {
+      throw new CommunityDirectoryError("INVALID_ARGUMENT");
+    }
+    return this.#find(
+      normalized,
+      publicCursorBinding(normalized, this.#cursorSigningKey),
+      "deny",
+    );
   }
 
   async searchCommunities(
@@ -1029,7 +1083,29 @@ export class PostgresCommunityDirectoryService implements CommunityDirectoryServ
     input: CommunitySearchInput,
   ): Promise<CommunityDirectoryPage> {
     assertReadAllowed(viewer, "find_communities");
-    return this.#find(viewer, normalizeCommunitySearchInput(input, this.#defaultLimit));
+    const normalized = normalizeCommunitySearchInput(input, this.#defaultLimit);
+    return this.#find(
+      normalized,
+      cursorBinding(viewer, normalized, this.#cursorSigningKey),
+      writeDecision(viewer),
+    );
+  }
+
+  async searchPublicCommunities(
+    input: CommunitySearchInput,
+  ): Promise<CommunityDirectoryPage> {
+    const normalized = normalizeCommunitySearchInput(input, this.#defaultLimit);
+    if (input.states === undefined) {
+      normalized.states = uniqueSorted(anonymousPublicCommunityStates);
+    }
+    if (normalized.states.includes("suspended")) {
+      throw new CommunityDirectoryError("INVALID_ARGUMENT");
+    }
+    return this.#find(
+      normalized,
+      publicCursorBinding(normalized, this.#cursorSigningKey),
+      "deny",
+    );
   }
 
   async getCommunity(
@@ -1037,6 +1113,21 @@ export class PostgresCommunityDirectoryService implements CommunityDirectoryServ
     lookup: CommunityLookup,
   ): Promise<CommunityDetailProjection> {
     assertReadAllowed(viewer, "get_community");
+    return this.#getCommunity(lookup, writeDecision(viewer));
+  }
+
+  async getPublicCommunity(lookup: CommunityLookup): Promise<CommunityDetailProjection> {
+    const community = await this.#getCommunity(lookup, "deny");
+    if (community.state === "suspended") {
+      throw new CommunityDirectoryError("COMMUNITY_NOT_FOUND");
+    }
+    return community;
+  }
+
+  async #getCommunity(
+    lookup: CommunityLookup,
+    decision: AgentPolicyDecision,
+  ): Promise<CommunityDetailProjection> {
     const normalized = normalizeLookup(lookup);
     const rows = await this.#sql.begin(async (transaction) => {
       await this.#setStatementTimeout(transaction);
@@ -1048,14 +1139,14 @@ export class PostgresCommunityDirectoryService implements CommunityDirectoryServ
     if (rows.length !== 1) {
       throw new CommunityDirectoryError("DIRECTORY_DATA_INVALID");
     }
-    return mapDetail(rows[0]!, writeDecision(viewer));
+    return mapDetail(rows[0]!, decision);
   }
 
   async #find(
-    viewer: AgentCredentialContext,
     input: NormalizedDirectoryQuery,
+    binding: string,
+    decision: AgentPolicyDecision,
   ): Promise<CommunityDirectoryPage> {
-    const binding = cursorBinding(viewer, input, this.#cursorSigningKey);
     const parsedCursor =
       input.cursor === null ? null : this.#parseCursor(input.cursor, binding);
     const queryResult = await this.#sql.begin(
@@ -1109,7 +1200,6 @@ export class PostgresCommunityDirectoryService implements CommunityDirectoryServ
             snapshotId: resolvedSnapshotId,
           })
         : null;
-    const decision = writeDecision(viewer);
     return {
       items: pageRows.map((row) => mapSearchItem(row, decision, input)),
       ordering: {

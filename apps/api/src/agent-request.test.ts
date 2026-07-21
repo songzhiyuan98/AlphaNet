@@ -143,7 +143,7 @@ function allowAllLimiter(
   order?: string[],
 ): AgentRequestRateLimiter & { consume: ReturnType<typeof vi.fn> } {
   const consume = vi.fn((key: string) => {
-    order?.push(key.startsWith("ip:") ? "ip-limit" : "credential-limit");
+    order?.push(`${key.slice(0, key.indexOf(":"))}-limit`);
     return Promise.resolve({ allowed: true, retryAfter: null });
   });
   return { consume };
@@ -224,13 +224,13 @@ describe("authorizeAgentRequest", () => {
 
     expect(boundary.getAuthorization(first.request).context).toBe(firstContext);
     expect(boundary.getAuthorization(second.request).context).toBe(secondContext);
-    expect(limiter.consume).toHaveBeenCalledTimes(4);
+    expect(limiter.consume).toHaveBeenCalledTimes(8);
     expect(() => boundary.getAuthorization(forged.request)).toThrow(
       "Agent request reached its handler without authorization",
     );
   });
 
-  it("runs IP limit, authentication, credential limit, and policy evaluation in order", async () => {
+  it("runs IP, credential, Agent, and Owner limits before policy evaluation", async () => {
     const order: string[] = [];
     const authenticatedContext = context();
     const limiter = allowAllLimiter(order);
@@ -247,7 +247,13 @@ describe("authorizeAgentRequest", () => {
       service: serviceFor(authenticateStaticApiKey),
     });
 
-    expect(order).toEqual(["ip-limit", "authenticate", "credential-limit"]);
+    expect(order).toEqual([
+      "ip-limit",
+      "authenticate",
+      "credential-limit",
+      "agent-limit",
+      "owner-limit",
+    ]);
     expect(limiter.consume).toHaveBeenNthCalledWith(1, "ip:203.0.113.10:agent-api", {
       max: 120,
       window: 60,
@@ -257,6 +263,14 @@ describe("authorizeAgentRequest", () => {
       `credential:${ids.credential}:agent-api`,
       { max: 120, window: 60 },
     );
+    expect(limiter.consume).toHaveBeenNthCalledWith(3, `agent:${ids.agent}:agent-api`, {
+      max: 120,
+      window: 60,
+    });
+    expect(limiter.consume).toHaveBeenNthCalledWith(4, `owner:${ids.owner}:agent-api`, {
+      max: 120,
+      window: 60,
+    });
     expect(reply.statusCode()).toBe(200);
     expect(result?.context).toBe(authenticatedContext);
     expect(result?.evaluation).toMatchObject({
@@ -345,6 +359,46 @@ describe("authorizeAgentRequest", () => {
     expect(consume).toHaveBeenCalledTimes(2);
     expect(authenticateStaticApiKey).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    {
+      allowedBefore: 2,
+      expectedCalls: 3,
+      key: `agent:${ids.agent}:agent-api`,
+      label: "Agent",
+      retryAfter: 13,
+    },
+    {
+      allowedBefore: 3,
+      expectedCalls: 4,
+      key: `owner:${ids.owner}:agent-api`,
+      label: "Owner",
+      retryAfter: 17,
+    },
+  ])(
+    "stops at the aggregate $label limit without consuming a later bucket",
+    async ({ allowedBefore, expectedCalls, key, retryAfter }) => {
+      const consume = vi.fn(() =>
+        Promise.resolve(
+          consume.mock.calls.length <= allowedBefore
+            ? { allowed: true, retryAfter: null }
+            : { allowed: false, retryAfter },
+        ),
+      );
+
+      const { result, reply } = await runBoundary({
+        authorization: `Bearer ${apiKey}`,
+        rateLimiter: { consume },
+      });
+
+      expect(result).toBeNull();
+      expect(reply.statusCode()).toBe(429);
+      expect(reply.headers["retry-after"]).toBe(String(retryAfter));
+      expectV1Error(reply.payload(), "RATE_LIMITED");
+      expect(consume).toHaveBeenCalledTimes(expectedCalls);
+      expect(consume).toHaveBeenLastCalledWith(key, { max: 120, window: 60 });
+    },
+  );
 
   it("returns SCOPE_REQUIRED with the standard insufficient_scope challenge", async () => {
     const { result, reply } = await runBoundary({
@@ -467,21 +521,61 @@ describe("authorizeAgentRequest", () => {
     expect(externallyVisible).not.toContain("backend included");
   });
 
-  it("fails closed with 503 when the limiter dependency fails", async () => {
-    const limiterError = new Error(`limiter included ${apiKey}`);
-    const consume = vi.fn(() => Promise.reject(limiterError));
-    const authenticateStaticApiKey = vi.fn(() => Promise.resolve(context()));
-    const { result, reply, request } = await runBoundary({
-      authorization: `Bearer ${apiKey}`,
-      rateLimiter: { consume },
-      service: serviceFor(authenticateStaticApiKey),
-    });
+  it.each([
+    {
+      expectedCalls: 1,
+      key: "ip:203.0.113.10:agent-api",
+      label: "IP",
+      permittedBefore: 0,
+    },
+    {
+      expectedCalls: 2,
+      key: `credential:${ids.credential}:agent-api`,
+      label: "Credential",
+      permittedBefore: 1,
+    },
+    {
+      expectedCalls: 3,
+      key: `agent:${ids.agent}:agent-api`,
+      label: "Agent",
+      permittedBefore: 2,
+    },
+    {
+      expectedCalls: 4,
+      key: `owner:${ids.owner}:agent-api`,
+      label: "Owner",
+      permittedBefore: 3,
+    },
+  ])(
+    "fails closed without leaking dependency details when the $label limiter fails",
+    async ({ expectedCalls, key, permittedBefore }) => {
+      const limiterError = new Error(`limiter included ${apiKey}`);
+      const consume = vi.fn(() =>
+        consume.mock.calls.length <= permittedBefore
+          ? Promise.resolve({ allowed: true, retryAfter: null })
+          : Promise.reject(limiterError),
+      );
+      const authenticateStaticApiKey = vi.fn(() => Promise.resolve(context()));
+      const { result, reply, request } = await runBoundary({
+        authorization: `Bearer ${apiKey}`,
+        rateLimiter: { consume },
+        service: serviceFor(authenticateStaticApiKey),
+      });
 
-    expect(result).toBeNull();
-    expect(reply.statusCode()).toBe(503);
-    expectV1Error(reply.payload(), "TEMPORARILY_UNAVAILABLE");
-    expect(authenticateStaticApiKey).not.toHaveBeenCalled();
-    expect(JSON.stringify(request.errorLog.mock.calls)).not.toContain(apiKey);
-    expect(JSON.stringify(request.errorLog.mock.calls)).not.toContain("limiter included");
-  });
+      expect(result).toBeNull();
+      expect(reply.statusCode()).toBe(503);
+      expectV1Error(reply.payload(), "TEMPORARILY_UNAVAILABLE");
+      expect(consume).toHaveBeenCalledTimes(expectedCalls);
+      expect(consume).toHaveBeenLastCalledWith(key, { max: 120, window: 60 });
+      if (permittedBefore === 0) {
+        expect(authenticateStaticApiKey).not.toHaveBeenCalled();
+      } else {
+        expect(authenticateStaticApiKey).toHaveBeenCalledOnce();
+      }
+      expect(JSON.stringify(request.errorLog.mock.calls)).not.toContain(apiKey);
+      expect(JSON.stringify(request.errorLog.mock.calls)).not.toContain(
+        "limiter included",
+      );
+    },
+  );
 });

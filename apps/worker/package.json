@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "clean": "rm -rf dist coverage",
-    "dev": "tsx watch src/main.ts",
+    "dev": "tsx watch --conditions=development src/main.ts",
     "start": "node dist/main.js",
     "test": "vitest run src",
     "test:coverage": "vitest run src --coverage",

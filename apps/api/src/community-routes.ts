@@ -33,6 +33,17 @@ export interface CommunityRouteOptions {
   service: CommunityDirectoryService;
 }
 
+export interface PublicCommunityRouteOptions {
+  rateLimiter?: AgentRequestRateLimiter | undefined;
+  resolveClientIp?: ((request: FastifyRequest) => string) | undefined;
+  service: Pick<
+    CommunityDirectoryService,
+    "getPublicCommunity" | "listPublicCommunities" | "searchPublicCommunities"
+  >;
+}
+
+const PUBLIC_DIRECTORY_RATE_LIMIT = { max: 120, window: 60 } as const;
+
 function queryArray(value: unknown): unknown {
   if (value === undefined) return undefined;
   const values: unknown[] = Array.isArray(value) ? value : [value];
@@ -71,6 +82,18 @@ function validationFailed(request: FastifyRequest, reply: FastifyReply): Fastify
     v1Error(request, {
       code: "INVALID_ARGUMENT",
       message: "The request does not match the Agent API contract.",
+    }),
+  );
+}
+
+function publicValidationFailed(
+  request: FastifyRequest,
+  reply: FastifyReply,
+): FastifyReply {
+  return reply.code(422).send(
+    v1Error(request, {
+      code: "INVALID_ARGUMENT",
+      message: "The request does not match the public Community API contract.",
     }),
   );
 }
@@ -206,6 +229,175 @@ function directoryAuthorizationBoundary(
   };
 }
 
+function publicDirectoryBoundary(options: PublicCommunityRouteOptions) {
+  return async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+  ): Promise<FastifyReply | undefined> => {
+    void reply.header("cache-control", "no-store");
+    void reply.header("pragma", "no-cache");
+    if (!options.rateLimiter) {
+      return undefined;
+    }
+
+    let clientIp: string;
+    try {
+      clientIp = options.resolveClientIp?.(request) ?? request.ip;
+      const result = await options.rateLimiter.consume(
+        `ip:${clientIp}:public-community-directory`,
+        PUBLIC_DIRECTORY_RATE_LIMIT,
+      );
+      if (result.allowed) {
+        return undefined;
+      }
+
+      const retryAfter = Math.max(
+        1,
+        Math.ceil(result.retryAfter ?? PUBLIC_DIRECTORY_RATE_LIMIT.window),
+      );
+      void reply.header("retry-after", String(retryAfter));
+      return reply.code(429).send(
+        v1Error(request, {
+          code: "RATE_LIMITED",
+          message: "Too many public Community requests were made in this time window.",
+          retryable: true,
+          retryAt: new Date(Date.now() + retryAfter * 1_000),
+        }),
+      );
+    } catch (error) {
+      request.log.error(
+        { errorName: error instanceof Error ? error.name : "UnknownError" },
+        "Public Community request protection failed",
+      );
+      return reply.code(503).send(
+        v1Error(request, {
+          code: "TEMPORARILY_UNAVAILABLE",
+          message: "Public Community request protection is temporarily unavailable.",
+          retryable: true,
+        }),
+      );
+    }
+  };
+}
+
+export function registerPublicCommunityRoutes(
+  app: FastifyInstance,
+  options: PublicCommunityRouteOptions,
+): void {
+  const onRequest = publicDirectoryBoundary(options);
+
+  app.get("/v1/public/communities", { onRequest }, async (request, reply) => {
+    const query = directoryListQuerySchema.safeParse(request.query);
+    if (!query.success) return publicValidationFailed(request, reply);
+
+    try {
+      const page = await options.service.listPublicCommunities(query.data);
+      const response = serializeDirectoryPage(request, page);
+      if (!response) {
+        request.log.error(
+          { itemCount: page.items.length },
+          "Public Community directory projection violated its response contract",
+        );
+        return sendDirectoryError(request, reply, new Error("projection invalid"));
+      }
+      return response;
+    } catch (error) {
+      return sendDirectoryError(request, reply, error);
+    }
+  });
+
+  app.post("/v1/public/communities/search", { onRequest }, async (request, reply) => {
+    const body = FindCommunitiesRequestSchema.safeParse(request.body);
+    if (!body.success) return publicValidationFailed(request, reply);
+
+    try {
+      const page = await options.service.searchPublicCommunities({
+        query: body.data.query,
+        proposedTitle: body.data.proposed_title,
+        proposedSummary: body.data.proposed_summary,
+        states: body.data.states,
+        symbols: body.data.symbols,
+        topics: body.data.topics,
+        limit: body.data.limit,
+        cursor: body.data.cursor,
+      });
+      const response = serializeDirectoryPage(request, page);
+      if (!response) {
+        request.log.error(
+          { itemCount: page.items.length },
+          "Public Community search projection violated its response contract",
+        );
+        return sendDirectoryError(request, reply, new Error("projection invalid"));
+      }
+      return response;
+    } catch (error) {
+      return sendDirectoryError(request, reply, error);
+    }
+  });
+
+  app.get(
+    "/v1/public/communities/by-slug/:slug",
+    { onRequest },
+    async (request, reply) => {
+      const rawParameters = request.params as { slug?: unknown };
+      const parameters = GetCommunityRequestSchema.safeParse({
+        slug: rawParameters.slug,
+      });
+      if (!parameters.success || !parameters.data.slug) {
+        return publicValidationFailed(request, reply);
+      }
+
+      try {
+        const community = await options.service.getPublicCommunity({
+          slug: parameters.data.slug,
+        });
+        const response = serializeCommunity(request, community);
+        if (!response) {
+          request.log.error(
+            { communityKind: community.kind },
+            "Public Community slug projection violated its response contract",
+          );
+          return sendDirectoryError(request, reply, new Error("projection invalid"));
+        }
+        return response;
+      } catch (error) {
+        return sendDirectoryError(request, reply, error);
+      }
+    },
+  );
+
+  app.get(
+    "/v1/public/communities/:communityId",
+    { onRequest },
+    async (request, reply) => {
+      const rawParameters = request.params as { communityId?: unknown };
+      const parameters = GetCommunityRequestSchema.safeParse({
+        community_id: rawParameters.communityId,
+      });
+      if (!parameters.success || !parameters.data.community_id) {
+        return publicValidationFailed(request, reply);
+      }
+
+      try {
+        const community = await options.service.getPublicCommunity({
+          communityId: parameters.data.community_id,
+        });
+        const response = serializeCommunity(request, community);
+        if (!response) {
+          request.log.error(
+            { communityKind: community.kind },
+            "Public Community detail projection violated its response contract",
+          );
+          return sendDirectoryError(request, reply, new Error("projection invalid"));
+        }
+        return response;
+      } catch (error) {
+        return sendDirectoryError(request, reply, error);
+      }
+    },
+  );
+}
+
 export function registerCommunityRoutes(
   app: FastifyInstance,
   options: CommunityRouteOptions,
@@ -265,6 +457,40 @@ export function registerCommunityRoutes(
           request.log.error(
             { itemCount: page.items.length },
             "Community search projection violated its response contract",
+          );
+          return sendDirectoryError(request, reply, new Error("projection invalid"));
+        }
+        return response;
+      } catch (error) {
+        return sendDirectoryError(request, reply, error);
+      }
+    },
+  );
+
+  // Keep this static route ahead of /:communityId so "by-slug" can never be
+  // interpreted as an opaque Community ID by this or another HTTP adapter.
+  app.get(
+    "/v1/communities/by-slug/:slug",
+    { onRequest: getAuthorization.onRequest },
+    async (request, reply) => {
+      const authorization = getAuthorization.getAuthorization(request);
+      const rawParameters = request.params as { slug?: unknown };
+      const parameters = GetCommunityRequestSchema.safeParse({
+        slug: rawParameters.slug,
+      });
+      if (!parameters.success || !parameters.data.slug) {
+        return validationFailed(request, reply);
+      }
+
+      try {
+        const community = await options.service.getCommunity(authorization.context, {
+          slug: parameters.data.slug,
+        });
+        const response = serializeCommunity(request, community);
+        if (!response) {
+          request.log.error(
+            { communityKind: community.kind },
+            "Community slug projection violated its response contract",
           );
           return sendDirectoryError(request, reply, new Error("projection invalid"));
         }

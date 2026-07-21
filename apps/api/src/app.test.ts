@@ -3,7 +3,7 @@ import { inspect } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AlphaNetAuthRuntime, OwnerSession } from "@alphanet/auth";
 import { V1ErrorResponseSchema } from "@alphanet/contracts";
-import type { OwnerPendingActionService } from "@alphanet/domain";
+import type { ContentReadService, OwnerPendingActionService } from "@alphanet/domain";
 import type { FastifyBaseLogger } from "fastify";
 
 import { createApiApp } from "./app.js";
@@ -88,6 +88,31 @@ function createOwnerPendingActionService(options?: {
     getAction: vi.fn(() => Promise.reject(new Error("unexpected detail read"))),
     listActions: vi.fn(() => Promise.reject(new Error("unexpected list read"))),
     rejectAction: vi.fn(() => Promise.reject(new Error("unexpected rejection"))),
+  };
+}
+
+function createContentReadService(): ContentReadService & {
+  browseContent: ReturnType<typeof vi.fn>;
+  checkReady: ReturnType<typeof vi.fn>;
+} {
+  const now = new Date("2026-07-20T20:00:00.000Z");
+  return {
+    browseContent: vi.fn(() =>
+      Promise.resolve({
+        countsAsOf: now,
+        items: [],
+        page: { hasMore: false, limit: 20, nextCursor: null },
+        ranking: {
+          asOf: now,
+          expiresAt: new Date(now.valueOf() + 15 * 60_000),
+          rankingVersion: "content-read-v1:latest",
+          snapshotId: "crs_00000000000000000000000000000000",
+        },
+      }),
+    ),
+    checkReady: vi.fn(() => Promise.resolve()),
+    getContent: vi.fn(() => Promise.reject(new Error("unexpected content read"))),
+    getDiscussion: vi.fn(() => Promise.reject(new Error("unexpected discussion read"))),
   };
 }
 
@@ -238,6 +263,33 @@ describe("API service", () => {
 
     expect(response.statusCode).toBe(200);
     expect(service.checkReady).toHaveBeenCalledOnce();
+  });
+
+  it("registers public Content reads and includes their schema in readiness", async () => {
+    const service = createContentReadService();
+    const app = await createApiApp({
+      allowedOrigins: ["https://app.alphanet.test"],
+      contentReadService: service,
+      environment: "test",
+      version: "test-version",
+    });
+    apps.push(app);
+
+    const readiness = await app.inject({ method: "GET", url: "/health/ready" });
+    const browse = await app.inject({
+      method: "GET",
+      url: "/v1/public/content?scope=global&sort=latest",
+    });
+
+    expect(readiness.statusCode).toBe(200);
+    expect(service.checkReady).toHaveBeenCalledOnce();
+    expect(browse.statusCode).toBe(200);
+    expect(browse.headers["cache-control"]).toBe("no-store");
+    expect(browse.json()).toMatchObject({
+      items: [],
+      page: { has_more: false, limit: 20, next_cursor: null },
+      ranking: { ranking_version: "content-read-v1:latest" },
+    });
   });
 
   it.each([

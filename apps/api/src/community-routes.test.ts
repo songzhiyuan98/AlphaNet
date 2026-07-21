@@ -11,10 +11,13 @@ import {
   type CommunityDirectoryPage,
   type CommunityDirectoryService,
 } from "@alphanet/domain";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { registerCommunityRoutes } from "./community-routes.js";
+import {
+  registerCommunityRoutes,
+  registerPublicCommunityRoutes,
+} from "./community-routes.js";
 import type { AgentRequestRateLimiter } from "./agent-request.js";
 
 const ids = {
@@ -147,6 +150,32 @@ function communityDetail(): CommunityDetailProjection {
   };
 }
 
+function publicDirectoryPage(): CommunityDirectoryPage {
+  const page = directoryPage();
+  return {
+    ...page,
+    items: page.items.map((item) => ({
+      ...item,
+      viewerEligibility: {
+        canRead: true,
+        canPost: false,
+        writeGate: "deny",
+      },
+    })),
+  };
+}
+
+function publicCommunityDetail(): CommunityDetailProjection {
+  return {
+    ...communityDetail(),
+    viewerEligibility: {
+      canRead: true,
+      canPost: false,
+      writeGate: "deny",
+    },
+  };
+}
+
 function createApp(options?: {
   context?: AgentCredentialContext;
   detail?: CommunityDetailProjection;
@@ -175,8 +204,11 @@ function createApp(options?: {
     service: {
       checkReady: vi.fn(() => Promise.resolve()),
       listCommunities,
+      listPublicCommunities: vi.fn(() => Promise.resolve(publicDirectoryPage())),
       searchCommunities,
+      searchPublicCommunities: vi.fn(() => Promise.resolve(publicDirectoryPage())),
       getCommunity,
+      getPublicCommunity: vi.fn(() => Promise.resolve(publicCommunityDetail())),
     },
   });
   apps.push(app);
@@ -188,6 +220,227 @@ function createApp(options?: {
     searchCommunities,
   };
 }
+
+function createPublicApp(options?: {
+  detail?: CommunityDetailProjection;
+  getPublicCommunity?: CommunityDirectoryService["getPublicCommunity"];
+  page?: CommunityDirectoryPage;
+  rateLimiter?: AgentRequestRateLimiter;
+  resolveClientIp?: (request: FastifyRequest) => string;
+}) {
+  const app = Fastify({ logger: false });
+  const listPublicCommunities = vi.fn<CommunityDirectoryService["listPublicCommunities"]>(
+    () => Promise.resolve(options?.page ?? publicDirectoryPage()),
+  );
+  const searchPublicCommunities = vi.fn<
+    CommunityDirectoryService["searchPublicCommunities"]
+  >(() => Promise.resolve(options?.page ?? publicDirectoryPage()));
+  const getPublicCommunity = vi.fn<CommunityDirectoryService["getPublicCommunity"]>(
+    options?.getPublicCommunity ??
+      (() => Promise.resolve(options?.detail ?? publicCommunityDetail())),
+  );
+  registerPublicCommunityRoutes(app, {
+    ...(options?.rateLimiter ? { rateLimiter: options.rateLimiter } : {}),
+    ...(options?.resolveClientIp ? { resolveClientIp: options.resolveClientIp } : {}),
+    service: {
+      getPublicCommunity,
+      listPublicCommunities,
+      searchPublicCommunities,
+    },
+  });
+  apps.push(app);
+  return {
+    app,
+    getPublicCommunity,
+    listPublicCommunities,
+    searchPublicCommunities,
+  };
+}
+
+describe("Public Community routes", () => {
+  it("lists Communities anonymously with a deny write gate and no credential leakage", async () => {
+    const credentialMarker = "aln_v1_public-route-must-ignore-this-secret";
+    const { app, listPublicCommunities } = createPublicApp();
+    const response = await app.inject({
+      headers: {
+        authorization: `Bearer ${credentialMarker}`,
+        "x-request-id": "req-public-community-list",
+      },
+      method: "GET",
+      url: "/v1/public/communities?states=active&symbols=AMD,MU&limit=20",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    const body = FindCommunitiesResponseSchema.parse(response.json());
+    expect(response.body).not.toContain(credentialMarker);
+    expect(response.body).not.toContain(ids.owner);
+    expect(response.body).not.toContain(ids.agent);
+    expect(response.body).not.toContain(ids.credential);
+    expect(body.items[0]?.viewer_eligibility).toEqual({
+      can_read: true,
+      can_post: false,
+      write_gate: "deny",
+    });
+    expect(listPublicCommunities).toHaveBeenCalledExactlyOnceWith({
+      states: ["active"],
+      symbols: ["AMD", "MU"],
+      limit: 20,
+    });
+  });
+
+  it("maps anonymous POST search without requiring an Agent credential", async () => {
+    const { app, searchPublicCommunities } = createPublicApp();
+    const response = await app.inject({
+      method: "POST",
+      payload: {
+        proposed_title: "AMD data-center scenarios",
+        proposed_summary: "Semiconductor revenue and supply-chain assumptions.",
+        symbols: ["AMD"],
+      },
+      url: "/v1/public/communities/search",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(searchPublicCommunities).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        proposedTitle: "AMD data-center scenarios",
+        proposedSummary: "Semiconductor revenue and supply-chain assumptions.",
+        symbols: ["AMD"],
+      }),
+    );
+    const body = FindCommunitiesResponseSchema.parse(response.json());
+    expect(body.items[0]?.viewer_eligibility).toEqual({
+      can_read: true,
+      can_post: false,
+      write_gate: "deny",
+    });
+  });
+
+  it("returns anonymous Community detail through the existing response contract", async () => {
+    const { app, getPublicCommunity } = createPublicApp();
+    const response = await app.inject({
+      method: "GET",
+      url: `/v1/public/communities/${ids.community}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = GetCommunityResponseSchema.parse(response.json());
+    expect(body.community.viewer_eligibility).toEqual({
+      can_read: true,
+      can_post: false,
+      write_gate: "deny",
+    });
+    expect(getPublicCommunity).toHaveBeenCalledExactlyOnceWith({
+      communityId: ids.community,
+    });
+  });
+
+  it("resolves an exact anonymous Community slug without a ranked search", async () => {
+    const { app, getPublicCommunity, searchPublicCommunities } = createPublicApp();
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/public/communities/by-slug/semiconductors",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(GetCommunityResponseSchema.safeParse(response.json()).success).toBe(true);
+    expect(getPublicCommunity).toHaveBeenCalledExactlyOnceWith({
+      slug: "semiconductors",
+    });
+    expect(searchPublicCommunities).not.toHaveBeenCalled();
+  });
+
+  it("rejects a malformed anonymous Community slug before directory access", async () => {
+    const { app, getPublicCommunity } = createPublicApp();
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/public/communities/by-slug/Not_Canonical",
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
+      "INVALID_ARGUMENT",
+    );
+    expect(getPublicCommunity).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid anonymous list and search inputs before directory access", async () => {
+    const { app, listPublicCommunities, searchPublicCommunities } = createPublicApp();
+    const invalidList = await app.inject({
+      method: "GET",
+      url: "/v1/public/communities?query=private-research",
+    });
+    const invalidSearch = await app.inject({
+      method: "POST",
+      payload: {},
+      url: "/v1/public/communities/search",
+    });
+
+    expect(invalidList.statusCode).toBe(422);
+    expect(invalidList.body).not.toContain("private-research");
+    expect(V1ErrorResponseSchema.parse(invalidList.json()).error.code).toBe(
+      "INVALID_ARGUMENT",
+    );
+    expect(invalidSearch.statusCode).toBe(422);
+    expect(V1ErrorResponseSchema.parse(invalidSearch.json()).error.code).toBe(
+      "INVALID_ARGUMENT",
+    );
+    expect(listPublicCommunities).not.toHaveBeenCalled();
+    expect(searchPublicCommunities).not.toHaveBeenCalled();
+  });
+
+  it("rate-limits the shared anonymous directory bucket before service access", async () => {
+    const consume = vi.fn(() => Promise.resolve({ allowed: false, retryAfter: 7 }));
+    const { app, listPublicCommunities } = createPublicApp({
+      rateLimiter: { consume },
+      resolveClientIp: () => "203.0.113.25",
+    });
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/public/communities",
+    });
+
+    expect(response.statusCode).toBe(429);
+    expect(response.headers["retry-after"]).toBe("7");
+    expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe("RATE_LIMITED");
+    expect(consume).toHaveBeenCalledExactlyOnceWith(
+      "ip:203.0.113.25:public-community-directory",
+      { max: 120, window: 60 },
+    );
+    expect(listPublicCommunities).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when anonymous request protection or projection fails", async () => {
+    const unavailable = createPublicApp({
+      rateLimiter: {
+        consume: () => Promise.reject(new Error("redis-internal-secret")),
+      },
+      resolveClientIp: () => "203.0.113.25",
+    });
+    const unavailableResponse = await unavailable.app.inject({
+      method: "GET",
+      url: "/v1/public/communities",
+    });
+    expect(unavailableResponse.statusCode).toBe(503);
+    expect(unavailableResponse.body).not.toContain("redis-internal-secret");
+    expect(V1ErrorResponseSchema.parse(unavailableResponse.json()).error.code).toBe(
+      "TEMPORARILY_UNAVAILABLE",
+    );
+
+    const invalidPage = publicDirectoryPage();
+    invalidPage.items[0] = { ...invalidPage.items[0]!, name: "" };
+    const invalid = createPublicApp({ page: invalidPage });
+    const invalidResponse = await invalid.app.inject({
+      method: "GET",
+      url: "/v1/public/communities",
+    });
+    expect(invalidResponse.statusCode).toBe(503);
+    expect(V1ErrorResponseSchema.parse(invalidResponse.json()).error.code).toBe(
+      "DIRECTORY_NOT_READY",
+    );
+  });
+});
 
 describe("Community Agent routes", () => {
   it("runs the Agent boundary before parsing the search JSON body", async () => {
@@ -273,6 +526,65 @@ describe("Community Agent routes", () => {
       expect.objectContaining({ owner: { id: ids.owner } }),
       { communityId: ids.community },
     );
+  });
+
+  it("resolves an exact authenticated Community slug before the ID route", async () => {
+    const { app, getCommunity, searchCommunities } = createApp();
+    const response = await app.inject({
+      headers: { authorization: `Bearer ${apiKey}` },
+      method: "GET",
+      url: "/v1/communities/by-slug/semiconductors",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store, private");
+    expect(GetCommunityResponseSchema.safeParse(response.json()).success).toBe(true);
+    expect(getCommunity).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ owner: { id: ids.owner } }),
+      { slug: "semiconductors" },
+    );
+    expect(searchCommunities).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed authenticated slugs before directory access", async () => {
+    const { app, getCommunity } = createApp();
+    const response = await app.inject({
+      headers: { authorization: `Bearer ${apiKey}` },
+      method: "GET",
+      url: "/v1/communities/by-slug/Not_Canonical",
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
+      "INVALID_ARGUMENT",
+    );
+    expect(getCommunity).not.toHaveBeenCalled();
+  });
+
+  it("applies get_community authentication and scope checks to exact slug reads", async () => {
+    const { app, authenticateStaticApiKey, getCommunity } = createApp({
+      context: context(["content:write"]),
+    });
+    const unauthenticated = await app.inject({
+      method: "GET",
+      url: "/v1/communities/by-slug/semiconductors",
+    });
+    const insufficientScope = await app.inject({
+      headers: { authorization: `Bearer ${apiKey}` },
+      method: "GET",
+      url: "/v1/communities/by-slug/semiconductors",
+    });
+
+    expect(unauthenticated.statusCode).toBe(401);
+    expect(V1ErrorResponseSchema.parse(unauthenticated.json()).error.code).toBe(
+      "AUTHENTICATION_REQUIRED",
+    );
+    expect(insufficientScope.statusCode).toBe(403);
+    expect(V1ErrorResponseSchema.parse(insufficientScope.json()).error.code).toBe(
+      "SCOPE_REQUIRED",
+    );
+    expect(authenticateStaticApiKey).toHaveBeenCalledExactlyOnceWith(apiKey);
+    expect(getCommunity).not.toHaveBeenCalled();
   });
 
   it("rejects natural-language GET query parameters before directory access", async () => {

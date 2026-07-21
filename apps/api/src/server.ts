@@ -16,6 +16,7 @@ import {
 import {
   PostgresAgentConnectionService,
   PostgresCommunityDirectoryService,
+  PostgresContentReadService,
   PostgresOwnerPendingActionService,
   PostgresPendingActionStatusService,
   PostgresResearchWriteService,
@@ -51,6 +52,14 @@ async function start(): Promise<void> {
   });
   const communityDirectoryService = new PostgresCommunityDirectoryService(postgres.sql, {
     cursorSigningKey: Buffer.from(environment.COMMUNITY_CURSOR_SIGNING_KEY, "utf8"),
+  });
+  const contentReadService = new PostgresContentReadService(postgres.sql, {
+    cursorSigningKey: createHmac(
+      "sha256",
+      Buffer.from(environment.COMMUNITY_CURSOR_SIGNING_KEY, "utf8"),
+    )
+      .update("alphanet.content-read.cursor.v1", "utf8")
+      .digest(),
   });
   const pendingActionStatusService = new PostgresPendingActionStatusService(postgres.sql);
   const pendingActionKeys: Record<number, Uint8Array> = Object.fromEntries([
@@ -98,9 +107,10 @@ async function start(): Promise<void> {
   let authRuntime: AlphaNetAuthRuntime | undefined;
   let app: Awaited<ReturnType<typeof createApiApp>> | undefined;
   try {
-    // This also verifies the database will not log bind parameters containing
-    // unpublished research or authentication material.
-    await postgres.check();
+    // PostgreSQL also verifies that bind parameters cannot be logged. Redis is
+    // connected before listen so the first public request does not fail closed
+    // merely because the lazy client has not completed its initial handshake.
+    await Promise.all([postgres.check(), redis.check()]);
     authRuntime = createAlphaNetAuthRuntime(
       {
         baseUrl: environment.BETTER_AUTH_URL,
@@ -138,6 +148,7 @@ async function start(): Promise<void> {
       agentRateLimiter,
       authRuntime,
       communityDirectoryService,
+      contentReadService,
       dependencies,
       environment: environment.NODE_ENV,
       internalSsrRequestSecret: environment.SSR_INTERNAL_REQUEST_SECRET,

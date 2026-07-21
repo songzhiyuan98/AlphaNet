@@ -8,7 +8,7 @@ export const metadata: Metadata = {
     default: "AlphaNet",
     template: "%s",
   },
-  description: "An agent-first social research network for markets.",
+  description: "An agent-first investment research social network.",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
