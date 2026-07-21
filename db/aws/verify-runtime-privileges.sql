@@ -37,6 +37,7 @@ FROM (
     ('content_symbols'::name),
     ('content_topics'::name),
     ('credentials'::name),
+    ('follows'::name),
     ('idempotency_records'::name),
     ('mentions'::name),
     ('owners'::name),
@@ -74,7 +75,9 @@ FROM (
 ) AS platform_table(table_name);
 
 INSERT INTO expected_table_privileges (schema_name, table_name, privilege)
-VALUES ('platform', 'reactions', 'DELETE');
+VALUES
+  ('platform', 'follows', 'DELETE'),
+  ('platform', 'reactions', 'DELETE');
 
 INSERT INTO expected_table_privileges (schema_name, table_name, privilege)
 SELECT 'platform', table_name, 'UPDATE'
@@ -95,6 +98,7 @@ INSERT INTO expected_table_privileges (schema_name, table_name, privilege)
 SELECT 'system', table_name, 'SELECT'
 FROM (
   VALUES
+    ('actor_follow_epochs'::name),
     ('content_read_visibility_epochs'::name),
     ('outbox_aggregate_heads'::name),
     ('outbox_consumer_deliveries'::name),
@@ -103,6 +107,31 @@ FROM (
     ('outbox_events'::name),
     ('schema_migrations'::name)
 ) AS system_table(table_name);
+
+CREATE TEMPORARY TABLE expected_column_privileges (
+  schema_name name NOT NULL,
+  table_name name NOT NULL,
+  column_name name NOT NULL,
+  privilege text NOT NULL,
+  PRIMARY KEY (schema_name, table_name, column_name, privilege)
+) ON COMMIT DROP;
+
+INSERT INTO expected_column_privileges (
+  schema_name,
+  table_name,
+  column_name,
+  privilege
+)
+VALUES
+  ('platform', 'follows', 'id', 'INSERT'),
+  ('platform', 'follows', 'follower_actor_id', 'INSERT'),
+  ('platform', 'follows', 'target_type', 'INSERT'),
+  ('platform', 'follows', 'target_actor_id', 'INSERT'),
+  ('platform', 'follows', 'target_symbol_id', 'INSERT'),
+  ('platform', 'follows', 'target_topic_id', 'INSERT'),
+  ('platform', 'follows', 'target_content_id', 'INSERT'),
+  ('platform', 'follows', 'notification_level', 'INSERT'),
+  ('platform', 'follows', 'notification_level', 'UPDATE');
 
 INSERT INTO expected_table_privileges (schema_name, table_name, privilege)
 SELECT 'system', table_name, 'INSERT'
@@ -606,6 +635,96 @@ BEGIN
     );
   IF violation IS NOT NULL THEN
     RAISE EXCEPTION 'Runtime has unexpected table privileges: %', violation;
+  END IF;
+
+  SELECT string_agg(
+    format(
+      '%I.%I(%I):%s',
+      expected.schema_name,
+      expected.table_name,
+      expected.column_name,
+      expected.privilege
+    ),
+    ', ' ORDER BY
+      expected.schema_name,
+      expected.table_name,
+      expected.column_name,
+      expected.privilege
+  )
+  INTO violation
+  FROM expected_column_privileges AS expected
+  LEFT JOIN pg_catalog.pg_namespace AS namespace
+    ON namespace.nspname = expected.schema_name
+  LEFT JOIN pg_catalog.pg_class AS relation
+    ON relation.relnamespace = namespace.oid
+   AND relation.relname = expected.table_name
+  LEFT JOIN pg_catalog.pg_attribute AS attribute
+    ON attribute.attrelid = relation.oid
+   AND attribute.attname = expected.column_name
+   AND attribute.attnum > 0
+   AND NOT attribute.attisdropped
+  WHERE attribute.attnum IS NULL
+     OR NOT has_column_privilege(
+       runtime_role_oid,
+       relation.oid,
+       attribute.attnum,
+       expected.privilege
+     );
+  IF violation IS NOT NULL THEN
+    RAISE EXCEPTION 'Runtime is missing required column privileges: %', violation;
+  END IF;
+
+  IF has_column_privilege(
+       runtime_role_oid,
+       'platform.follows',
+       'created_at',
+       'INSERT'
+     )
+     OR has_column_privilege(
+       runtime_role_oid,
+       'platform.follows',
+       'updated_at',
+       'INSERT'
+     ) THEN
+    RAISE EXCEPTION
+      'Runtime can override database-owned Follow timestamps';
+  END IF;
+
+  SELECT string_agg(
+    format(
+      '%I.%I(%I):%s',
+      namespace.nspname,
+      relation.relname,
+      attribute.attname,
+      privilege.privilege_type
+    ),
+    ', ' ORDER BY
+      namespace.nspname,
+      relation.relname,
+      attribute.attname,
+      privilege.privilege_type
+  )
+  INTO violation
+  FROM pg_catalog.pg_attribute AS attribute
+  JOIN pg_catalog.pg_class AS relation ON relation.oid = attribute.attrelid
+  JOIN pg_catalog.pg_namespace AS namespace
+    ON namespace.oid = relation.relnamespace
+  CROSS JOIN LATERAL aclexplode(attribute.attacl) AS privilege
+  WHERE namespace.nspname IN ('auth', 'platform', 'system')
+    AND relation.relkind IN ('f', 'm', 'p', 'r', 'v')
+    AND attribute.attnum > 0
+    AND NOT attribute.attisdropped
+    AND privilege.grantee = runtime_role_oid
+    AND NOT EXISTS (
+      SELECT 1
+      FROM expected_column_privileges AS expected
+      WHERE expected.schema_name = namespace.nspname
+        AND expected.table_name = relation.relname
+        AND expected.column_name = attribute.attname
+        AND expected.privilege = privilege.privilege_type
+    );
+  IF violation IS NOT NULL THEN
+    RAISE EXCEPTION 'Runtime has unexpected column privileges: %', violation;
   END IF;
 
   SELECT string_agg(

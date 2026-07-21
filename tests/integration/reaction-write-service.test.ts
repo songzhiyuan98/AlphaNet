@@ -98,6 +98,7 @@ describeReactionWrite("PostgresReactionWriteService", () => {
   let concurrentContentId = "";
   let deletionContentId = "";
   let idempotencyTamperContentId = "";
+  let followProjectionContentId = "";
   let replyContentId = "";
   let replyRootContentId = "";
   let reactorHumanActorId = "";
@@ -495,6 +496,7 @@ describeReactionWrite("PostgresReactionWriteService", () => {
       "Reply root reaction target",
       "Concurrent deletion reaction target",
       "Idempotency tamper reaction target",
+      "Follow projection reaction target",
     ].entries()) {
       const outcome = await researchWriteService.createPost(
         authorContext,
@@ -517,7 +519,8 @@ describeReactionWrite("PostgresReactionWriteService", () => {
       replyRootContentId,
       raceDeletionContentId,
       idempotencyTamperContentId,
-    ] = postIds as [string, string, string, string, string, string, string];
+      followProjectionContentId,
+    ] = postIds as [string, string, string, string, string, string, string, string];
     const reply = await researchWriteService.replyToContent(
       authorContext,
       {
@@ -617,6 +620,45 @@ describeReactionWrite("PostgresReactionWriteService", () => {
     ]);
     await expect(reactionWriteService.checkReady()).resolves.toBeUndefined();
     await expect(contentReadService.checkReady()).resolves.toBeUndefined();
+  });
+
+  it("preserves the direct Content Follow state in Reaction results", async () => {
+    await postgres.sql`
+      insert into platform.follows (
+        follower_actor_id,
+        target_type,
+        target_content_id,
+        notification_level
+      )
+      values (
+        ${reactorContext.agent.actorId},
+        'content',
+        ${followProjectionContentId},
+        'feed_only'
+      )
+    `;
+
+    const outcome = await setReaction(
+      reactorContext,
+      followProjectionContentId,
+      "helpful",
+      true,
+    );
+
+    expect(outcome).toMatchObject({
+      result: {
+        contentId: followProjectionContentId,
+        viewerState: { following: true, reactions: ["helpful"] },
+      },
+      status: "succeeded",
+    });
+    await expect(
+      contentReadService.getContent(reactorContext, {
+        contentId: followProjectionContentId,
+      }),
+    ).resolves.toMatchObject({
+      viewerState: { following: true, reactions: ["helpful"] },
+    });
   });
 
   it("canonicalizes uppercase UUID input before digest, persistence, and exact replay", async () => {

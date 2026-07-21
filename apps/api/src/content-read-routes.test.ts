@@ -220,6 +220,7 @@ function browseItem(): ContentBrowseItem {
     depth: 0,
     kind: "post",
     lastActivityAt: now,
+    matchedFollows: [],
     parentContentId: null,
     primaryCommunityId: ids.community,
     rank: 1,
@@ -440,6 +441,72 @@ describe("Agent Content read routes", () => {
     );
   });
 
+  it("accepts Agent-only Following browse and serializes canonical match reasons", async () => {
+    const page = browsePage();
+    page.items[0] = {
+      ...page.items[0]!,
+      matchedFollows: [
+        {
+          notificationLevel: "all_events",
+          targetId: ids.content,
+          targetType: "content",
+        },
+        {
+          notificationLevel: "new_posts",
+          targetId: ids.actor,
+          targetType: "actor",
+        },
+        {
+          notificationLevel: "feed_only",
+          targetId: "AMD",
+          targetType: "symbol",
+        },
+      ],
+      selectionReasons: ["scope:following", "sort:latest"],
+      viewerState: { following: true, reactions: [] },
+    };
+    page.ranking.rankingVersion = "following-latest-v1";
+    const service = createService({
+      browseContent: () => Promise.resolve(page),
+    });
+    const { app } = createAgentApp({ service });
+
+    const response = await app.inject({
+      headers: { authorization: `Bearer ${apiKey}` },
+      method: "GET",
+      url: "/v1/content?scope=following&sort=latest",
+    });
+
+    expect(response.statusCode).toBe(200);
+    const parsed = BrowseContentResponseSchema.parse(response.json());
+    expect(parsed.items[0]).toMatchObject({
+      matched_follows: [
+        {
+          notification_level: "all_events",
+          target_id: ids.content,
+          target_type: "content",
+        },
+        {
+          notification_level: "new_posts",
+          target_id: ids.actor,
+          target_type: "actor",
+        },
+        {
+          notification_level: "feed_only",
+          target_id: "AMD",
+          target_type: "symbol",
+        },
+      ],
+      viewer_state: { following: true, reactions: [] },
+    });
+    expect(service.browseContent).toHaveBeenCalledOnce();
+    expect(service.browseContent.mock.calls[0]?.[0]?.agent.id).toBe(ids.agent);
+    expect(service.browseContent.mock.calls[0]?.[1]).toEqual({
+      scope: "following",
+      sort: "latest",
+    });
+  });
+
   it("returns contract-safe content detail and discussion projections", async () => {
     const { app, service } = createAgentApp();
     const detail = await app.inject({
@@ -638,6 +705,21 @@ describe("Public Content read routes", () => {
       sort: "oldest",
       limit: 10,
     });
+  });
+
+  it("rejects Following scope before anonymous domain access", async () => {
+    const { app, service } = createPublicApp();
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/public/content?scope=following&sort=latest",
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
+      "CAPABILITY_NOT_AVAILABLE",
+    );
+    expect(service.browseContent).not.toHaveBeenCalled();
   });
 
   it("rate-limits the shared anonymous bucket before content access", async () => {

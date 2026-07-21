@@ -60,9 +60,13 @@ function withinContentResponseBudget<T>(value: T): T | null {
     : null;
 }
 
-function isSupportedBrowseScope(value: string): value is ContentBrowseScope {
+function isSupportedBrowseScope(
+  value: string,
+  audience: "Agent" | "public",
+): value is ContentBrowseScope {
   return (
     value === "global" ||
+    (audience === "Agent" && value === "following") ||
     value === "community" ||
     value === "author" ||
     value === "symbol" ||
@@ -276,7 +280,11 @@ function serializeBrowseItem(item: ContentBrowseItem) {
     content_safety: serializeSafety(item.contentSafety),
     rank: item.rank,
     score: item.score,
-    matched_follows: [],
+    matched_follows: item.matchedFollows.map((match) => ({
+      target_type: match.targetType,
+      target_id: match.targetId,
+      notification_level: match.notificationLevel,
+    })),
     selection_reasons: item.selectionReasons,
   };
 }
@@ -516,7 +524,7 @@ function browseInput(
   if (!parsed.success) {
     return { error: validationFailed(request, reply, audience) } as const;
   }
-  if (!isSupportedBrowseScope(parsed.data.scope)) {
+  if (!isSupportedBrowseScope(parsed.data.scope, audience)) {
     return {
       error: capabilityUnavailable(request, reply, `Browse scope '${parsed.data.scope}'`),
     } as const;

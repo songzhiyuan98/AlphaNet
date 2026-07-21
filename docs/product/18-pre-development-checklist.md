@@ -38,7 +38,7 @@
 
 - [ ] 冻结领域术语、ID 格式、时间格式和错误码。
 - [ ] 完成 OpenAPI 3.1 文档。
-- [ ] 为 15 个 MCP 工具完成 JSON Schema 输入与输出。
+- [ ] 为 16 个 MCP 工具完成 JSON Schema 输入与输出。
 - [x] 为全部写工具加入 `idempotency_key`。
 - [x] 为更新和删除加入 `expected_version`。
 - [x] 定义统一 Cursor、Snapshot 和 Rank Version。
@@ -63,7 +63,7 @@
 
 - [ ] 审阅概念模型并生成第一版关系 Schema。
 - [x] 为 ContentItem 树、`primary_community_id`、ContentAdditionalCommunity、Revision 和 Reaction 建立唯一约束。
-- [ ] 为 Follow 建立目标类型与主体唯一约束。
+- [x] 为 Follow 建立目标类型与主体唯一约束。
 - [ ] 为 Timeline、Community、Notification、ActivityEvent、ActionLog 和 Outbox 设计索引。
 - [ ] 验证一百万 ContentItem 下的查询计划。
 - [x] MVP 作者软删除为终态；稳定链接保留 tombstone 与可见后代，Revision 按可见性和法定擦除规则保留。

@@ -15,6 +15,7 @@ readonly full_migrations_dir="${repository_root}/db/migrations"
 readonly published_agent_v1_checksum="8d2aa4d3fe53bfda58b644460b386763350b38e7aaf666fb239ee7ba03a56528"
 readonly content_reactions_checksum="da6750692823bb082c1c417d266fd9e1c3585356fd5a25eae256fc6e7c5441bf"
 readonly agent_policy_control_checksum="5311bfde7d77bd2ddf6d7207675284a3259db1722b20e21cecb97f69b9fb6826"
+readonly follow_graph_checksum="3505e7a190e266d792c4f0e7b03997a6042687f1fe12550fa80d1250fa2cf83c"
 readonly suffix="${GITHUB_RUN_ID:-local}_${RANDOM}_$$"
 readonly empty_database="alphanet_migration_empty_${suffix}"
 readonly owner_database="alphanet_migration_owner_${suffix}"
@@ -756,9 +757,10 @@ for database in \
       --set=ON_ERROR_STOP=1 \
       --set=published_agent_database="${published_agent_database}" \
       --set=content_reactions_checksum="${content_reactions_checksum}" \
-      --set=agent_policy_control_checksum="${agent_policy_control_checksum}" <<'SQL'
+      --set=agent_policy_control_checksum="${agent_policy_control_checksum}" \
+      --set=follow_graph_checksum="${follow_graph_checksum}" <<'SQL'
 SELECT
-  (SELECT count(*) FROM system.schema_migrations) = 10
+  (SELECT count(*) FROM system.schema_migrations) = 11
   AND EXISTS (
     SELECT 1
     FROM system.schema_migrations
@@ -797,6 +799,13 @@ SELECT
       AND name = 'agent_policy_control'
       AND checksum = :'agent_policy_control_checksum'
   )
+  AND EXISTS (
+    SELECT 1
+    FROM system.schema_migrations
+    WHERE version = '000011'
+      AND name = 'follow_graph'
+      AND checksum = :'follow_graph_checksum'
+  )
   AND to_regclass('platform.owners') IS NOT NULL
   AND to_regclass('platform.agents') IS NOT NULL
   AND to_regclass('platform.credentials') IS NOT NULL
@@ -805,6 +814,16 @@ SELECT
   AND to_regclass('platform.reactions') IS NOT NULL
   AND to_regclass('platform.reactions_content_type_created_idx') IS NOT NULL
   AND to_regclass('platform.reactions_actor_created_idx') IS NOT NULL
+  AND to_regclass('platform.follows') IS NOT NULL
+  AND to_regclass('system.actor_follow_epochs') IS NOT NULL
+  AND to_regclass('platform.follows_follower_updated_idx') IS NOT NULL
+  AND to_regclass('platform.follows_target_actor_reverse_idx') IS NOT NULL
+  AND to_regclass('platform.follows_target_symbol_reverse_idx') IS NOT NULL
+  AND to_regclass('platform.follows_target_topic_reverse_idx') IS NOT NULL
+  AND to_regclass('platform.follows_target_content_reverse_idx') IS NOT NULL
+  AND to_regclass(
+    'platform.action_logs_follow_succeeded_agent_occurred_idx'
+  ) IS NOT NULL
   AND to_regclass(
     'platform.action_logs_reaction_succeeded_agent_occurred_idx'
   ) IS NOT NULL
@@ -881,6 +900,31 @@ SELECT
         OR (table_name = 'idempotency_records'
           AND column_name = 'pending_action_id')
       )
+  )
+  AND (
+    SELECT count(*) = 5
+    FROM pg_constraint AS constraint_record
+    WHERE constraint_record.conrelid = 'platform.follows'::regclass
+      AND constraint_record.conname IN (
+        'follows_target_shape',
+        'follows_no_self_actor',
+        'follows_notification_level',
+        'follows_updated_after_created',
+        'follows_timestamp_precision'
+      )
+      AND constraint_record.convalidated
+  )
+  AND (
+    SELECT count(*) = 3
+    FROM pg_trigger AS trigger_record
+    WHERE trigger_record.tgrelid = 'platform.follows'::regclass
+      AND trigger_record.tgname IN (
+        'follows_validate_write',
+        'follows_prepare_update',
+        'follows_advance_actor_epoch'
+      )
+      AND NOT trigger_record.tgisinternal
+      AND trigger_record.tgenabled IN ('O', 'A')
   )
   AND (
     SELECT count(*) = 5
@@ -1078,4 +1122,4 @@ SQL
   fi
 done
 
-echo "Empty, Owner-schema, and published Agent-v1 paths all reach the Agent policy-control schema."
+echo "Empty, Owner-schema, and published Agent-v1 paths all reach the Follow graph schema."

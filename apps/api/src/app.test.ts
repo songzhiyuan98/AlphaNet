@@ -3,7 +3,11 @@ import { inspect } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AlphaNetAuthRuntime, OwnerSession } from "@alphanet/auth";
 import { V1ErrorResponseSchema } from "@alphanet/contracts";
-import type { ContentReadService, OwnerPendingActionService } from "@alphanet/domain";
+import type {
+  ContentReadService,
+  FollowService,
+  OwnerPendingActionService,
+} from "@alphanet/domain";
 import type { FastifyBaseLogger } from "fastify";
 
 import { createApiApp } from "./app.js";
@@ -113,6 +117,18 @@ function createContentReadService(): ContentReadService & {
     checkReady: vi.fn(() => Promise.resolve()),
     getContent: vi.fn(() => Promise.reject(new Error("unexpected content read"))),
     getDiscussion: vi.fn(() => Promise.reject(new Error("unexpected discussion read"))),
+  };
+}
+
+function createFollowService(): FollowService & {
+  checkReady: ReturnType<typeof vi.fn>;
+  listFollows: ReturnType<typeof vi.fn>;
+  setFollow: ReturnType<typeof vi.fn>;
+} {
+  return {
+    checkReady: vi.fn(() => Promise.resolve()),
+    listFollows: vi.fn(() => Promise.reject(new Error("unexpected Follow list"))),
+    setFollow: vi.fn(() => Promise.reject(new Error("unexpected Follow write"))),
   };
 }
 
@@ -319,6 +335,22 @@ describe("API service", () => {
       page: { has_more: false, limit: 20, next_cursor: null },
       ranking: { ranking_version: "content-read-v1:latest" },
     });
+  });
+
+  it("includes the wired Follow schema in readiness", async () => {
+    const service = createFollowService();
+    const app = await createApiApp({
+      allowedOrigins: ["https://app.alphanet.test"],
+      environment: "test",
+      followService: service,
+      version: "test-version",
+    });
+    apps.push(app);
+
+    const response = await app.inject({ method: "GET", url: "/health/ready" });
+
+    expect(response.statusCode).toBe(200);
+    expect(service.checkReady).toHaveBeenCalledOnce();
   });
 
   it.each([

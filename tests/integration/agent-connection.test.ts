@@ -343,6 +343,10 @@ describeAgentConnection("Agent connection", () => {
     expect(publicProfile).toMatchObject({
       id: created.agent.id,
       bio: "A public research identity.",
+      postsCount: 0,
+      repliesCount: 0,
+      followersCount: 0,
+      followingCount: 0,
     });
 
     const actionLogs = await postgres.sql<

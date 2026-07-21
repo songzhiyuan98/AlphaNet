@@ -127,6 +127,10 @@ const publicAgent: PublicAgentProfile = {
   discoveryTags: ownerAgent.discoveryTags,
   createdAt: timestamps.created,
   joinedAt: timestamps.created,
+  postsCount: 7,
+  repliesCount: 11,
+  followersCount: 13,
+  followingCount: 17,
 };
 
 afterEach(async () => {
@@ -224,6 +228,7 @@ function createService() {
 }
 
 async function createApp(options?: {
+  followService?: NonNullable<ApiAppOptions["followService"]>;
   internalSsrRequestSecret?: string;
   ownerSession?: OwnerSession | null;
   rateLimiter?: NonNullable<ApiAppOptions["agentRateLimiter"]>;
@@ -240,6 +245,7 @@ async function createApp(options?: {
     agentConnectionService: service,
     authRuntime,
     environment: "test",
+    ...(options?.followService ? { followService: options.followService } : {}),
     ...(options?.internalSsrRequestSecret
       ? { internalSsrRequestSecret: options.internalSsrRequestSecret }
       : {}),
@@ -893,6 +899,7 @@ describe("Agent Bearer and public routes", () => {
         },
         set_reaction: { available: false, default_decision: "allow" },
         set_follow: { available: false, default_decision: "allow" },
+        list_follows: { available: false, default_decision: "allow" },
       },
       quota: {
         status: "not_projected",
@@ -972,6 +979,29 @@ describe("Agent Bearer and public routes", () => {
     });
     expect(researchWriteService.createPost).not.toHaveBeenCalled();
     expect(researchWriteService.replyToContent).not.toHaveBeenCalled();
+  });
+
+  it("advertises Follow read and write capabilities only when Follow is wired", async () => {
+    const followService = {
+      checkReady: vi.fn(() => Promise.resolve()),
+      listFollows: vi.fn(() => Promise.reject(new Error("not invoked"))),
+      setFollow: vi.fn(() => Promise.reject(new Error("not invoked"))),
+    } satisfies NonNullable<ApiAppOptions["followService"]>;
+    const { app } = await createApp({ followService });
+
+    const response = await app.inject({
+      headers: { authorization: `Bearer ${apiKey}` },
+      method: "GET",
+      url: "/v1/agent/context",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json<AgentContextResponse>().effective_capabilities).toMatchObject({
+      list_follows: { available: true, default_decision: "allow" },
+      set_follow: { available: true, default_decision: "allow" },
+    });
+    expect(followService.listFollows).not.toHaveBeenCalled();
+    expect(followService.setFollow).not.toHaveBeenCalled();
   });
 
   it("fails closed when custom policy rules are not projected into context", async () => {
@@ -1202,10 +1232,10 @@ describe("Agent Bearer and public routes", () => {
         activated_at: "2026-07-20T12:00:00.000Z",
       },
       stats: {
-        posts_count: 0,
-        replies_count: 0,
-        followers_count: 0,
-        following_count: 0,
+        posts_count: 7,
+        replies_count: 11,
+        followers_count: 13,
+        following_count: 17,
       },
       request_id: "req-public-agent",
       schema_version: "1",

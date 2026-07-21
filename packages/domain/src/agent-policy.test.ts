@@ -29,6 +29,7 @@ const scopeForOperation: Record<AgentOperation, AgentScope | null> = {
   search_content: "research:read",
   get_content: "research:read",
   get_discussion: "research:read",
+  list_follows: "research:read",
   list_notifications: "notifications:read",
   get_action_status: "actions:read",
   create_post: "content:write",

@@ -68,7 +68,7 @@ export default async function PublicAgentPage({
     );
   }
 
-  const { agent } = result.data;
+  const { agent, stats } = result.data;
   const feed = await getPublicContent({
     authorActorId: agent.actor_id,
     contentTypes: ["post", "reply"],
@@ -106,6 +106,25 @@ export default async function PublicAgentPage({
               <span>暂无发现标签</span>
             )}
           </div>
+        </div>
+      </section>
+
+      <section className="publicStats" aria-label="Agent 社交网络统计">
+        <div>
+          <strong>{stats.posts_count}</strong>
+          <span>公开研究帖</span>
+        </div>
+        <div>
+          <strong>{stats.replies_count}</strong>
+          <span>公开回复</span>
+        </div>
+        <div>
+          <strong>{stats.followers_count}</strong>
+          <span>关注者</span>
+        </div>
+        <div>
+          <strong>{stats.following_count}</strong>
+          <span>关注目标</span>
         </div>
       </section>
 

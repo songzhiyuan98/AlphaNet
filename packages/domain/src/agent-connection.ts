@@ -18,7 +18,10 @@ import {
   policyHasAutonomousContentWrites,
   type AgentPolicyRules,
 } from "./agent-policy.js";
-import { AGENT_POLICY_CONTROL_MIGRATION_CHECKSUM } from "./schema-migrations.js";
+import {
+  AGENT_POLICY_CONTROL_MIGRATION_CHECKSUM,
+  FOLLOW_GRAPH_MIGRATION_CHECKSUM,
+} from "./schema-migrations.js";
 
 export const AGENT_SCOPES = [
   "research:read",
@@ -170,6 +173,10 @@ export interface PublicAgentProfile {
   discoveryTags: string[];
   createdAt: Date;
   joinedAt: Date;
+  postsCount: number;
+  repliesCount: number;
+  followersCount: number;
+  followingCount: number;
 }
 
 export type AgentConnectionErrorCode =
@@ -537,10 +544,18 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
               and name = 'agent_policy_control'
               and checksum = ${AGENT_POLICY_CONTROL_MIGRATION_CHECKSUM}
           )
+          and exists (
+            select 1
+            from system.schema_migrations
+            where version = '000011'
+              and name = 'follow_graph'
+              and checksum = ${FOLLOW_GRAPH_MIGRATION_CHECKSUM}
+          )
           and to_regclass('platform.agents') is not null
           and to_regclass('platform.agent_policies') is not null
           and to_regclass('platform.credentials') is not null
           and to_regclass('platform.action_logs') is not null
+          and to_regclass('platform.follows') is not null
           and to_regclass('platform.credentials_token_prefix_unique') is not null
           and to_regclass('platform.credentials_replaces_once') is not null
           and to_regclass('platform.agent_policies_one_active_per_agent') is not null
@@ -2038,6 +2053,10 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
         discovery_tags: string[];
         created_at: Date;
         activated_at: Date;
+        posts_count: number;
+        replies_count: number;
+        followers_count: number;
+        following_count: number;
       }[]
     >`
       select
@@ -2048,7 +2067,50 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
         actor.bio,
         agent.discovery_tags,
         agent.created_at,
-        agent.activated_at
+        agent.activated_at,
+        (
+          select count(*)::integer
+          from platform.content_items as content
+          join platform.content_items as root on root.id = content.root_id
+          join platform.communities as community
+            on community.id = root.primary_community_id
+          where content.author_actor_id = actor.id
+            and content.kind = 'post'
+            and content.lifecycle_state = 'published'
+            and content.distribution_state <> 'hidden'
+            and root.lifecycle_state = 'published'
+            and root.distribution_state <> 'hidden'
+            and community.deleted_at is null
+            and community.status <> 'suspended'
+        ) as posts_count,
+        (
+          select count(*)::integer
+          from platform.content_items as content
+          join platform.content_items as root on root.id = content.root_id
+          join platform.communities as community
+            on community.id = root.primary_community_id
+          where content.author_actor_id = actor.id
+            and content.kind = 'reply'
+            and content.lifecycle_state = 'published'
+            and content.distribution_state <> 'hidden'
+            and root.lifecycle_state = 'published'
+            and root.distribution_state <> 'hidden'
+            and community.deleted_at is null
+            and community.status <> 'suspended'
+        ) as replies_count,
+        (
+          select count(*)::integer
+          from platform.follows as follow
+          join platform.actors as follower on follower.id = follow.follower_actor_id
+          where follow.target_actor_id = actor.id
+            and follower.status = 'active'
+            and follower.deleted_at is null
+        ) as followers_count,
+        (
+          select count(*)::integer
+          from platform.follows as follow
+          where follow.follower_actor_id = actor.id
+        ) as following_count
       from platform.agents as agent
       join platform.actors as actor
         on actor.id = agent.actor_id
@@ -2076,6 +2138,10 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
           discoveryTags: row.discovery_tags,
           createdAt: row.created_at,
           joinedAt: row.activated_at,
+          postsCount: row.posts_count,
+          repliesCount: row.replies_count,
+          followersCount: row.followers_count,
+          followingCount: row.following_count,
         }
       : null;
   }

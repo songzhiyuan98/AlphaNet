@@ -5,8 +5,12 @@ import type postgres from "postgres";
 
 import { evaluateAgentOperation, type AgentPolicyReason } from "./agent-policy.js";
 import type { AgentCredentialContext } from "./agent-connection.js";
+import type { FollowNotificationLevel, FollowTargetType } from "./follow.js";
 import type { ReactionType } from "./reaction-write.js";
-import { CONTENT_REACTIONS_MIGRATION_CHECKSUM } from "./schema-migrations.js";
+import {
+  CONTENT_REACTIONS_MIGRATION_CHECKSUM,
+  FOLLOW_GRAPH_MIGRATION_CHECKSUM,
+} from "./schema-migrations.js";
 
 export const CONTENT_READ_ORDERING_VERSION = "content-read-v1";
 export const DISCUSSION_ORDERING_VERSION = "discussion-flat-v1";
@@ -21,12 +25,15 @@ const CONTENT_READ_VISIBILITY_MIGRATION_CHECKSUM =
   "90ffb9571a843b1863bd7adcec1cb2464f585302514304f8387b9aca45f4657b";
 const CONTENT_REACTIONS_MIGRATION_NAME = "content_reactions";
 const CONTENT_REACTIONS_MIGRATION_VERSION = "000009";
-const CURSOR_VERSION = 3;
+const FOLLOW_GRAPH_MIGRATION_NAME = "follow_graph";
+const FOLLOW_GRAPH_MIGRATION_VERSION = "000011";
+const CURSOR_VERSION = 4;
 const CURSOR_SIGNATURE_DOMAIN = "alphanet.content-read.cursor-signature.v1";
 const CURSOR_BINDING_DOMAIN = "alphanet.content-read.cursor-binding.v1";
 const SNAPSHOT_ID_DOMAIN = "alphanet.content-read.snapshot-id.v1";
 const DEFAULT_BROWSE_LIMIT = 20;
 const MAXIMUM_BROWSE_LIMIT = 100;
+const MAXIMUM_MATCHED_FOLLOWS = 40;
 const DEFAULT_DISCUSSION_LIMIT = 20;
 const MAXIMUM_DISCUSSION_LIMIT = 50;
 const DEFAULT_DISCUSSION_BYTE_BUDGET = 1_048_576;
@@ -46,7 +53,14 @@ const UUID_PATTERN =
 const POSTGRES_SNAPSHOT_PATTERN =
   /^[1-9][0-9]{0,19}:[1-9][0-9]{0,19}:(?:[1-9][0-9]{0,19}(?:,[1-9][0-9]{0,19})*)?$/u;
 const contentKinds = ["post", "reply"] as const;
-const browseScopes = ["global", "community", "author", "symbol", "topic"] as const;
+const browseScopes = [
+  "global",
+  "following",
+  "community",
+  "author",
+  "symbol",
+  "topic",
+] as const;
 const browseSorts = ["latest", "active"] as const;
 const discussionSorts = ["oldest", "latest"] as const;
 
@@ -92,8 +106,14 @@ export interface ReactionCountsByActorKindProjection {
 }
 
 export interface ViewerContentStateProjection {
-  following: false;
+  following: boolean;
   reactions: ReactionType[];
+}
+
+export interface MatchedFollowProjection {
+  notificationLevel: FollowNotificationLevel;
+  targetId: string;
+  targetType: FollowTargetType;
 }
 
 export interface SourceLinkProjection {
@@ -177,6 +197,7 @@ export interface ContentBrowseItem {
   depth: number;
   kind: ContentKind;
   lastActivityAt: Date;
+  matchedFollows: MatchedFollowProjection[];
   parentContentId: string | null;
   primaryCommunityId: string;
   rank: number;
@@ -388,6 +409,7 @@ export interface NormalizedContentBrowseInput {
   authorActorIds: string[];
   communityId: string | null;
   contentTypes: ContentKind[];
+  contentTypesExplicit: boolean;
   createdAfter: Date | null;
   createdBefore: Date | null;
   cursor: string | null;
@@ -410,6 +432,7 @@ export interface NormalizedDiscussionInput {
 
 interface CursorLast {
   at: string;
+  createdAt: string | null;
   id: string;
   position: number;
 }
@@ -419,6 +442,7 @@ interface CursorPayload {
   binding: string;
   databaseSnapshot: string;
   expiresAt: string;
+  followEpoch: string | null;
   kind: "browse" | "discussion";
   last: CursorLast;
   snapshotId: string;
@@ -430,7 +454,9 @@ interface ParsedCursor {
   asOf: Date;
   databaseSnapshot: string;
   expiresAt: Date;
+  followEpoch: string | null;
   lastAt: Date;
+  lastCreatedAt: Date | null;
   lastId: string;
   position: number;
   snapshotId: string;
@@ -438,7 +464,9 @@ interface ParsedCursor {
 }
 
 interface BrowseCandidateRow {
+  created_at: Date;
   id: string;
+  matched_follows: MatchedFollowProjection[];
   order_at: Date;
 }
 
@@ -475,6 +503,10 @@ interface ContentReadVisibilityEpochRow {
   public_community_visibility_epoch: string | null;
 }
 
+interface ActorFollowEpochRow {
+  follow_epoch: string;
+}
+
 interface CommunityVisibilityRow {
   visible: boolean;
 }
@@ -503,6 +535,7 @@ interface ProjectionRow {
   edit_summary: string | null;
   effective_community_ids: string[] | null;
   erasure_state: string;
+  following: boolean;
   id: string;
   helpful_agent_count: number;
   helpful_count: number;
@@ -575,6 +608,67 @@ function mapReactionTypes(value: string[] | null): ReactionType[] {
     throw new ContentReadError("CONTENT_DATA_INVALID");
   }
   return reactions;
+}
+
+const followTargetTypeRank: Record<FollowTargetType, number> = {
+  content: 0,
+  actor: 1,
+  symbol: 2,
+  topic: 3,
+};
+
+function mapMatchedFollows(value: unknown): MatchedFollowProjection[] {
+  if (!Array.isArray(value) || value.length > MAXIMUM_MATCHED_FOLLOWS) {
+    throw new ContentReadError("CONTENT_DATA_INVALID");
+  }
+  const matches = value.map((entry): MatchedFollowProjection => {
+    if (
+      !isRecord(entry) ||
+      Object.keys(entry).sort().join(",") !== "notificationLevel,targetId,targetType" ||
+      (entry.targetType !== "actor" &&
+        entry.targetType !== "symbol" &&
+        entry.targetType !== "topic" &&
+        entry.targetType !== "content") ||
+      (entry.notificationLevel !== "feed_only" &&
+        entry.notificationLevel !== "new_posts" &&
+        entry.notificationLevel !== "all_events") ||
+      typeof entry.targetId !== "string"
+    ) {
+      throw new ContentReadError("CONTENT_DATA_INVALID");
+    }
+    const validTargetId =
+      entry.targetType === "actor" || entry.targetType === "content"
+        ? UUID_PATTERN.test(entry.targetId)
+        : entry.targetType === "symbol"
+          ? /^[A-Z0-9][A-Z0-9.-]{0,14}$/u.test(entry.targetId)
+          : /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(entry.targetId);
+    if (!validTargetId) {
+      throw new ContentReadError("CONTENT_DATA_INVALID");
+    }
+    return {
+      notificationLevel: entry.notificationLevel,
+      targetId: entry.targetId,
+      targetType: entry.targetType,
+    };
+  });
+  const identities = new Set<string>();
+  for (const [index, match] of matches.entries()) {
+    const identity = `${match.targetType}\u0000${match.targetId}`;
+    const previous = matches[index - 1];
+    if (
+      identities.has(identity) ||
+      (previous !== undefined &&
+        (followTargetTypeRank[previous.targetType] >
+          followTargetTypeRank[match.targetType] ||
+          (followTargetTypeRank[previous.targetType] ===
+            followTargetTypeRank[match.targetType] &&
+            compareUnicodeCodePoints(previous.targetId, match.targetId) >= 0)))
+    ) {
+      throw new ContentReadError("CONTENT_DATA_INVALID");
+    }
+    identities.add(identity);
+  }
+  return matches;
 }
 
 function normalizeUuid(value: string, code: ContentReadErrorCode): string {
@@ -720,6 +814,7 @@ export function normalizeContentBrowseInput(
   const expectedTargets = {
     author: authorActorId,
     community: communityId,
+    following: null,
     global: null,
     symbol,
     topic,
@@ -728,8 +823,10 @@ export function normalizeContentBrowseInput(
     (value) => value !== null,
   ).length;
   if (
-    (input.scope === "global" && suppliedTargetCount !== 0) ||
+    ((input.scope === "global" || input.scope === "following") &&
+      suppliedTargetCount !== 0) ||
     (input.scope !== "global" &&
+      input.scope !== "following" &&
       (expectedTargets[input.scope] === null || suppliedTargetCount !== 1))
   ) {
     throw new ContentReadError("INVALID_ARGUMENT");
@@ -744,6 +841,7 @@ export function normalizeContentBrowseInput(
     authorActorIds: normalizeUuidList(input.authorActorIds),
     communityId,
     contentTypes: normalizeContentTypes(input.contentTypes),
+    contentTypesExplicit: input.contentTypes !== undefined,
     createdAfter,
     createdBefore,
     cursor: normalizeCursor(input.cursor),
@@ -860,6 +958,7 @@ function browseCursorBinding(
         authorActorIds: input.authorActorIds,
         communityId: input.communityId,
         contentTypes: input.contentTypes,
+        contentTypesExplicit: input.contentTypesExplicit,
         createdAfter: input.createdAfter?.toISOString() ?? null,
         createdBefore: input.createdBefore?.toISOString() ?? null,
         limit: input.limit,
@@ -903,6 +1002,7 @@ function makeSnapshotId(
   asOf: Date,
   databaseSnapshot: string,
   visibilityEpoch: string,
+  followEpoch: string | null,
 ): string {
   return `crs_${keyedDigest(
     key,
@@ -911,6 +1011,7 @@ function makeSnapshotId(
       asOf: asOf.toISOString(),
       binding,
       databaseSnapshot,
+      followEpoch,
       kind,
       visibilityEpoch,
     }),
@@ -934,12 +1035,15 @@ function decodeCursorPayload(value: unknown): CursorPayload | null {
   }
   if (
     Object.keys(value).sort().join(",") !==
-    "asOf,binding,databaseSnapshot,expiresAt,kind,last,snapshotId,v,visibilityEpoch"
+    "asOf,binding,databaseSnapshot,expiresAt,followEpoch,kind,last,snapshotId,v,visibilityEpoch"
   ) {
     return null;
   }
   const last = value.last;
-  if (!isRecord(last) || Object.keys(last).sort().join(",") !== "at,id,position") {
+  if (
+    !isRecord(last) ||
+    Object.keys(last).sort().join(",") !== "at,createdAt,id,position"
+  ) {
     return null;
   }
   if (
@@ -949,6 +1053,9 @@ function decodeCursorPayload(value: unknown): CursorPayload | null {
     typeof value.databaseSnapshot !== "string" ||
     !POSTGRES_SNAPSHOT_PATTERN.test(value.databaseSnapshot) ||
     typeof value.expiresAt !== "string" ||
+    (value.followEpoch !== null &&
+      (typeof value.followEpoch !== "string" ||
+        !/^(?:0|[1-9][0-9]{0,19})$/u.test(value.followEpoch))) ||
     typeof value.binding !== "string" ||
     !/^[0-9a-f]{64}$/u.test(value.binding) ||
     typeof value.snapshotId !== "string" ||
@@ -958,6 +1065,7 @@ function decodeCursorPayload(value: unknown): CursorPayload | null {
       value.visibilityEpoch,
     ) ||
     typeof last.at !== "string" ||
+    (last.createdAt !== null && typeof last.createdAt !== "string") ||
     typeof last.id !== "string" ||
     !UUID_PATTERN.test(last.id) ||
     typeof last.position !== "number" ||
@@ -971,8 +1079,14 @@ function decodeCursorPayload(value: unknown): CursorPayload | null {
     binding: value.binding,
     databaseSnapshot: value.databaseSnapshot,
     expiresAt: value.expiresAt,
+    followEpoch: value.followEpoch,
     kind: value.kind,
-    last: { at: last.at, id: last.id, position: last.position },
+    last: {
+      at: last.at,
+      createdAt: last.createdAt,
+      id: last.id,
+      position: last.position,
+    },
     snapshotId: value.snapshotId,
     visibilityEpoch: value.visibilityEpoch,
     v: value.v,
@@ -1176,7 +1290,8 @@ function mapProjectionRow(row: ProjectionRow): ContentDetailProjection {
     (row.distribution_state !== "normal" &&
       row.distribution_state !== "limited" &&
       row.distribution_state !== "hidden") ||
-    (row.erasure_state !== "retained" && row.erasure_state !== "payload_erased")
+    (row.erasure_state !== "retained" && row.erasure_state !== "payload_erased") ||
+    typeof row.following !== "boolean"
   ) {
     throw new ContentReadError("CONTENT_DATA_INVALID");
   }
@@ -1282,7 +1397,7 @@ function mapProjectionRow(row: ProjectionRow): ContentDetailProjection {
     resourceVersion: version,
     revision,
     viewerState: {
-      following: false,
+      following: row.following,
       reactions: mapReactionTypes(row.active_reactions),
     },
   };
@@ -1343,6 +1458,7 @@ function toBrowseItem(
   rank: number,
   input: NormalizedContentBrowseInput,
   orderAt: Date,
+  matchedFollows: MatchedFollowProjection[],
 ): ContentBrowseItem {
   const content = detail.content;
   const revision = detail.revision;
@@ -1355,7 +1471,7 @@ function toBrowseItem(
     throw new ContentReadError("CONTENT_DATA_INVALID");
   }
   const score =
-    input.sort === "active"
+    input.sort === "active" || input.scope === "following"
       ? orderAt.valueOf() / 1_000
       : content.publishedAt.valueOf() / 1_000;
   const lastActivityAt = input.sort === "active" ? orderAt : content.lastActivityAt;
@@ -1370,6 +1486,7 @@ function toBrowseItem(
     depth: content.depth,
     kind: content.kind,
     lastActivityAt,
+    matchedFollows,
     parentContentId: content.parentContentId,
     primaryCommunityId: effectivePrimaryCommunityId,
     rank,
@@ -1442,9 +1559,17 @@ export class PostgresContentReadService implements ContentReadService {
               and name = ${CONTENT_REACTIONS_MIGRATION_NAME}
               and checksum = ${CONTENT_REACTIONS_MIGRATION_CHECKSUM}
           )
+          and exists (
+            select 1
+            from system.schema_migrations
+            where version = ${FOLLOW_GRAPH_MIGRATION_VERSION}
+              and name = ${FOLLOW_GRAPH_MIGRATION_NAME}
+              and checksum = ${FOLLOW_GRAPH_MIGRATION_CHECKSUM}
+          )
           and to_regclass('platform.content_items') is not null
           and to_regclass('platform.content_revisions') is not null
           and to_regclass('platform.reactions') is not null
+          and to_regclass('platform.follows') is not null
           and to_regclass('platform.content_additional_communities') is not null
           and to_regclass('platform.content_symbols') is not null
           and to_regclass('platform.content_topics') is not null
@@ -1454,7 +1579,12 @@ export class PostgresContentReadService implements ContentReadService {
           and to_regclass('platform.content_items_visible_latest_idx') is not null
           and to_regclass('platform.content_items_root_discussion_idx') is not null
           and to_regclass('platform.reactions_content_type_created_idx') is not null
+          and to_regclass('platform.follows_follower_actor_target_unique') is not null
+          and to_regclass('platform.follows_follower_symbol_target_unique') is not null
+          and to_regclass('platform.follows_follower_topic_target_unique') is not null
+          and to_regclass('platform.follows_follower_content_target_unique') is not null
           and to_regclass('system.content_read_visibility_epochs') is not null
+          and to_regclass('system.actor_follow_epochs') is not null
           and exists (
             select 1
             from pg_catalog.pg_attribute
@@ -1491,6 +1621,18 @@ export class PostgresContentReadService implements ContentReadService {
                 'platform.advance_content_membership_on_item_update()'
               )
               and tgtype = 17
+              and not tgisinternal
+              and tgenabled in ('O', 'A')
+          )
+          and exists (
+            select 1
+            from pg_catalog.pg_trigger
+            where tgrelid = to_regclass('platform.follows')
+              and tgname = 'follows_advance_actor_epoch'
+              and tgfoid = to_regprocedure(
+                'platform.advance_actor_follow_epoch()'
+              )
+              and tgtype = 29
               and not tgisinternal
               and tgenabled in ('O', 'A')
           )
@@ -1593,11 +1735,22 @@ export class PostgresContentReadService implements ContentReadService {
   ): Promise<ContentBrowsePage> {
     assertReadAllowed(viewer, "browse_content");
     const normalized = normalizeContentBrowseInput(input, this.#defaultBrowseLimit);
+    if (normalized.scope === "following" && viewer === null) {
+      throw new ContentReadError("INVALID_ARGUMENT");
+    }
     const binding = browseCursorBinding(this.#cursorSigningKey, viewer, normalized);
     const cursor =
       normalized.cursor === null
         ? null
         : this.#parseCursor(normalized.cursor, "browse", binding);
+    if (
+      cursor !== null &&
+      normalized.scope === "following" &&
+      normalized.sort === "active" &&
+      cursor.lastCreatedAt === null
+    ) {
+      throw new ContentReadError("CURSOR_INVALID");
+    }
     const result = await this.#sql.begin(
       "isolation level repeatable read read only",
       async (transaction) => {
@@ -1609,6 +1762,13 @@ export class PostgresContentReadService implements ContentReadService {
           viewer === null,
         );
         if (cursor !== null && cursor.visibilityEpoch !== visibilityEpoch) {
+          throw new ContentReadError("SNAPSHOT_EXPIRED");
+        }
+        const followEpoch =
+          normalized.scope === "following"
+            ? await this.#actorFollowEpoch(transaction, viewer!.agent.actorId)
+            : null;
+        if (cursor !== null && cursor.followEpoch !== followEpoch) {
           throw new ContentReadError("SNAPSHOT_EXPIRED");
         }
         if (normalized.scope === "community") {
@@ -1627,6 +1787,7 @@ export class PostgresContentReadService implements ContentReadService {
           databaseSnapshot,
           cursor,
           viewer !== null,
+          viewer?.agent.actorId ?? null,
         );
         const pageCandidates = candidates.slice(0, normalized.limit);
         const details = await this.#hydrateContent(
@@ -1640,6 +1801,7 @@ export class PostgresContentReadService implements ContentReadService {
           countsAsOf,
           databaseSnapshot,
           details,
+          followEpoch,
           pageCandidates,
           visibilityEpoch,
         };
@@ -1659,6 +1821,7 @@ export class PostgresContentReadService implements ContentReadService {
         startingRank + index + 1,
         normalized,
         candidate.order_at,
+        candidate.matched_follows,
       );
     });
     const snapshotId =
@@ -1670,6 +1833,7 @@ export class PostgresContentReadService implements ContentReadService {
         result.asOf,
         result.databaseSnapshot,
         result.visibilityEpoch,
+        result.followEpoch,
       );
     const expiresAt =
       cursor?.expiresAt ?? new Date(result.asOf.valueOf() + this.#cursorTtlMilliseconds);
@@ -1689,17 +1853,25 @@ export class PostgresContentReadService implements ContentReadService {
                 expiresAt,
                 kind: "browse",
                 lastAt: lastCandidate.order_at,
+                lastCreatedAt:
+                  normalized.scope === "following" && normalized.sort === "active"
+                    ? lastCandidate.created_at
+                    : null,
                 lastId: lastCandidate.id,
                 position: startingRank + result.pageCandidates.length,
                 snapshotId,
                 visibilityEpoch: result.visibilityEpoch,
+                followEpoch: result.followEpoch,
               })
             : null,
       },
       ranking: {
         asOf: result.asOf,
         expiresAt,
-        rankingVersion: `${CONTENT_READ_ORDERING_VERSION}:${normalized.sort}`,
+        rankingVersion:
+          normalized.scope === "following"
+            ? `following-${normalized.sort}-v1`
+            : `${CONTENT_READ_ORDERING_VERSION}:${normalized.sort}`,
         snapshotId,
       },
     };
@@ -1830,6 +2002,7 @@ export class PostgresContentReadService implements ContentReadService {
         result.asOf,
         result.databaseSnapshot,
         result.visibilityEpoch,
+        null,
       );
     const expiresAt =
       cursor?.expiresAt ?? new Date(result.asOf.valueOf() + this.#cursorTtlMilliseconds);
@@ -1858,10 +2031,12 @@ export class PostgresContentReadService implements ContentReadService {
             expiresAt,
             kind: "discussion",
             lastAt: candidate.order_at,
+            lastCreatedAt: null,
             lastId: candidate.id,
             position: startingPosition + tentativeReplies.length,
             snapshotId,
             visibilityEpoch: result.visibilityEpoch,
+            followEpoch: null,
           })
         : null;
       const tentativeProjection = {
@@ -1922,10 +2097,12 @@ export class PostgresContentReadService implements ContentReadService {
                 expiresAt,
                 kind: "discussion",
                 lastAt: last.order_at,
+                lastCreatedAt: null,
                 lastId: last.id,
                 position: startingPosition + selectedReplies.length,
                 snapshotId,
                 visibilityEpoch: result.visibilityEpoch,
+                followEpoch: null,
               })
             : null,
         truncatedByByteBudget,
@@ -2019,6 +2196,25 @@ export class PostgresContentReadService implements ContentReadService {
       : `content:${row.content_membership_epoch}`;
   }
 
+  async #actorFollowEpoch(sql: QuerySql, actorId: string): Promise<string> {
+    const rows = await sql<ActorFollowEpochRow[]>`
+      select coalesce((
+        select epoch::text
+        from system.actor_follow_epochs
+        where actor_id = ${actorId}::uuid
+      ), '0') as follow_epoch
+    `;
+    const epoch = rows[0]?.follow_epoch;
+    if (
+      rows.length !== 1 ||
+      typeof epoch !== "string" ||
+      !/^(?:0|[1-9][0-9]{0,19})$/u.test(epoch)
+    ) {
+      throw new ContentReadError("CONTENT_DATA_INVALID");
+    }
+    return epoch;
+  }
+
   async #assertCommunityVisible(
     sql: QuerySql,
     communityId: string,
@@ -2051,11 +2247,121 @@ export class PostgresContentReadService implements ContentReadService {
     databaseSnapshot: string,
     cursor: ParsedCursor | null,
     allowSuspendedCommunities: boolean,
+    viewerActorId: string | null,
   ): Promise<BrowseCandidateRow[]> {
-    return sql<BrowseCandidateRow[]>`
-      with candidates as (
+    const rows = await sql<BrowseCandidateRow[]>`
+      with viewer_follows as materialized (
+        select follow.*
+        from platform.follows as follow
+        where ${input.scope}::text = 'following'
+          and follow.follower_actor_id = ${viewerActorId}::uuid
+      ),
+      following_match_rows as (
+        select
+          content.id as content_id,
+          follow.target_type,
+          follow.target_actor_id::text as target_id,
+          follow.notification_level,
+          1 as type_rank
+        from viewer_follows as follow
+        join platform.content_items as content
+          on content.author_actor_id = follow.target_actor_id
+        where follow.target_type = 'actor'
+
+        union all
+
         select
           content.id,
+          follow.target_type,
+          symbol.ticker::text,
+          follow.notification_level,
+          2
+        from viewer_follows as follow
+        join platform.symbols as symbol
+          on symbol.id = follow.target_symbol_id
+        join platform.content_symbols as content_symbol
+          on content_symbol.symbol_id = follow.target_symbol_id
+        join platform.content_items as tagged_content
+          on tagged_content.id = content_symbol.content_id
+        join platform.content_items as content
+          on content.id = tagged_content.id
+          or (
+            tagged_content.kind = 'post'
+            and content.root_id = tagged_content.id
+          )
+        where follow.target_type = 'symbol'
+
+        union all
+
+        select
+          content.id,
+          follow.target_type,
+          topic.slug::text,
+          follow.notification_level,
+          3
+        from viewer_follows as follow
+        join platform.topics as topic
+          on topic.id = follow.target_topic_id
+        join platform.content_topics as content_topic
+          on content_topic.topic_id = follow.target_topic_id
+        join platform.content_items as tagged_content
+          on tagged_content.id = content_topic.content_id
+        join platform.content_items as content
+          on content.id = tagged_content.id
+          or (
+            tagged_content.kind = 'post'
+            and content.root_id = tagged_content.id
+          )
+        where follow.target_type = 'topic'
+
+        union all
+
+        select
+          content.id,
+          follow.target_type,
+          follow.target_content_id::text,
+          follow.notification_level,
+          0
+        from viewer_follows as follow
+        join platform.content_items as followed_content
+          on followed_content.id = follow.target_content_id
+        join platform.content_items as content
+          on content.id = follow.target_content_id
+          or (
+            followed_content.kind = 'post'
+            and content.root_id = follow.target_content_id
+          )
+          or (
+            followed_content.kind = 'reply'
+            and content.parent_id = follow.target_content_id
+          )
+        where follow.target_type = 'content'
+      ),
+      following_matches as (
+        select
+          matched.content_id,
+          jsonb_agg(
+            jsonb_build_object(
+              'targetType', matched.target_type,
+              'targetId', matched.target_id,
+              'notificationLevel', matched.notification_level
+            ) order by matched.type_rank, matched.target_id collate "C"
+          ) as matched_follows
+        from (
+          select distinct
+            content_id,
+            target_type,
+            target_id,
+            notification_level,
+            type_rank
+          from following_match_rows
+        ) as matched
+        group by matched.content_id
+      ),
+      candidates as (
+        select
+          content.id,
+          content.created_at,
           case
             when ${input.sort}::text = 'active' and content.kind = 'post' then
               greatest(
@@ -2109,9 +2415,13 @@ export class PostgresContentReadService implements ContentReadService {
                     )
                 ), content.published_at)
               )
+            when ${input.scope}::text = 'following' then content.created_at
             else content.published_at
-          end as order_at
+          end as order_at,
+          coalesce(follow_matches.matched_follows, '[]'::jsonb) as matched_follows
         from platform.content_items as content
+        left join following_matches as follow_matches
+          on follow_matches.content_id = content.id
         where content.lifecycle_state = 'published'
           and content.distribution_state <> 'hidden'
           and content.published_at <= ${asOf}
@@ -2120,7 +2430,22 @@ export class PostgresContentReadService implements ContentReadService {
             content.content_read_created_xid,
             ${databaseSnapshot}::pg_snapshot
           )
-          and content.kind = any(${input.contentTypes}::text[])
+          and (
+            content.kind = any(${input.contentTypes}::text[])
+            or (
+              ${input.scope}::text = 'following'
+              and ${input.contentTypesExplicit}::boolean = false
+              and content.kind = 'reply'
+              and exists (
+                select 1
+                from platform.follows as direct_content_follow
+                where direct_content_follow.follower_actor_id =
+                    ${viewerActorId}::uuid
+                  and direct_content_follow.target_type = 'content'
+                  and direct_content_follow.target_content_id = content.id
+              )
+            )
+          )
           and exists (
             select 1
             from platform.content_items as visible_root
@@ -2234,20 +2559,75 @@ export class PostgresContentReadService implements ContentReadService {
                   and topic.slug::text = ${input.topic}::text
               )
             )
+            or (
+              ${input.scope}::text = 'following'
+              and follow_matches.matched_follows is not null
+            )
           )
       )
-      select id::text as id, order_at
+      select
+        id::text as id,
+        created_at,
+        order_at,
+        matched_follows
       from candidates
       where (
         ${cursor?.lastAt ?? null}::timestamptz is null
-        or (order_at, id) < (
-          ${cursor?.lastAt ?? null}::timestamptz,
-          ${cursor?.lastId ?? null}::uuid
+        or (
+          ${input.sort}::text = 'active'
+          and ${input.scope}::text = 'following'
+          and (order_at, created_at, id) < (
+            ${cursor?.lastAt ?? null}::timestamptz,
+            ${cursor?.lastCreatedAt ?? null}::timestamptz,
+            ${cursor?.lastId ?? null}::uuid
+          )
+        )
+        or (
+          ${input.sort}::text = 'active'
+          and ${input.scope}::text <> 'following'
+          and (order_at, id) < (
+            ${cursor?.lastAt ?? null}::timestamptz,
+            ${cursor?.lastId ?? null}::uuid
+          )
+        )
+        or (
+          ${input.sort}::text = 'latest'
+          and (order_at, id) < (
+            ${cursor?.lastAt ?? null}::timestamptz,
+            ${cursor?.lastId ?? null}::uuid
+          )
         )
       )
-      order by order_at desc, id desc
+      order by
+        order_at desc,
+        case
+          when ${input.sort}::text = 'active'
+            and ${input.scope}::text = 'following'
+            then created_at
+        end desc,
+        id desc
       limit ${input.limit + 1}
     `;
+    return rows.map((row) => {
+      const createdAt = asDate(row.created_at);
+      const orderAt = asDate(row.order_at);
+      if (!UUID_PATTERN.test(row.id) || createdAt > asOf || orderAt > asOf) {
+        throw new ContentReadError("CONTENT_DATA_INVALID");
+      }
+      const matchedFollows = mapMatchedFollows(row.matched_follows);
+      if (
+        (input.scope === "following" && matchedFollows.length === 0) ||
+        (input.scope !== "following" && matchedFollows.length !== 0)
+      ) {
+        throw new ContentReadError("CONTENT_DATA_INVALID");
+      }
+      return {
+        created_at: createdAt,
+        id: row.id,
+        matched_follows: matchedFollows,
+        order_at: orderAt,
+      };
+    });
   }
 
   async #discussionLocation(
@@ -2651,6 +3031,16 @@ export class PostgresContentReadService implements ContentReadService {
             then coalesce(reaction_aggregate.active_reactions, array[]::text[])
           else array[]::text[]
         end as active_reactions,
+        case
+          when ${viewerActorId}::uuid is null then false
+          else exists (
+            select 1
+            from platform.follows as direct_content_follow
+            where direct_content_follow.follower_actor_id = ${viewerActorId}::uuid
+              and direct_content_follow.target_type = 'content'
+              and direct_content_follow.target_content_id = content.id
+          )
+        end as following,
         (
           with recursive descendants as (
             select child.id, child.distribution_state
@@ -2792,8 +3182,10 @@ export class PostgresContentReadService implements ContentReadService {
     binding: string;
     databaseSnapshot: string;
     expiresAt: Date;
+    followEpoch: string | null;
     kind: "browse" | "discussion";
     lastAt: Date;
+    lastCreatedAt: Date | null;
     lastId: string;
     position: number;
     snapshotId: string;
@@ -2804,9 +3196,11 @@ export class PostgresContentReadService implements ContentReadService {
       binding: options.binding,
       databaseSnapshot: options.databaseSnapshot,
       expiresAt: options.expiresAt.toISOString(),
+      followEpoch: options.followEpoch,
       kind: options.kind,
       last: {
         at: options.lastAt.toISOString(),
+        createdAt: options.lastCreatedAt?.toISOString() ?? null,
         id: options.lastId,
         position: options.position,
       },
@@ -2871,13 +3265,17 @@ export class PostgresContentReadService implements ContentReadService {
     const asOf = new Date(payload.asOf);
     const expiresAt = new Date(payload.expiresAt);
     const lastAt = new Date(payload.last.at);
+    const lastCreatedAt =
+      payload.last.createdAt === null ? null : new Date(payload.last.createdAt);
     const now = this.#clock();
     if (
       !Number.isFinite(asOf.valueOf()) ||
       !Number.isFinite(expiresAt.valueOf()) ||
       !Number.isFinite(lastAt.valueOf()) ||
+      (lastCreatedAt !== null && !Number.isFinite(lastCreatedAt.valueOf())) ||
       expiresAt <= asOf ||
       lastAt > asOf ||
+      (lastCreatedAt !== null && lastCreatedAt > asOf) ||
       asOf.valueOf() > now.valueOf() + MAXIMUM_CLOCK_SKEW_MILLISECONDS ||
       payload.snapshotId !==
         makeSnapshotId(
@@ -2887,6 +3285,7 @@ export class PostgresContentReadService implements ContentReadService {
           asOf,
           payload.databaseSnapshot,
           payload.visibilityEpoch,
+          payload.followEpoch,
         )
     ) {
       throw new ContentReadError("CURSOR_INVALID");
@@ -2898,7 +3297,9 @@ export class PostgresContentReadService implements ContentReadService {
       asOf,
       databaseSnapshot: payload.databaseSnapshot,
       expiresAt,
+      followEpoch: payload.followEpoch,
       lastAt,
+      lastCreatedAt,
       lastId: payload.last.id,
       position: payload.last.position,
       snapshotId: payload.snapshotId,

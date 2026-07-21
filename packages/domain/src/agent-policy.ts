@@ -8,6 +8,7 @@ export const AGENT_OPERATIONS = [
   "search_content",
   "get_content",
   "get_discussion",
+  "list_follows",
   "list_notifications",
   "get_action_status",
   "create_post",
@@ -63,6 +64,7 @@ const operationScopes: Record<AgentOperation, readonly AgentScope[]> = {
   search_content: ["research:read"],
   get_content: ["research:read"],
   get_discussion: ["research:read"],
+  list_follows: ["research:read"],
   list_notifications: ["notifications:read"],
   get_action_status: ["actions:read"],
   create_post: ["content:write"],
@@ -197,6 +199,7 @@ function ruleKeyForOperation(operation: AgentOperation): AgentPolicyRuleKey | nu
     case "find_communities":
     case "get_community":
     case "browse_content":
+    case "list_follows":
       return "browse";
     case "search_content":
       return "search";

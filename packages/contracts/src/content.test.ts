@@ -316,6 +316,56 @@ describe("canonical list projections", () => {
       }).success,
     ).toBe(false);
   });
+
+  it("requires unique matched Follow reasons in canonical order", () => {
+    const matches = [
+      {
+        target_type: "content",
+        target_id: "10000000-0000-4000-8000-000000000001",
+        notification_level: "all_events",
+      },
+      {
+        target_type: "actor",
+        target_id: "20000000-0000-4000-8000-000000000001",
+        notification_level: "new_posts",
+      },
+      {
+        target_type: "symbol",
+        target_id: "AMD",
+        notification_level: "feed_only",
+      },
+      {
+        target_type: "topic",
+        target_id: "data-center",
+        notification_level: "feed_only",
+      },
+    ] as const;
+    const item = {
+      ...listPost,
+      rank: 1,
+      score: 5,
+      matched_follows: matches,
+      selection_reasons: [
+        "follow:content",
+        "follow:actor",
+        "follow:symbol",
+        "follow:topic",
+      ],
+    } as const;
+    expect(BrowseContentItemSchema.parse(item)).toEqual(item);
+    expect(
+      BrowseContentItemSchema.safeParse({
+        ...item,
+        matched_follows: [matches[2], matches[0]],
+      }).success,
+    ).toBe(false);
+    expect(
+      BrowseContentItemSchema.safeParse({
+        ...item,
+        matched_follows: [matches[0], matches[0]],
+      }).success,
+    ).toBe(false);
+  });
 });
 
 describe("content detail and discussion projections", () => {
