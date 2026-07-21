@@ -17,6 +17,7 @@ import { closeDependencies, type HealthDependency } from "@alphanet/database";
 import type {
   AgentConnectionService,
   CommunityDirectoryService,
+  OwnerPendingActionService,
   PendingActionStatusService,
   ResearchWriteService,
 } from "@alphanet/domain";
@@ -30,6 +31,7 @@ import Fastify, {
 
 import { registerAgentConnectionRoutes, v1Error } from "./agent-routes.js";
 import { registerCommunityRoutes } from "./community-routes.js";
+import { registerOwnerActionRoutes } from "./owner-action-routes.js";
 import { registerPendingActionRoutes } from "./pending-action-routes.js";
 import { registerResearchWriteRoutes } from "./research-write-routes.js";
 import { createRequestClientIpResolver, ssrClientIpHeaders } from "./ssr-client-ip.js";
@@ -44,6 +46,7 @@ export interface ApiAppOptions {
   environment: "development" | "test" | "production";
   internalSsrRequestSecret?: string;
   logger?: FastifyBaseLogger;
+  ownerPendingActionService?: OwnerPendingActionService;
   pendingActionStatusService?: PendingActionStatusService;
   researchWriteService?: ResearchWriteService;
   trustedProxyCidrs?: readonly string[];
@@ -281,6 +284,7 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
     (options.authRuntime ||
       options.agentConnectionService ||
       options.communityDirectoryService ||
+      options.ownerPendingActionService ||
       options.pendingActionStatusService ||
       options.researchWriteService) &&
     !options.agentRateLimiter
@@ -317,6 +321,15 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
             critical: true,
             name: "community-directory-schema",
             check: () => options.communityDirectoryService!.checkReady(),
+          },
+        ]
+      : []),
+    ...(options.ownerPendingActionService
+      ? [
+          {
+            critical: true,
+            name: "owner-pending-action-schema",
+            check: () => options.ownerPendingActionService!.checkReady(),
           },
         ]
       : []),
@@ -585,6 +598,16 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
         ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
         resolveClientIp,
         service: options.agentConnectionService,
+      });
+    }
+
+    if (options.ownerPendingActionService) {
+      registerOwnerActionRoutes(app, {
+        allowedOrigins: options.allowedOrigins,
+        authRuntime,
+        ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
+        resolveClientIp,
+        service: options.ownerPendingActionService,
       });
     }
   }

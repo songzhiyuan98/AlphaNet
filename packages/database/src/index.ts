@@ -2,6 +2,7 @@ import { Redis } from "ioredis";
 import postgres from "postgres";
 
 export * from "./outbox.js";
+export * from "./outbox-producer.js";
 
 export interface HealthDependency {
   readonly name: string;

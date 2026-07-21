@@ -8,8 +8,13 @@ import {
   createPostgresDependency,
   PostgresOutboxRepository,
 } from "@alphanet/database";
+import {
+  PostgresPendingActionExecutionRepository,
+  PostgresResearchWriteService,
+} from "@alphanet/domain";
 import { createLogger } from "@alphanet/observability";
 
+import { PendingActionWorker } from "./pending-action-worker.js";
 import { OutboxWorker, type OutboxHandler } from "./worker.js";
 
 async function start(): Promise<void> {
@@ -26,7 +31,7 @@ async function start(): Promise<void> {
     await postgres.check();
 
     const leaseOwner = `${hostname()}:${process.pid}:${randomUUID()}`;
-    const repository = new PostgresOutboxRepository(
+    const outboxRepository = new PostgresOutboxRepository(
       postgres.sql,
       environment.OUTBOX_CONSUMER_NAME,
     );
@@ -38,9 +43,51 @@ async function start(): Promise<void> {
       leaseOwner,
       logger,
       replayFrom: environment.OUTBOX_REPLAY_FROM,
-      repository,
+      repository: outboxRepository,
+    });
+    const pendingActionKeys: Record<number, Uint8Array> = Object.fromEntries([
+      ...Object.entries(environment.PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS).map(
+        ([version, key]) => [Number(version), Buffer.from(key, "hex")] as const,
+      ),
+      [
+        environment.PENDING_ACTION_ENCRYPTION_KEY_VERSION,
+        Buffer.from(environment.PENDING_ACTION_ENCRYPTION_KEY, "hex"),
+      ],
+    ]);
+    const researchWriter = new PostgresResearchWriteService(postgres.sql, {
+      pendingActionKeyRing: {
+        currentVersion: environment.PENDING_ACTION_ENCRYPTION_KEY_VERSION,
+        keys: pendingActionKeys,
+      },
+    });
+    const pendingActionRepository = new PostgresPendingActionExecutionRepository(
+      postgres.sql,
+      {
+        claimBatchSize: environment.WORKER_BATCH_SIZE,
+        leaseOwner,
+        reapBatchSize: environment.WORKER_BATCH_SIZE,
+      },
+    );
+    await researchWriter.checkReady();
+    await pendingActionRepository.checkReady();
+    const pendingActionWorker = new PendingActionWorker({
+      batchSize: environment.WORKER_BATCH_SIZE,
+      executor: researchWriter,
+      logger,
+      repository: pendingActionRepository,
     });
     const abortController = new AbortController();
+
+    const runOnce = async () => {
+      // Recheck the privacy-critical PostgreSQL runtime setting before either
+      // worker can claim unpublished commands or public Outbox data.
+      await postgres.check();
+      const [outboxCount, pendingActionCount] = await Promise.all([
+        worker.runOnce(),
+        pendingActionWorker.runOnce(),
+      ]);
+      return outboxCount + pendingActionCount;
+    };
 
     const shutdown = (signal: string) => {
       logger.info({ signal }, "stopping outbox polling");
@@ -54,12 +101,12 @@ async function start(): Promise<void> {
     });
 
     if (environment.RUN_ONCE) {
-      await worker.runOnce();
+      await runOnce();
       return;
     }
 
     while (!abortController.signal.aborted) {
-      const claimed = await worker.runOnce();
+      const claimed = await runOnce();
       if (claimed === 0) {
         try {
           await delay(environment.WORKER_POLL_INTERVAL_MS, undefined, {

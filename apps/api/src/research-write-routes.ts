@@ -217,6 +217,12 @@ function sendOutcome(
 
 function statusForOutcomeError(code: ResearchWriteErrorCode | undefined): number {
   switch (code) {
+    case "ACTION_CANCELLED":
+    case "ACTION_EXECUTION_FAILED":
+    case "ACTION_EXPIRED":
+    case "ACTION_INVALIDATED":
+    case "ACTION_REJECTED":
+      return 409;
     case "AUTHORIZATION_CONTEXT_STALE":
       return 401;
     case "COMMUNITY_NOT_FOUND":

@@ -3,6 +3,7 @@ import { inspect } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AlphaNetAuthRuntime, OwnerSession } from "@alphanet/auth";
 import { V1ErrorResponseSchema } from "@alphanet/contracts";
+import type { OwnerPendingActionService } from "@alphanet/domain";
 import type { FastifyBaseLogger } from "fastify";
 
 import { createApiApp } from "./app.js";
@@ -70,6 +71,24 @@ function createCapturingLogger(entries: unknown[][]): FastifyBaseLogger {
     warn: record,
   };
   return logger;
+}
+
+function createOwnerPendingActionService(options?: {
+  checkReady?: () => Promise<void>;
+}): OwnerPendingActionService & {
+  approveAction: ReturnType<typeof vi.fn>;
+  checkReady: ReturnType<typeof vi.fn>;
+  getAction: ReturnType<typeof vi.fn>;
+  listActions: ReturnType<typeof vi.fn>;
+  rejectAction: ReturnType<typeof vi.fn>;
+} {
+  return {
+    approveAction: vi.fn(() => Promise.reject(new Error("unexpected approval"))),
+    checkReady: vi.fn(options?.checkReady ?? (() => Promise.resolve())),
+    getAction: vi.fn(() => Promise.reject(new Error("unexpected detail read"))),
+    listActions: vi.fn(() => Promise.reject(new Error("unexpected list read"))),
+    rejectAction: vi.fn(() => Promise.reject(new Error("unexpected rejection"))),
+  };
 }
 
 describe("API service", () => {
@@ -203,6 +222,81 @@ describe("API service", () => {
       status: "degraded",
       failedDependencies: ["auth-schema"],
     });
+  });
+
+  it("checks the Owner pending-action service during readiness", async () => {
+    const service = createOwnerPendingActionService();
+    const app = await createApiApp({
+      allowedOrigins: ["https://app.alphanet.test"],
+      environment: "test",
+      ownerPendingActionService: service,
+      version: "test-version",
+    });
+    apps.push(app);
+
+    const response = await app.inject({ method: "GET", url: "/health/ready" });
+
+    expect(response.statusCode).toBe(200);
+    expect(service.checkReady).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { includeAuth: false, includeService: true },
+    { includeAuth: true, includeService: false },
+  ])(
+    "does not register Owner pending-action routes without both dependencies: %o",
+    async ({ includeAuth, includeService }) => {
+      const auth = createAuthRuntime();
+      const service = createOwnerPendingActionService();
+      const app = await createApiApp({
+        allowedOrigins: ["https://app.alphanet.test"],
+        ...(includeAuth ? { authRuntime: auth.runtime } : {}),
+        environment: "test",
+        ...(includeService ? { ownerPendingActionService: service } : {}),
+        version: "test-version",
+      });
+      apps.push(app);
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/v1/owner/pending-actions",
+      });
+
+      expect(response.statusCode).toBe(404);
+      expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
+        "ROUTE_NOT_FOUND",
+      );
+      expect(auth.getOwnerSession).not.toHaveBeenCalled();
+      expect(service.listActions).not.toHaveBeenCalled();
+    },
+  );
+
+  it("registers Owner pending-action routes and authenticates before JSON parsing", async () => {
+    const auth = createAuthRuntime();
+    const service = createOwnerPendingActionService();
+    const app = await createApiApp({
+      allowedOrigins: ["https://app.alphanet.test"],
+      authRuntime: auth.runtime,
+      environment: "test",
+      ownerPendingActionService: service,
+      version: "test-version",
+    });
+    apps.push(app);
+
+    const response = await app.inject({
+      headers: { "content-type": "application/json" },
+      method: "POST",
+      payload: "{",
+      url: "/v1/owner/pending-actions/action_01/approve",
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(response.headers["cache-control"]).toBe("no-store, private");
+    expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
+      "AUTHENTICATION_REQUIRED",
+    );
+    expect(auth.getOwnerSession).toHaveBeenCalledOnce();
+    expect(service.approveAction).not.toHaveBeenCalled();
   });
 
   it("returns a stable error envelope and request id", async () => {

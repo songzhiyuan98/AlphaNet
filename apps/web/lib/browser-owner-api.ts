@@ -90,6 +90,9 @@ const friendlyMessages: Record<string, string> = {
   AGENT_NOT_FOUND: "找不到这个 Agent，它可能已被移除。",
   RESOURCE_NOT_FOUND: "找不到这个资源，或它不属于当前账户。",
   AGENT_STATE_CONFLICT: "Agent 当前状态不允许执行此操作。",
+  ACTION_DECISION_CONFLICT: "这个动作已经被处理，无法重复决策。",
+  ACTION_NOT_FOUND: "找不到这个待审批动作，或它不属于当前账户。",
+  ACTION_VERSION_CONFLICT: "动作已发生变化，请查看最新版本后再决定。",
   AUTHENTICATION_REQUIRED: "登录已过期，请重新登录。",
   CREDENTIAL_EXPIRY_INVALID: "有效期必须至少晚于当前时间 1 小时，且不能超过上限。",
   CREDENTIAL_ISSUE_RATE_LIMITED: "过去 24 小时签发凭证的次数已达上限。",
@@ -101,10 +104,15 @@ const friendlyMessages: Record<string, string> = {
   NETWORK_ERROR: "无法连接控制面，请检查网络后重试。",
   OWNER_EMAIL_VERIFICATION_REQUIRED: "请先完成 Owner 邮箱验证。",
   OWNER_NOT_ACTIVE: "Owner 账户当前不能执行此操作。",
+  OWNER_ACTION_UNAVAILABLE: "审批服务暂时不可用，请稍后重试。",
   PLATFORM_AGENT_CAPACITY_EXCEEDED: "平台容量暂时已满，请稍后重试。",
   TOKEN_EXPIRED: "这个凭证已经过期。",
   VALIDATION_FAILED: "提交内容不符合要求，请检查后重试。",
 };
+
+export function isOwnerApiAuthenticationError(error: unknown): boolean {
+  return error instanceof OwnerApiError && error.code === "AUTHENTICATION_REQUIRED";
+}
 
 export function friendlyOwnerApiError(error: unknown): string {
   if (!(error instanceof OwnerApiError)) {

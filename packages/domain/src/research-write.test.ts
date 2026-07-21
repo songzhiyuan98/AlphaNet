@@ -12,12 +12,25 @@ import {
   digestResearchCommand,
   digestResearchCommandBytes,
   normalizeCreatePostCommand,
+  normalizeReplyCommand,
+  type NormalizedResearchCommand,
 } from "./research-command.js";
 import {
+  encryptPendingCommand,
+  type PendingCommandKeyRing,
+} from "./pending-command-codec.js";
+import type {
+  FencedPendingAction,
+  PendingActionExecutionClaim,
+} from "./pending-action-execution.js";
+import {
   PostgresResearchWriteService,
+  type ApprovedResearchExecutionError,
+  type ApprovedResearchExecutionRepository,
   type CreatePostResearchWriteInput,
   type PostgresResearchWriteOptions,
 } from "./research-write.js";
+import { PENDING_ACTION_EXECUTION_MIGRATION_CHECKSUM } from "./schema-migrations.js";
 
 const ownerId = "00000000-0000-4000-8000-000000000001";
 const actorId = "00000000-0000-4000-8000-000000000002";
@@ -34,6 +47,7 @@ const referenceContentId = "00000000-0000-4000-8000-000000000203";
 const symbolId = "00000000-0000-4000-8000-000000000301";
 const topicId = "00000000-0000-4000-8000-000000000302";
 const mentionedActorId = "00000000-0000-4000-8000-000000000303";
+const outboxEventId = "00000000-0000-4000-8000-000000000401";
 const now = new Date("2026-07-20T12:00:00.000Z");
 
 const defaultRules = {
@@ -145,6 +159,7 @@ interface HarnessOptions {
     | undefined;
   maxPostsPerHour?: number | undefined;
   missingCommunityIds?: readonly string[] | undefined;
+  outboxNextSequence?: string | undefined;
   activePendingCount?: number | undefined;
   protectedIntentCount?: number | undefined;
   rateCount?: number | undefined;
@@ -242,6 +257,9 @@ class SqlHarness {
     context?: HarnessTransaction,
   ): Promise<unknown[]> {
     if (text.startsWith("set local")) return [];
+    if (text === "select clock_timestamp() as database_now") {
+      return [{ database_now: new Date(now.valueOf()) }];
+    }
     if (text.includes("as ready") && text.includes("system.schema_migrations")) {
       return [{ ready: true }];
     }
@@ -426,6 +444,19 @@ class SqlHarness {
     if (text.includes("lower(actor.handle::text) as handle")) {
       return [{ actor_id: mentionedActorId, handle: "market-scout" }];
     }
+    if (
+      text.includes("from system.outbox_aggregate_heads as head") &&
+      text.includes("as next_sequence")
+    ) {
+      return [{ next_sequence: this.#options.outboxNextSequence ?? "1" }];
+    }
+    if (text.startsWith("insert into system.outbox_events")) {
+      const aggregateSequence = values[2];
+      if (typeof aggregateSequence !== "string") {
+        throw new Error("Outbox aggregate sequence must be passed as a string");
+      }
+      return [{ id: outboxEventId, aggregate_sequence: aggregateSequence }];
+    }
     if (text.startsWith("insert into platform.pending_actions")) {
       if (context) context.createdPendingAction = true;
       return [];
@@ -460,6 +491,112 @@ function service(
   });
 }
 
+function approvedExecutionFixture(
+  keyRing: PendingCommandKeyRing,
+  command: NormalizedResearchCommand = normalizeCreatePostCommand(postInput()),
+): {
+  claim: PendingActionExecutionClaim;
+  frozenAction: FencedPendingAction;
+  command: NormalizedResearchCommand;
+} {
+  const actionId = "00000000-0000-4000-8000-000000000801";
+  const inputDigest = digestResearchCommand(command);
+  const encrypted = encryptPendingCommand(
+    command,
+    {
+      actionId,
+      agentId,
+      credentialId,
+      inputDigest,
+      operation: command.operation,
+      ownerId,
+    },
+    keyRing,
+  );
+  return {
+    claim: {
+      actionId,
+      attemptCount: 1,
+      leaseExpiresAt: new Date(now.valueOf() + 60_000),
+      leaseOwner: "worker-test",
+      leaseToken: randomBytes(32),
+      operation: command.operation,
+      version: "3",
+    },
+    command,
+    frozenAction: {
+      actionId,
+      agentId,
+      attemptCount: 1,
+      credentialId,
+      decisionAuditId: "00000000-0000-4000-8000-000000000803",
+      decisionId: "00000000-0000-4000-8000-000000000802",
+      expectedVersion: null,
+      expiresAt: new Date(now.valueOf() + 60 * 60 * 1_000),
+      failureCount: 0,
+      inputDigest: digestResearchCommandBytes(command),
+      normalizedInput: encrypted,
+      operation: command.operation,
+      ownerId,
+      policyId,
+      policySnapshot: {
+        decision: "require_approval",
+        decision_id: "00000000-0000-4000-8000-000000000802",
+        policy_id: policyId,
+        policy_version: "1",
+      },
+      policyVersion: "1",
+      targetId:
+        command.operation === "create_post"
+          ? command.primaryCommunityId
+          : command.parentContentId,
+      targetType: command.operation === "create_post" ? "community" : "content",
+      version: "3",
+    },
+  };
+}
+
+function approvedExecutionRepository(
+  harness: SqlHarness,
+  frozenAction: FencedPendingAction,
+): ApprovedResearchExecutionRepository & {
+  finalizeSucceeded: ReturnType<typeof vi.fn>;
+} {
+  const finalizeSucceeded = vi.fn(
+    (
+      _transaction: unknown,
+      claim: PendingActionExecutionClaim,
+      input: Parameters<ApprovedResearchExecutionRepository["finalizeSucceeded"]>[2],
+    ) =>
+      Promise.resolve({
+        action: {
+          actionId: claim.actionId,
+          attemptCount: claim.attemptCount,
+          error: null,
+          failureCount: 0,
+          idempotencyResponse: {},
+          idempotencyStatus: "succeeded" as const,
+          operation: claim.operation,
+          resourceId: input.resourceId,
+          result: input.result,
+          state: "succeeded" as const,
+          terminalAt: new Date(now.valueOf()),
+          version: "4",
+        },
+        resolvedOutboxEventId: "00000000-0000-4000-8000-000000000402",
+      }),
+  );
+  return {
+    finalizeSucceeded,
+    withFencedClaim: async (_claim, callback) => {
+      const result = await harness.sql.begin(async (transaction) => ({
+        value: await callback(transaction, frozenAction),
+      }));
+      return result.value;
+    },
+  };
+}
+
 function postInput(
   overrides: Partial<CreatePostResearchWriteInput> = {},
 ): CreatePostResearchWriteInput {
@@ -472,8 +609,38 @@ function postInput(
   };
 }
 
+function persistedPendingAction(
+  command: NormalizedResearchCommand,
+  state:
+    | "pending_approval"
+    | "approved"
+    | "executing"
+    | "succeeded"
+    | "rejected"
+    | "expired"
+    | "cancelled"
+    | "failed"
+    | "invalidated",
+) {
+  return {
+    id: "00000000-0000-4000-8000-000000000821",
+    operation: "create_post",
+    state,
+    expires_at: "2026-07-21T12:00:00.000Z",
+    input_digest: digestResearchCommand(command),
+    requested_at: now.toISOString(),
+    decision_id: "00000000-0000-4000-8000-000000000822",
+    policy_version: "1",
+    approval_summary: "Create one post in 1 Community.",
+  };
+}
+
 function hasSql(harness: SqlHarness, fragment: string): boolean {
   return harness.queries.some((query) => query.text.includes(fragment));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function sqlIndex(harness: SqlHarness, fragment: string): number {
@@ -481,7 +648,7 @@ function sqlIndex(harness: SqlHarness, fragment: string): number {
 }
 
 describe("PostgresResearchWriteService", () => {
-  it("pins readiness to migration 000006 and the critical write schema", async () => {
+  it("pins readiness to migrations 000006/000007 and the critical write schema", async () => {
     const harness = new SqlHarness();
     await service(harness).checkReady();
 
@@ -489,13 +656,176 @@ describe("PostgresResearchWriteService", () => {
       query.text.includes("system.schema_migrations"),
     );
     expect(readiness?.values).toContain(COMMUNITY_RESEARCH_MIGRATION_CHECKSUM);
+    expect(readiness?.values).toContain(PENDING_ACTION_EXECUTION_MIGRATION_CHECKSUM);
     expect(readiness?.text).toContain("platform.content_items");
     expect(readiness?.text).toContain("platform.pending_actions");
     expect(readiness?.text).toContain("content_revisions_prevent_mutation");
   });
 
-  it("freezes an Assisted post as ciphertext without creating content", async () => {
+  it("publishes an Owner-approved frozen post and finalizes the same fenced transaction", async () => {
+    // The live policy may change after the Owner decision. The original
+    // approval remains the write authorization while the current policy is
+    // recorded independently as a fresh safety revalidation.
+    const harness = new SqlHarness({ authTier: "autonomous" });
+    const keyRing: PendingCommandKeyRing = {
+      currentVersion: 1,
+      keys: { 1: randomBytes(32) },
+    };
+    const fixture = approvedExecutionFixture(keyRing);
+    const repository = approvedExecutionRepository(harness, fixture.frozenAction);
+    const writer = new PostgresResearchWriteService(harness.sql, {
+      clock: () => new Date(now.valueOf()),
+      idFactory: idFactory(),
+      pendingActionKeyRing: keyRing,
+    });
+
+    const result = await writer.executeApprovedAction(repository, fixture.claim);
+
+    expect(result.action.state).toBe("succeeded");
+    expect(result.content).toMatchObject({
+      resourceVersion: 1,
+    });
+    expect(hasSql(harness, "insert into platform.content_items")).toBe(true);
+    expect(repository.finalizeSucceeded).toHaveBeenCalledOnce();
+    expect(repository.finalizeSucceeded.mock.calls[0]?.[1]).toBe(fixture.claim);
+    expect(repository.finalizeSucceeded.mock.calls[0]?.[2]).toMatchObject({
+      correlatedOutboxEventId: outboxEventId,
+      resourceId: result.content.contentId,
+      result: {
+        content_id: result.content.contentId,
+        resource_version: 1,
+      },
+    });
+    const approvedWriteAudit = harness.queries.find(
+      (query) =>
+        query.text.includes("insert into platform.action_logs") &&
+        query.values.includes("owner_approval_record"),
+    );
+    expect(approvedWriteAudit?.values).toContain("owner_approval");
+    expect(approvedWriteAudit?.values).toContain(ownerId);
+    const authorizationSnapshot = approvedWriteAudit?.values.find(
+      (value) => isRecord(value) && "live_revalidation" in value,
+    );
+    if (!isRecord(authorizationSnapshot)) {
+      throw new Error("The approved write audit has no authorization snapshot.");
+    }
+    expect(authorizationSnapshot.decision).toBe("require_approval");
+    expect(authorizationSnapshot.decision_id).toBe(fixture.frozenAction.decisionId);
+    const liveRevalidation = authorizationSnapshot.live_revalidation;
+    if (!isRecord(liveRevalidation)) {
+      throw new Error("The approved write audit has no live revalidation.");
+    }
+    expect(liveRevalidation.decision).toBe("allow");
+    expect(liveRevalidation.policy_id).toBe(policyId);
+    expect(authorizationSnapshot.owner_approval).toEqual({
+      decision_audit_id: fixture.frozenAction.decisionAuditId,
+      method: "owner_approval",
+    });
+    expect(
+      harness.queries.find((query) =>
+        query.text.includes("from platform.credentials as credential"),
+      )?.text,
+    ).toContain("for share of credential, agent, actor, owner, policy");
+  });
+
+  it("invalidates an approved action when current authority no longer permits writes", async () => {
+    const harness = new SqlHarness({ authTier: "read_only" });
+    const keyRing: PendingCommandKeyRing = {
+      currentVersion: 1,
+      keys: { 1: randomBytes(32) },
+    };
+    const fixture = approvedExecutionFixture(keyRing);
+    const repository = approvedExecutionRepository(harness, fixture.frozenAction);
+    const writer = new PostgresResearchWriteService(harness.sql, {
+      idFactory: idFactory(),
+      pendingActionKeyRing: keyRing,
+    });
+
+    await expect(
+      writer.executeApprovedAction(repository, fixture.claim),
+    ).rejects.toMatchObject({
+      code: "APPROVED_ACTION_CONTEXT_INVALID",
+      disposition: "invalidate",
+    } satisfies Partial<ApprovedResearchExecutionError>);
+    expect(hasSql(harness, "insert into platform.content_items")).toBe(false);
+    expect(repository.finalizeSucceeded).not.toHaveBeenCalled();
+  });
+
+  it("publishes an Owner-approved reply with its frozen discussion identity", async () => {
     const harness = new SqlHarness({ authTier: "assisted" });
+    const keyRing: PendingCommandKeyRing = {
+      currentVersion: 1,
+      keys: { 1: randomBytes(32) },
+    };
+    const fixture = approvedExecutionFixture(
+      keyRing,
+      normalizeReplyCommand({
+        bodyMarkdown: "A frozen reply with a substantive counterpoint.",
+        parentContentId,
+      }),
+    );
+    const repository = approvedExecutionRepository(harness, fixture.frozenAction);
+    const writer = new PostgresResearchWriteService(harness.sql, {
+      idFactory: idFactory(),
+      pendingActionKeyRing: keyRing,
+    });
+
+    const result = await writer.executeApprovedAction(repository, fixture.claim);
+
+    expect(result.content).toMatchObject({
+      resourceVersion: 1,
+      rootContentId,
+    });
+    expect(repository.finalizeSucceeded).toHaveBeenCalledOnce();
+    expect(repository.finalizeSucceeded.mock.calls[0]?.[2]).toMatchObject({
+      resourceId: result.content.contentId,
+      result: {
+        content_id: result.content.contentId,
+        resource_version: 1,
+        revision_id: result.content.revisionId,
+        root_content_id: rootContentId,
+      },
+    });
+    expect(
+      harness.queries.find((query) =>
+        query.text.includes("from platform.content_items as parent"),
+      ),
+    ).toBeDefined();
+  });
+
+  it("returns a sanitized retry disposition when approved execution hits a live rate gate", async () => {
+    const harness = new SqlHarness({
+      authTier: "assisted",
+      maxPostsPerHour: 6,
+      rateCount: 6,
+    });
+    const keyRing: PendingCommandKeyRing = {
+      currentVersion: 1,
+      keys: { 1: randomBytes(32) },
+    };
+    const fixture = approvedExecutionFixture(keyRing);
+    const repository = approvedExecutionRepository(harness, fixture.frozenAction);
+    const writer = new PostgresResearchWriteService(harness.sql, {
+      idFactory: idFactory(),
+      pendingActionKeyRing: keyRing,
+    });
+
+    await expect(
+      writer.executeApprovedAction(repository, fixture.claim),
+    ).rejects.toMatchObject({
+      code: "APPROVED_ACTION_RATE_LIMITED",
+      disposition: "retry",
+      retryAfterMs: 30 * 60 * 1_000,
+    } satisfies Partial<ApprovedResearchExecutionError>);
+    expect(hasSql(harness, "insert into platform.content_items")).toBe(false);
+    expect(repository.finalizeSucceeded).not.toHaveBeenCalled();
+  });
+
+  it("freezes an Assisted post as ciphertext without creating content", async () => {
+    const harness = new SqlHarness({
+      authTier: "assisted",
+      outboxNextSequence: "41",
+    });
     const result = await service(harness).createPost(
       agentContext("assisted"),
       postInput({ bodyMarkdown: "Private draft marker 9a7f." }),
@@ -513,9 +843,56 @@ describe("PostgresResearchWriteService", () => {
       operation: "create_post",
       state: "pending_approval",
     });
+    const pendingReplayUpdate = harness.queries.find(
+      (query) =>
+        query.text.includes("update platform.idempotency_records") &&
+        query.text.includes("pending_action_id"),
+    );
+    expect(pendingReplayUpdate?.text).toContain("resource_id = null");
+    expect(pendingReplayUpdate?.values).toContain(result.pendingAction?.id);
     expect(hasSql(harness, "insert into platform.pending_actions")).toBe(true);
     expect(hasSql(harness, "insert into platform.content_items")).toBe(false);
     expect(hasSql(harness, "insert into system.outbox_events")).toBe(true);
+    const outboxLock = harness.queries.find((query) =>
+      query.text.includes("'alphanet:outbox-aggregate:'"),
+    );
+    expect(outboxLock?.text).toContain("pg_catalog.octet_length");
+    expect(outboxLock?.values).toEqual([
+      "pending_action",
+      "pending_action",
+      result.pendingAction?.id,
+    ]);
+    const sequenceAllocation = sqlIndex(
+      harness,
+      "from system.outbox_aggregate_heads as head",
+    );
+    const outboxInsert = harness.queries.find((query) =>
+      query.text.startsWith("insert into system.outbox_events"),
+    );
+    expect(sequenceAllocation).toBeLessThan(
+      sqlIndex(harness, "insert into system.outbox_events"),
+    );
+    expect(outboxInsert?.values.slice(0, 6)).toEqual([
+      "pending_action",
+      result.pendingAction?.id,
+      "41",
+      "action.pending_approval",
+      1,
+      {
+        action_id: result.pendingAction?.id,
+        actor_id: actorId,
+        agent_id: agentId,
+        operation: "create_post",
+        owner_id: ownerId,
+        target_id: communityId,
+        target_type: "community",
+      },
+    ]);
+    expect(outboxInsert?.values.slice(6)).toEqual([now, now, 12, now]);
+    const auditInsert = harness.queries.find((query) =>
+      query.text.startsWith("insert into platform.action_logs"),
+    );
+    expect(auditInsert?.values).toContain(outboxEventId);
     const pendingInsert = harness.queries.find((query) =>
       query.text.includes("insert into platform.pending_actions"),
     );
@@ -525,7 +902,7 @@ describe("PostgresResearchWriteService", () => {
   });
 
   it("commits an Autonomous post, Revision, facts, Outbox, audit, and idempotency atomically", async () => {
-    const harness = new SqlHarness();
+    const harness = new SqlHarness({ outboxNextSequence: "9007199254740993" });
     const fetchSpy = vi.spyOn(globalThis, "fetch");
     const result = await service(harness).createPost(
       agentContext("autonomous"),
@@ -557,6 +934,21 @@ describe("PostgresResearchWriteService", () => {
     expect(hasSql(harness, "insert into system.outbox_events")).toBe(true);
     expect(hasSql(harness, "insert into platform.action_logs")).toBe(true);
     expect(fetchSpy).not.toHaveBeenCalled();
+
+    const outboxLock = harness.queries.find((query) =>
+      query.text.includes("'alphanet:outbox-aggregate:'"),
+    );
+    expect(outboxLock?.values).toEqual(["content", "content", result.result?.contentId]);
+    const outboxInsert = harness.queries.find((query) =>
+      query.text.startsWith("insert into system.outbox_events"),
+    );
+    expect(outboxInsert?.values[2]).toBe("9007199254740993");
+    expect(typeof outboxInsert?.values[2]).toBe("string");
+    expect(outboxInsert?.values.slice(6)).toEqual([now, now, 12, now]);
+    const auditInsert = harness.queries.find((query) =>
+      query.text.startsWith("insert into platform.action_logs"),
+    );
+    expect(auditInsert?.values).toContain(outboxEventId);
 
     const reserve = sqlIndex(harness, "insert into platform.idempotency_records");
     const content = sqlIndex(harness, "insert into platform.content_items");
@@ -1076,17 +1468,7 @@ describe("PostgresResearchWriteService", () => {
           decision: "require_approval",
           status: "pending_approval",
           result: null,
-          pending_action: {
-            id: "00000000-0000-4000-8000-000000000821",
-            operation: "create_post",
-            state: "pending_approval",
-            expires_at: "2026-07-21T12:00:00.000Z",
-            input_digest: digestResearchCommand(command),
-            requested_at: now.toISOString(),
-            decision_id: "00000000-0000-4000-8000-000000000822",
-            policy_version: "1",
-            approval_summary: "Create one post in 1 Community.",
-          },
+          pending_action: persistedPendingAction(command, "pending_approval"),
           error: null,
         },
       },
@@ -1103,6 +1485,152 @@ describe("PostgresResearchWriteService", () => {
     expect(hasSql(harness, "hourly_intent_count")).toBe(false);
     expect(hasSql(harness, "insert into platform.idempotency_records")).toBe(false);
     expect(hasSql(harness, "insert into platform.pending_actions")).toBe(false);
+  });
+
+  it.each([
+    { state: "approved", status: "pending_approval", error: null, result: null },
+    { state: "executing", status: "pending_approval", error: null, result: null },
+    {
+      state: "succeeded",
+      status: "succeeded",
+      error: null,
+      result: {
+        content_id: "00000000-0000-4000-8000-000000000831",
+        revision_id: "00000000-0000-4000-8000-000000000832",
+        resource_version: 1,
+      },
+    },
+    {
+      state: "rejected",
+      status: "denied",
+      error: {
+        code: "ACTION_REJECTED",
+        message: "The Owner rejected this action.",
+        retryable: false,
+        details: null,
+        retryAfterMs: null,
+      },
+      result: null,
+    },
+    {
+      state: "expired",
+      status: "denied",
+      error: {
+        code: "ACTION_EXPIRED",
+        message: "The action expired before it could be completed.",
+        retryable: false,
+        details: null,
+        retryAfterMs: null,
+      },
+      result: null,
+    },
+    {
+      state: "cancelled",
+      status: "denied",
+      error: {
+        code: "ACTION_CANCELLED",
+        message: "The action was cancelled.",
+        retryable: false,
+        details: null,
+        retryAfterMs: null,
+      },
+      result: null,
+    },
+    {
+      state: "failed",
+      status: "failed",
+      error: {
+        code: "ACTION_EXECUTION_FAILED",
+        message: "The approved action could not be completed.",
+        retryable: false,
+        details: null,
+        retryAfterMs: null,
+      },
+      result: null,
+    },
+    {
+      state: "invalidated",
+      status: "failed",
+      error: {
+        code: "ACTION_INVALIDATED",
+        message: "The frozen action is no longer valid.",
+        retryable: false,
+        details: null,
+        retryAfterMs: null,
+      },
+      result: null,
+    },
+  ] as const)(
+    "replays a require-approval outcome while its PendingAction is $state",
+    async ({ error, result, state, status }) => {
+      const input = postInput({ idempotencyKey: `pending-${state}-replay` });
+      const command = normalizeCreatePostCommand(input);
+      const harness = new SqlHarness({
+        authTier: "assisted",
+        existingIdempotency: {
+          digest: digestResearchCommandBytes(command),
+          status,
+          response: {
+            version: 1,
+            operation: "create_post",
+            decision: "require_approval",
+            status,
+            result,
+            pending_action: persistedPendingAction(command, state),
+            error,
+          },
+        },
+      });
+
+      const replay = await service(harness).createPost(agentContext("assisted"), input, {
+        requestId: `req-pending-${state}-replay`,
+      });
+
+      expect(replay).toMatchObject({
+        decision: "require_approval",
+        replayed: true,
+        status,
+        pendingAction: { state },
+      });
+      expect(hasSql(harness, "from platform.communities as community")).toBe(false);
+      expect(hasSql(harness, "insert into platform.pending_actions")).toBe(false);
+    },
+  );
+
+  it("fails closed when a persisted PendingAction state and write status disagree", async () => {
+    const input = postInput({ idempotencyKey: "pending-inconsistent-replay" });
+    const command = normalizeCreatePostCommand(input);
+    const harness = new SqlHarness({
+      authTier: "assisted",
+      existingIdempotency: {
+        digest: digestResearchCommandBytes(command),
+        status: "succeeded",
+        response: {
+          version: 1,
+          operation: "create_post",
+          decision: "require_approval",
+          status: "succeeded",
+          result: {
+            content_id: "00000000-0000-4000-8000-000000000841",
+            revision_id: "00000000-0000-4000-8000-000000000842",
+            resource_version: 1,
+          },
+          pending_action: persistedPendingAction(command, "executing"),
+          error: null,
+        },
+      },
+    });
+
+    const replay = await service(harness).createPost(agentContext("assisted"), input, {
+      requestId: "req-pending-inconsistent-replay",
+    });
+
+    expect(replay).toMatchObject({
+      error: { code: "IDEMPOTENCY_RESULT_CORRUPT", retryable: true },
+      pendingAction: null,
+      result: null,
+      status: "failed",
+    });
   });
 
   it("persists a policy denial audit without creating an Outbox event", async () => {

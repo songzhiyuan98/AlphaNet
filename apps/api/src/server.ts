@@ -1,3 +1,5 @@
+import { createHmac } from "node:crypto";
+
 import {
   createAlphaNetAuthRuntime,
   RedisRateLimitStorage,
@@ -14,6 +16,7 @@ import {
 import {
   PostgresAgentConnectionService,
   PostgresCommunityDirectoryService,
+  PostgresOwnerPendingActionService,
   PostgresPendingActionStatusService,
   PostgresResearchWriteService,
 } from "@alphanet/domain";
@@ -60,6 +63,18 @@ async function start(): Promise<void> {
     ],
   ]);
   const researchWriteService = new PostgresResearchWriteService(postgres.sql, {
+    pendingActionKeyRing: {
+      currentVersion: environment.PENDING_ACTION_ENCRYPTION_KEY_VERSION,
+      keys: pendingActionKeys,
+    },
+  });
+  const ownerPendingActionService = new PostgresOwnerPendingActionService(postgres.sql, {
+    cursorSigningKey: createHmac(
+      "sha256",
+      Buffer.from(environment.COMMUNITY_CURSOR_SIGNING_KEY, "utf8"),
+    )
+      .update("alphanet.owner-pending-action.cursor.v1", "utf8")
+      .digest(),
     pendingActionKeyRing: {
       currentVersion: environment.PENDING_ACTION_ENCRYPTION_KEY_VERSION,
       keys: pendingActionKeys,
@@ -127,6 +142,7 @@ async function start(): Promise<void> {
       environment: environment.NODE_ENV,
       internalSsrRequestSecret: environment.SSR_INTERNAL_REQUEST_SECRET,
       logger,
+      ownerPendingActionService,
       pendingActionStatusService,
       researchWriteService,
       trustedProxyCidrs: environment.API_TRUSTED_PROXY_CIDRS,

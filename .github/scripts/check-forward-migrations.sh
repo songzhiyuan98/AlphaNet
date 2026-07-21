@@ -239,6 +239,379 @@ END;
 $$;
 COMMIT;
 SQL
+
+# Pause this upgrade at the published research-core boundary so 000007 proves
+# that it backfills a real 000006 PendingAction whose resource_id still carries
+# the legacy action identity.
+for migration in \
+  000005_agent_identity_hardening.up.sql \
+  000006_community_research_core.up.sql; do
+  ln -s \
+    "${full_migrations_dir}/${migration}" \
+    "${published_agent_migrations_dir}/${migration}"
+done
+run_migrations "${published_agent_database}" "${published_agent_migrations_dir}"
+PGDATABASE="${published_agent_database}" psql -X --set=ON_ERROR_STOP=1 <<'SQL'
+BEGIN;
+DO $$
+DECLARE
+  approved_action_id uuid;
+  approved_audit_id uuid;
+  approved_expires_at timestamptz;
+  approved_fixture_index integer;
+  approved_fixture_key text;
+  approved_fixture_requested_at timestamptz;
+  approved_idempotency_id uuid;
+  approved_next_attempt_at timestamptz;
+  approved_outbox_id uuid;
+  legacy_action_id uuid := gen_random_uuid();
+  legacy_actor_id uuid;
+  legacy_agent_id uuid;
+  legacy_audit_id uuid := gen_random_uuid();
+  legacy_credential_id uuid;
+  legacy_idempotency_id uuid := gen_random_uuid();
+  legacy_outbox_id uuid := gen_random_uuid();
+  legacy_owner_id uuid;
+  legacy_policy_id uuid;
+  legacy_policy_version bigint;
+  legacy_request_digest bytea := digest(
+    'forward-migration-pending-action',
+    'sha256'
+  );
+BEGIN
+  SELECT
+    actor.id,
+    actor.owner_id,
+    agent.id,
+    credential.id,
+    policy.id,
+    policy.version
+  INTO STRICT
+    legacy_actor_id,
+    legacy_owner_id,
+    legacy_agent_id,
+    legacy_credential_id,
+    legacy_policy_id,
+    legacy_policy_version
+  FROM platform.actors AS actor
+  JOIN platform.agents AS agent ON agent.actor_id = actor.id
+  JOIN platform.credentials AS credential ON credential.agent_id = agent.id
+  JOIN platform.agent_policies AS policy
+    ON policy.agent_id = agent.id
+   AND policy.is_active
+  WHERE actor.handle = 'forward.migration-agent'
+    AND credential.name = 'CI legacy static key';
+
+  INSERT INTO platform.idempotency_records (
+    id,
+    principal_scope_key,
+    owner_id,
+    agent_id,
+    actor_id,
+    credential_id,
+    operation,
+    idempotency_key,
+    request_digest,
+    status,
+    expires_at
+  )
+  VALUES (
+    legacy_idempotency_id,
+    'credential:' || legacy_credential_id::text,
+    legacy_owner_id,
+    legacy_agent_id,
+    legacy_actor_id,
+    legacy_credential_id,
+    'create_post',
+    'forward-migration-pending-action',
+    legacy_request_digest,
+    'in_progress',
+    clock_timestamp() + interval '8 days'
+  );
+
+  INSERT INTO system.outbox_events (
+    id,
+    aggregate_type,
+    aggregate_id,
+    aggregate_sequence,
+    event_type,
+    payload
+  )
+  VALUES (
+    legacy_outbox_id,
+    'pending_action',
+    legacy_action_id,
+    1,
+    'action.pending_approval',
+    jsonb_build_object('action_id', legacy_action_id)
+  );
+
+  INSERT INTO platform.action_logs (
+    id,
+    event_class,
+    actor_id,
+    actor_kind,
+    owner_id,
+    agent_id,
+    credential_id,
+    channel,
+    authorization_snapshot,
+    action,
+    target_type,
+    target_id,
+    decision,
+    outcome,
+    outbox_event_id,
+    policy_version,
+    request_id,
+    reason_code
+  )
+  VALUES (
+    legacy_audit_id,
+    'domain_write',
+    legacy_actor_id,
+    'agent',
+    legacy_owner_id,
+    legacy_agent_id,
+    legacy_credential_id,
+    'migration',
+    jsonb_build_object('scope', 'content:write'),
+    'content.create_post',
+    'pending_action',
+    legacy_action_id,
+    'require_approval',
+    'pending',
+    legacy_outbox_id,
+    legacy_policy_version,
+    'forward-migration-pending-action',
+    'assisted_policy'
+  );
+
+  INSERT INTO platform.pending_actions (
+    id,
+    owner_id,
+    agent_id,
+    credential_id,
+    principal_scope_key,
+    operation,
+    normalized_input_ciphertext,
+    normalized_input_nonce,
+    normalized_input_key_version,
+    input_digest,
+    idempotency_key,
+    idempotency_record_id,
+    decision_id,
+    policy_id,
+    policy_version,
+    policy_snapshot,
+    approval_summary,
+    expires_at,
+    audit_id
+  )
+  VALUES (
+    legacy_action_id,
+    legacy_owner_id,
+    legacy_agent_id,
+    legacy_credential_id,
+    'credential:' || legacy_credential_id::text,
+    'create_post',
+    decode(repeat('ab', 48), 'hex'),
+    decode(repeat('cd', 12), 'hex'),
+    1,
+    legacy_request_digest,
+    'forward-migration-pending-action',
+    legacy_idempotency_id,
+    gen_random_uuid(),
+    legacy_policy_id,
+    legacy_policy_version,
+    jsonb_build_object('decision', 'require_approval', 'layers', '[]'::jsonb),
+    'Create one post after Owner approval.',
+    clock_timestamp() + interval '1 day',
+    legacy_audit_id
+  );
+
+  UPDATE platform.idempotency_records
+  SET status = 'pending_approval',
+      response_code = 202,
+      response_body = jsonb_build_object('status', 'pending_approval'),
+      resource_id = legacy_action_id
+  WHERE id = legacy_idempotency_id;
+
+  -- 000006 allowed both approved scheduling shapes below. Keep real rows at
+  -- that published boundary so 000007 must normalize them before installing
+  -- its stricter approved-state and time-order constraints.
+  FOR approved_fixture_index IN 1..2 LOOP
+    approved_action_id := gen_random_uuid();
+    approved_audit_id := gen_random_uuid();
+    approved_idempotency_id := gen_random_uuid();
+    approved_outbox_id := gen_random_uuid();
+    approved_fixture_key := CASE approved_fixture_index
+      WHEN 1 THEN 'forward-migration-approved-null'
+      ELSE 'forward-migration-approved-late'
+    END;
+    approved_fixture_requested_at := clock_timestamp();
+    approved_expires_at := approved_fixture_requested_at + interval '1 day';
+    approved_next_attempt_at := CASE approved_fixture_index
+      WHEN 1 THEN NULL
+      ELSE approved_expires_at + interval '1 hour'
+    END;
+
+    INSERT INTO platform.idempotency_records (
+      id,
+      principal_scope_key,
+      owner_id,
+      agent_id,
+      actor_id,
+      credential_id,
+      operation,
+      idempotency_key,
+      request_digest,
+      status,
+      expires_at
+    )
+    VALUES (
+      approved_idempotency_id,
+      'credential:' || legacy_credential_id::text,
+      legacy_owner_id,
+      legacy_agent_id,
+      legacy_actor_id,
+      legacy_credential_id,
+      'create_post',
+      approved_fixture_key,
+      digest(approved_fixture_key, 'sha256'),
+      'in_progress',
+      approved_fixture_requested_at + interval '8 days'
+    );
+
+    INSERT INTO system.outbox_events (
+      id,
+      aggregate_type,
+      aggregate_id,
+      aggregate_sequence,
+      event_type,
+      payload
+    )
+    VALUES (
+      approved_outbox_id,
+      'pending_action',
+      approved_action_id,
+      1,
+      'action.pending_approval',
+      jsonb_build_object('action_id', approved_action_id)
+    );
+
+    INSERT INTO platform.action_logs (
+      id,
+      event_class,
+      actor_id,
+      actor_kind,
+      owner_id,
+      agent_id,
+      credential_id,
+      channel,
+      authorization_snapshot,
+      action,
+      target_type,
+      target_id,
+      decision,
+      outcome,
+      outbox_event_id,
+      policy_version,
+      request_id,
+      reason_code
+    )
+    VALUES (
+      approved_audit_id,
+      'domain_write',
+      legacy_actor_id,
+      'agent',
+      legacy_owner_id,
+      legacy_agent_id,
+      legacy_credential_id,
+      'migration',
+      jsonb_build_object('scope', 'content:write'),
+      'content.create_post',
+      'pending_action',
+      approved_action_id,
+      'require_approval',
+      'pending',
+      approved_outbox_id,
+      legacy_policy_version,
+      approved_fixture_key,
+      'assisted_policy'
+    );
+
+    INSERT INTO platform.pending_actions (
+      id,
+      owner_id,
+      agent_id,
+      credential_id,
+      principal_scope_key,
+      operation,
+      normalized_input_ciphertext,
+      normalized_input_nonce,
+      normalized_input_key_version,
+      input_digest,
+      idempotency_key,
+      idempotency_record_id,
+      decision_id,
+      policy_id,
+      policy_version,
+      policy_snapshot,
+      approval_summary,
+      state,
+      requested_at,
+      expires_at,
+      decided_at,
+      decided_by_owner_id,
+      approval_method,
+      next_attempt_at,
+      audit_id
+    )
+    VALUES (
+      approved_action_id,
+      legacy_owner_id,
+      legacy_agent_id,
+      legacy_credential_id,
+      'credential:' || legacy_credential_id::text,
+      'create_post',
+      decode(repeat('ef', 48), 'hex'),
+      decode(repeat('01', 12), 'hex'),
+      1,
+      digest(approved_fixture_key, 'sha256'),
+      approved_fixture_key,
+      approved_idempotency_id,
+      gen_random_uuid(),
+      legacy_policy_id,
+      legacy_policy_version,
+      jsonb_build_object(
+        'decision',
+        'require_approval',
+        'layers',
+        '[]'::jsonb
+      ),
+      'Create one post after Owner approval.',
+      'approved',
+      approved_fixture_requested_at,
+      approved_expires_at,
+      approved_fixture_requested_at + interval '1 second',
+      legacy_owner_id,
+      'owner_approval',
+      approved_next_attempt_at,
+      approved_audit_id
+    );
+
+    UPDATE platform.idempotency_records
+    SET status = 'pending_approval',
+        response_code = 202,
+        response_body = jsonb_build_object('status', 'pending_approval'),
+        resource_id = approved_action_id
+    WHERE id = approved_idempotency_id;
+  END LOOP;
+END;
+$$;
+COMMIT;
+SQL
 run_migrations "${published_agent_database}" "${full_migrations_dir}"
 PGDATABASE="${published_agent_database}" psql -X --set=ON_ERROR_STOP=1 <<'SQL'
 DO $$
@@ -381,7 +754,7 @@ for database in \
       --set=ON_ERROR_STOP=1 \
       --set=published_agent_database="${published_agent_database}" <<'SQL'
 SELECT
-  (SELECT count(*) FROM system.schema_migrations) = 6
+  (SELECT count(*) FROM system.schema_migrations) = 7
   AND EXISTS (
     SELECT 1
     FROM system.schema_migrations
@@ -394,6 +767,12 @@ SELECT
     WHERE version = '000006'
       AND name = 'community_research_core'
   )
+  AND EXISTS (
+    SELECT 1
+    FROM system.schema_migrations
+    WHERE version = '000007'
+      AND name = 'pending_action_execution'
+  )
   AND to_regclass('platform.owners') IS NOT NULL
   AND to_regclass('platform.agents') IS NOT NULL
   AND to_regclass('platform.credentials') IS NOT NULL
@@ -401,6 +780,35 @@ SELECT
   AND to_regclass('platform.content_revisions') IS NOT NULL
   AND to_regclass('platform.idempotency_records') IS NOT NULL
   AND to_regclass('platform.pending_actions') IS NOT NULL
+  AND to_regclass('platform.pending_action_attempts') IS NOT NULL
+  AND to_regclass('platform.pending_actions_approved_due_idx') IS NOT NULL
+  AND to_regclass('platform.pending_actions_approval_expiry_idx') IS NOT NULL
+  AND to_regclass('platform.pending_actions_lease_reaper_idx') IS NOT NULL
+  AND to_regclass('platform.idempotency_records_pending_action_idx') IS NOT NULL
+  AND (
+    SELECT count(*) = 3
+    FROM information_schema.columns
+    WHERE table_schema = 'platform'
+      AND (
+        (table_name = 'pending_actions'
+          AND column_name IN ('decision_audit_id', 'decision_reason_code'))
+        OR (table_name = 'idempotency_records'
+          AND column_name = 'pending_action_id')
+      )
+  )
+  AND (
+    SELECT count(*) = 5
+    FROM pg_trigger
+    WHERE tgrelid = 'platform.pending_actions'::regclass
+      AND tgname IN (
+        'pending_actions_link_idempotency',
+        'pending_actions_prepare_update',
+        'pending_actions_sync_attempt',
+        'pending_actions_validate_decision_audit',
+        'pending_actions_validate_idempotency_terminal'
+      )
+      AND NOT tgisinternal
+  )
   AND EXISTS (
     SELECT 1
     FROM information_schema.columns
@@ -469,6 +877,37 @@ SELECT
             'aln_v1_' || 'abcdefghijkl' || '_' ||
               'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG'
       )
+      AND EXISTS (
+        SELECT 1
+        FROM platform.idempotency_records AS idempotency
+        JOIN platform.pending_actions AS action
+          ON action.id = idempotency.pending_action_id
+         AND action.idempotency_record_id = idempotency.id
+        WHERE idempotency.idempotency_key =
+            'forward-migration-pending-action'
+          AND idempotency.status = 'pending_approval'
+          AND idempotency.resource_id = action.id
+          AND action.state = 'pending_approval'
+          AND action.decision_reason_code IS NULL
+      )
+      AND (
+        SELECT count(*) = 2
+        FROM platform.idempotency_records AS idempotency
+        JOIN platform.pending_actions AS action
+          ON action.id = idempotency.pending_action_id
+         AND action.idempotency_record_id = idempotency.id
+        WHERE idempotency.idempotency_key IN (
+            'forward-migration-approved-null',
+            'forward-migration-approved-late'
+          )
+          AND idempotency.status = 'pending_approval'
+          AND idempotency.resource_id = action.id
+          AND action.state = 'approved'
+          AND action.decision_reason_code = 'owner_approved'
+          AND action.next_attempt_at IS NOT NULL
+          AND action.next_attempt_at >= action.requested_at
+          AND action.next_attempt_at < action.expires_at
+      )
     )
   );
 SQL
@@ -479,4 +918,4 @@ SQL
   fi
 done
 
-echo "Empty, Owner-schema, and published Agent-v1 paths all reach the research-core schema."
+echo "Empty, Owner-schema, and published Agent-v1 paths all reach the PendingAction execution schema."

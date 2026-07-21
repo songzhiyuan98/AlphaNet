@@ -1,6 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 
-import type { PostgresClient } from "@alphanet/database";
+import { appendOutboxEvent, type PostgresClient } from "@alphanet/database";
 import type postgres from "postgres";
 
 import { evaluateAgentOperation, type AgentOperationEvaluation } from "./agent-policy.js";
@@ -14,9 +14,19 @@ import {
   COMMUNITY_RESEARCH_MIGRATION_CHECKSUM,
 } from "./community-directory.js";
 import {
+  decryptPendingCommand,
   encryptPendingCommand,
+  PendingCommandCodecError,
   type PendingCommandKeyRing,
 } from "./pending-command-codec.js";
+import type {
+  FencedPendingAction,
+  PendingActionCommittedState,
+  PendingActionExecutionClaim,
+  PendingActionExecutionSuccessInput,
+  PendingActionExecutionSuccessResult,
+} from "./pending-action-execution.js";
+import { PENDING_ACTION_STATES, type PendingActionState } from "./pending-action.js";
 import {
   digestResearchCommand,
   digestResearchCommandBytes,
@@ -27,6 +37,7 @@ import {
   type NormalizedResearchCommand,
   type ReplyCommandInput,
 } from "./research-command.js";
+import { PENDING_ACTION_EXECUTION_MIGRATION_CHECKSUM } from "./schema-migrations.js";
 
 const BODY_BYTES_LIMIT = 160 * 1_024;
 const COMMAND_BYTES_LIMIT = 1_024 * 1_024;
@@ -37,6 +48,26 @@ const MAX_PUBLIC_NODE_BYTES = 768 * 1_024;
 const SOURCE_METADATA_BYTES_LIMIT = 128 * 1_024;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const PENDING_ACTION_STATE_SET = new Set<string>(PENDING_ACTION_STATES);
+const RESEARCH_WRITE_ERROR_CODE_SET = new Set<string>([
+  "ACTION_CANCELLED",
+  "ACTION_EXECUTION_FAILED",
+  "ACTION_EXPIRED",
+  "ACTION_INVALIDATED",
+  "ACTION_REJECTED",
+  "AUTHORIZATION_CONTEXT_STALE",
+  "COMMUNITY_NOT_FOUND",
+  "COMMUNITY_RESTRICTED",
+  "CONTENT_NOT_FOUND",
+  "IDEMPOTENCY_CONFLICT",
+  "IDEMPOTENCY_IN_PROGRESS",
+  "IDEMPOTENCY_RESULT_CORRUPT",
+  "POLICY_DENIED",
+  "RATE_LIMITED",
+  "REPLIES_CLOSED",
+  "SCOPE_REQUIRED",
+  "VALIDATION_ERROR",
+] satisfies ResearchWriteErrorCode[]);
 
 const DEFAULT_POSTING_RULES: CommunityPostingRules = {
   allowedContent: [
@@ -58,6 +89,11 @@ export type ResearchWriteStatus = "succeeded" | "pending_approval" | "denied" | 
 export type ResearchWriteOperation = "create_post" | "reply_to_content";
 
 export type ResearchWriteErrorCode =
+  | "ACTION_CANCELLED"
+  | "ACTION_EXECUTION_FAILED"
+  | "ACTION_EXPIRED"
+  | "ACTION_INVALIDATED"
+  | "ACTION_REJECTED"
   | "AUTHORIZATION_CONTEXT_STALE"
   | "COMMUNITY_NOT_FOUND"
   | "COMMUNITY_RESTRICTED"
@@ -148,7 +184,7 @@ export interface ResearchPendingActionSummary {
   operation: ResearchWriteOperation;
   policyVersion: string;
   requestedAt: Date;
-  state: "pending_approval";
+  state: PendingActionState;
 }
 
 export interface ResearchWriteOutcome {
@@ -173,6 +209,47 @@ export interface ResearchWriteService {
     input: ReplyResearchWriteInput,
     request: ResearchWriteRequestContext,
   ): Promise<ResearchWriteOutcome>;
+}
+
+export type ApprovedResearchExecutionDisposition = "invalidate" | "retry";
+
+export class ApprovedResearchExecutionError extends Error {
+  readonly code: "APPROVED_ACTION_CONTEXT_INVALID" | "APPROVED_ACTION_RATE_LIMITED";
+  readonly disposition: ApprovedResearchExecutionDisposition;
+  readonly retryAfterMs: number | null;
+
+  constructor(
+    code: "APPROVED_ACTION_CONTEXT_INVALID" | "APPROVED_ACTION_RATE_LIMITED",
+    options: { retryAfterMs?: number | null | undefined } = {},
+  ) {
+    super(
+      code === "APPROVED_ACTION_RATE_LIMITED"
+        ? "The approved action must be retried later."
+        : "The approved action is no longer valid.",
+    );
+    this.name = "ApprovedResearchExecutionError";
+    this.code = code;
+    this.disposition = code === "APPROVED_ACTION_RATE_LIMITED" ? "retry" : "invalidate";
+    this.retryAfterMs = options.retryAfterMs ?? null;
+  }
+}
+
+export interface ApprovedResearchExecutionRepository {
+  finalizeSucceeded(
+    transaction: TransactionSql,
+    claim: PendingActionExecutionClaim,
+    input: PendingActionExecutionSuccessInput,
+  ): Promise<PendingActionExecutionSuccessResult>;
+  withFencedClaim<T>(
+    claim: PendingActionExecutionClaim,
+    callback: (transaction: TransactionSql, action: FencedPendingAction) => Promise<T>,
+  ): Promise<T>;
+}
+
+export interface ApprovedResearchExecutionResult {
+  action: PendingActionCommittedState;
+  content: CreatePostResearchResult | ReplyResearchResult;
+  resolvedOutboxEventId: string;
 }
 
 export interface PostgresResearchWriteOptions {
@@ -282,6 +359,14 @@ interface PreparedRevision {
   publicNodeBytes: number;
 }
 
+interface PersistedResearchContent {
+  contentId: string;
+  outboxId: string;
+  result: CreatePostResearchResult | ReplyResearchResult;
+  revisionId: string;
+  rootContentId: string;
+}
+
 interface ProtectedActionIntentWindow {
   active_pending_count: number;
   active_retry_at: Date | null;
@@ -302,7 +387,7 @@ interface PersistedOutcome {
     operation: ResearchWriteOperation;
     policy_version: string;
     requested_at: string;
-    state: "pending_approval";
+    state: PendingActionState;
   };
   result: null | {
     content_id: string;
@@ -320,6 +405,12 @@ interface ResearchWriteDispatchState {
 
 function statusForError(code: ResearchWriteErrorCode): number {
   switch (code) {
+    case "ACTION_CANCELLED":
+    case "ACTION_EXECUTION_FAILED":
+    case "ACTION_EXPIRED":
+    case "ACTION_INVALIDATED":
+    case "ACTION_REJECTED":
+      return 409;
     case "AUTHORIZATION_CONTEXT_STALE":
       return 401;
     case "COMMUNITY_NOT_FOUND":
@@ -344,6 +435,18 @@ function statusForError(code: ResearchWriteErrorCode): number {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(
+  value: Readonly<Record<string, unknown>>,
+  expected: readonly string[],
+): boolean {
+  const actual = Object.keys(value).sort();
+  const sortedExpected = [...expected].sort();
+  return (
+    actual.length === sortedExpected.length &&
+    actual.every((key, index) => key === sortedExpected[index])
+  );
 }
 
 function isUuid(value: string): boolean {
@@ -544,6 +647,36 @@ function policySnapshot(
   };
 }
 
+function approvedExecutionPolicySnapshot(
+  frozenPolicy: Readonly<Record<string, unknown>>,
+  currentAuthorization: AuthorizationRow,
+  currentEvaluation: AgentOperationEvaluation,
+  decisionId: string,
+  decisionAuditId: string,
+): postgres.JSONValue {
+  return {
+    ...(frozenPolicy as Record<string, postgres.JSONValue>),
+    decision: "require_approval",
+    decision_id: decisionId,
+    live_revalidation: {
+      decision: currentEvaluation.decision,
+      defaults_version: currentAuthorization.defaults_version,
+      matched_scope: currentEvaluation.matchedScope,
+      policy_id: currentAuthorization.policy_id,
+      policy_schema_version: currentAuthorization.policy_schema_version,
+      policy_tier: currentAuthorization.policy_tier,
+      policy_version: currentAuthorization.policy_version,
+      reason: currentEvaluation.reason,
+      required_scopes: [...currentEvaluation.requiredScopes],
+      scope_satisfied: currentEvaluation.scopeSatisfied,
+    },
+    owner_approval: {
+      decision_audit_id: decisionAuditId,
+      method: "owner_approval",
+    },
+  };
+}
+
 function errorOutcome(
   operation: ResearchWriteOperation,
   evaluation: AgentOperationEvaluation,
@@ -695,11 +828,30 @@ function parseErrorDetail(value: unknown): ResearchWriteErrorDetail | null {
   if (value === null) return null;
   if (
     !isRecord(value) ||
+    !hasExactKeys(value, ["code", "message", "retryable", "details", "retryAfterMs"]) ||
     typeof value.code !== "string" ||
+    !RESEARCH_WRITE_ERROR_CODE_SET.has(value.code) ||
     typeof value.message !== "string" ||
+    value.message.length < 1 ||
+    value.message.length > 500 ||
     typeof value.retryable !== "boolean" ||
-    !(value.details === null || isRecord(value.details)) ||
-    !(value.retryAfterMs === null || typeof value.retryAfterMs === "number")
+    !(
+      value.details === null ||
+      (isRecord(value.details) &&
+        Object.values(value.details).every(
+          (detail) =>
+            detail === null ||
+            typeof detail === "string" ||
+            typeof detail === "number" ||
+            typeof detail === "boolean",
+        ))
+    ) ||
+    !(
+      value.retryAfterMs === null ||
+      (typeof value.retryAfterMs === "number" &&
+        Number.isSafeInteger(value.retryAfterMs) &&
+        value.retryAfterMs > 0)
+    )
   ) {
     throw corruptIdempotencyResult();
   }
@@ -725,20 +877,43 @@ function parsePersistedOutcome(
     throw corruptIdempotencyResult();
   }
   const operation = expectedOperation;
+  const allowedStatusesByDecision = {
+    allow: new Set<ResearchWriteStatus>(["succeeded", "failed"]),
+    require_approval: new Set<ResearchWriteStatus>([
+      "pending_approval",
+      "succeeded",
+      "denied",
+      "failed",
+    ]),
+    deny: new Set<ResearchWriteStatus>(["denied"]),
+  } as const;
+  if (!allowedStatusesByDecision[value.decision].has(value.status)) {
+    throw corruptIdempotencyResult();
+  }
 
   let result: CreatePostResearchResult | ReplyResearchResult | null = null;
   if (value.result !== null) {
+    const expectedResultKeys =
+      operation === "reply_to_content"
+        ? ["content_id", "revision_id", "resource_version", "root_content_id"]
+        : ["content_id", "revision_id", "resource_version"];
     if (
       !isRecord(value.result) ||
+      !hasExactKeys(value.result, expectedResultKeys) ||
       typeof value.result.content_id !== "string" ||
+      !isUuid(value.result.content_id) ||
       typeof value.result.revision_id !== "string" ||
-      typeof value.result.resource_version !== "number"
+      !isUuid(value.result.revision_id) ||
+      typeof value.result.resource_version !== "number" ||
+      !Number.isSafeInteger(value.result.resource_version) ||
+      value.result.resource_version < 1
     ) {
       throw corruptIdempotencyResult();
     }
     result =
       operation === "reply_to_content"
-        ? typeof value.result.root_content_id === "string"
+        ? typeof value.result.root_content_id === "string" &&
+          isUuid(value.result.root_content_id)
           ? {
               contentId: value.result.content_id,
               revisionId: value.result.revision_id,
@@ -759,27 +934,54 @@ function parsePersistedOutcome(
     const pending = value.pending_action;
     if (
       !isRecord(pending) ||
+      !hasExactKeys(pending, [
+        "id",
+        "operation",
+        "state",
+        "expires_at",
+        "input_digest",
+        "requested_at",
+        "decision_id",
+        "policy_version",
+        "approval_summary",
+      ]) ||
       typeof pending.id !== "string" ||
+      !isUuid(pending.id) ||
       pending.operation !== operation ||
-      pending.state !== "pending_approval" ||
+      !PENDING_ACTION_STATE_SET.has(String(pending.state)) ||
       typeof pending.expires_at !== "string" ||
+      !/(?:Z|[+-]\d{2}:\d{2})$/u.test(pending.expires_at) ||
       typeof pending.input_digest !== "string" ||
+      !/^sha256:[0-9a-f]{64}$/u.test(pending.input_digest) ||
       typeof pending.requested_at !== "string" ||
+      !/(?:Z|[+-]\d{2}:\d{2})$/u.test(pending.requested_at) ||
       typeof pending.decision_id !== "string" ||
+      !isUuid(pending.decision_id) ||
       typeof pending.policy_version !== "string" ||
-      typeof pending.approval_summary !== "string"
+      pending.policy_version.length < 1 ||
+      pending.policy_version.length > 200 ||
+      typeof pending.approval_summary !== "string" ||
+      pending.approval_summary.length < 1 ||
+      pending.approval_summary.length > 2_000 ||
+      pending.approval_summary.trim() !== pending.approval_summary ||
+      /\p{Cc}/u.test(pending.approval_summary)
     ) {
       throw corruptIdempotencyResult();
     }
     const expiresAt = new Date(pending.expires_at);
     const requestedAt = new Date(pending.requested_at);
-    if (Number.isNaN(expiresAt.valueOf()) || Number.isNaN(requestedAt.valueOf())) {
+    if (
+      Number.isNaN(expiresAt.valueOf()) ||
+      Number.isNaN(requestedAt.valueOf()) ||
+      expiresAt.valueOf() <= requestedAt.valueOf()
+    ) {
       throw corruptIdempotencyResult();
     }
+    const state = pending.state as PendingActionState;
     pendingAction = {
       id: pending.id,
       operation,
-      state: pending.state,
+      state,
       expiresAt,
       inputDigest: pending.input_digest,
       requestedAt,
@@ -789,13 +991,39 @@ function parsePersistedOutcome(
     };
   }
 
+  const error = parseErrorDetail(value.error);
+  if (
+    (value.status === "succeeded" && (result === null || error !== null)) ||
+    (value.status !== "succeeded" && result !== null) ||
+    (value.status === "pending_approval" && (pendingAction === null || error !== null)) ||
+    ((value.status === "denied" || value.status === "failed") && error === null) ||
+    (value.decision !== "require_approval" && pendingAction !== null)
+  ) {
+    throw corruptIdempotencyResult();
+  }
+  if (pendingAction !== null) {
+    const statesByStatus = {
+      pending_approval: new Set<PendingActionState>([
+        "pending_approval",
+        "approved",
+        "executing",
+      ]),
+      succeeded: new Set<PendingActionState>(["succeeded"]),
+      denied: new Set<PendingActionState>(["rejected", "expired", "cancelled"]),
+      failed: new Set<PendingActionState>(["failed", "invalidated"]),
+    } as const;
+    if (!statesByStatus[value.status].has(pendingAction.state)) {
+      throw corruptIdempotencyResult();
+    }
+  }
+
   return {
     operation,
     decision: value.decision,
     status: value.status,
     result,
     pendingAction,
-    error: parseErrorDetail(value.error),
+    error,
     replayed: true,
   };
 }
@@ -941,6 +1169,13 @@ export class PostgresResearchWriteService implements ResearchWriteService {
               and name = 'community_research_core'
               and checksum = ${COMMUNITY_RESEARCH_MIGRATION_CHECKSUM}
           )
+          and exists (
+            select 1
+            from system.schema_migrations
+            where version = '000007'
+              and name = 'pending_action_execution'
+              and checksum = ${PENDING_ACTION_EXECUTION_MIGRATION_CHECKSUM}
+          )
           and to_regclass('platform.content_items') is not null
           and to_regclass('platform.content_revisions') is not null
           and to_regclass('platform.idempotency_records') is not null
@@ -966,6 +1201,240 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     });
     if (rows[0]?.ready !== true) {
       throw new Error("Research write schema is not ready");
+    }
+  }
+
+  async executeApprovedAction(
+    repository: ApprovedResearchExecutionRepository,
+    claim: PendingActionExecutionClaim,
+  ): Promise<ApprovedResearchExecutionResult> {
+    try {
+      return await repository.withFencedClaim(
+        claim,
+        async (transaction, frozenAction) => {
+          await transaction`set local statement_timeout = '10s'`;
+          if (
+            (frozenAction.operation !== "create_post" &&
+              frozenAction.operation !== "reply_to_content") ||
+            frozenAction.operation !== claim.operation ||
+            frozenAction.expectedVersion !== null
+          ) {
+            throw new ApprovedResearchExecutionError("APPROVED_ACTION_CONTEXT_INVALID");
+          }
+
+          const originalPolicy = frozenAction.policySnapshot;
+          const decisionAuditId =
+            typeof frozenAction.decisionAuditId === "string" &&
+            isUuid(frozenAction.decisionAuditId)
+              ? frozenAction.decisionAuditId
+              : null;
+          const originalDecisionId =
+            isRecord(originalPolicy) &&
+            originalPolicy.decision === "require_approval" &&
+            typeof originalPolicy.decision_id === "string" &&
+            originalPolicy.decision_id === frozenAction.decisionId &&
+            originalPolicy.policy_id === frozenAction.policyId &&
+            typeof originalPolicy.policy_version === "string" &&
+            originalPolicy.policy_version === frozenAction.policyVersion &&
+            isUuid(frozenAction.decisionId) &&
+            decisionAuditId !== null
+              ? frozenAction.decisionId
+              : null;
+          if (
+            originalDecisionId === null ||
+            decisionAuditId === null ||
+            !isRecord(originalPolicy)
+          ) {
+            throw new ApprovedResearchExecutionError("APPROVED_ACTION_CONTEXT_INVALID");
+          }
+
+          const inputDigest = `sha256:${frozenAction.inputDigest.toString("hex")}`;
+          const command = decryptPendingCommand(
+            frozenAction.normalizedInput,
+            {
+              actionId: frozenAction.actionId,
+              agentId: frozenAction.agentId,
+              credentialId: frozenAction.credentialId,
+              inputDigest,
+              operation: frozenAction.operation,
+              ownerId: frozenAction.ownerId,
+            },
+            this.#keyRing,
+          );
+          validateCommandBudgets(command);
+          if (
+            !sameDigest(digestResearchCommandBytes(command), frozenAction.inputDigest) ||
+            command.operation !== frozenAction.operation ||
+            frozenAction.targetId !== intendedTargetId(command) ||
+            frozenAction.targetType !==
+              (command.operation === "create_post" ? "community" : "content")
+          ) {
+            throw new ApprovedResearchExecutionError("APPROVED_ACTION_CONTEXT_INVALID");
+          }
+
+          const clocks = await transaction<{ database_now: Date }[]>`
+            select clock_timestamp() as database_now
+          `;
+          const now = clocks[0]?.database_now;
+          if (!(now instanceof Date) || Number.isNaN(now.valueOf())) {
+            throw new Error("The database did not return a valid execution clock.");
+          }
+
+          const authorization = await this.#loadApprovedAuthorization(
+            transaction,
+            frozenAction,
+          );
+          const evaluation = evaluateAgentOperation({
+            credentialPolicyCeiling: authorization.credential_policy_ceiling,
+            operation: command.operation,
+            policyTier: authorization.policy_tier,
+            scopes: authorization.credential_scopes,
+          });
+          if (!evaluation.scopeSatisfied || evaluation.decision === "deny") {
+            throw new ApprovedResearchExecutionError("APPROVED_ACTION_CONTEXT_INVALID");
+          }
+
+          let replyTarget: ReplyTarget | null = null;
+          if (command.operation === "create_post") {
+            const targetIds = [
+              command.primaryCommunityId,
+              ...command.additionalCommunityIds,
+            ];
+            let admissions = await this.#inspectCommunities(transaction, targetIds);
+            this.#enforceCommunityRules(
+              admissions,
+              "investment-research",
+              command.sourceLinks.length > 0,
+              false,
+            );
+            await this.#materializeCatalogCommunities(transaction, admissions);
+            admissions = await this.#inspectCommunities(transaction, targetIds);
+            if (
+              admissions.some((admission) => admission.materialization !== "materialized")
+            ) {
+              throw new ResearchWriteError(
+                "COMMUNITY_NOT_FOUND",
+                "The catalog Community could not be materialized safely.",
+              );
+            }
+            this.#enforceCommunityRules(
+              admissions,
+              "investment-research",
+              command.sourceLinks.length > 0,
+              false,
+            );
+            await this.#enforcePostRates(
+              transaction,
+              authorization.actor_id,
+              admissions,
+              now,
+            );
+          } else {
+            replyTarget = await this.#loadReplyTarget(
+              transaction,
+              command.parentContentId,
+            );
+            const admissions = await this.#inspectCommunities(
+              transaction,
+              replyTarget.communityIds,
+            );
+            this.#enforceCommunityRules(
+              admissions,
+              "discussion",
+              command.sourceLinks.length > 0,
+              true,
+            );
+          }
+
+          const facts = await this.#resolveWriteFacts(transaction, command);
+          const preparedRevision = prepareRevision(command);
+          const persisted = await this.#insertResearchContent(transaction, {
+            authorization,
+            command,
+            facts,
+            now,
+            preparedRevision,
+            replyTarget,
+          });
+          await this.#writeActionLog(transaction, {
+            action: actionName(command.operation),
+            actorId: authorization.actor_id,
+            after: {
+              content_id: persisted.contentId,
+              pending_action_id: frozenAction.actionId,
+              resource_version: 1,
+              revision_id: persisted.revisionId,
+              root_content_id: persisted.rootContentId,
+            },
+            agentId: frozenAction.agentId,
+            approvalMethod: "owner_approval",
+            approvedByOwnerId: frozenAction.ownerId,
+            auditId: this.#newId("audit_id"),
+            authenticationAssurance: "owner_approval_record",
+            channel: "worker",
+            credentialId: frozenAction.credentialId,
+            decision: "require_approval",
+            decisionId: originalDecisionId,
+            errorCode: null,
+            evaluation,
+            outcome: "succeeded",
+            occurredAt: now,
+            outboxId: persisted.outboxId,
+            ownerId: frozenAction.ownerId,
+            policy: authorization,
+            policySnapshotOverride: approvedExecutionPolicySnapshot(
+              originalPolicy,
+              authorization,
+              evaluation,
+              originalDecisionId,
+              decisionAuditId,
+            ),
+            requestId:
+              `worker:pending-action:${frozenAction.actionId}:` +
+              `attempt:${frozenAction.attemptCount}`,
+            targetId: persisted.contentId,
+            targetType: "content",
+          });
+
+          const terminal = await repository.finalizeSucceeded(transaction, claim, {
+            correlatedOutboxEventId: persisted.outboxId,
+            resourceId: persisted.contentId,
+            result:
+              command.operation === "create_post"
+                ? {
+                    content_id: persisted.result.contentId,
+                    resource_version: persisted.result.resourceVersion,
+                    revision_id: persisted.result.revisionId,
+                  }
+                : {
+                    content_id: persisted.result.contentId,
+                    resource_version: persisted.result.resourceVersion,
+                    revision_id: persisted.result.revisionId,
+                    root_content_id: (persisted.result as ReplyResearchResult)
+                      .rootContentId,
+                  },
+          });
+          return {
+            action: terminal.action,
+            content: persisted.result,
+            resolvedOutboxEventId: terminal.resolvedOutboxEventId,
+          };
+        },
+      );
+    } catch (error) {
+      if (error instanceof ApprovedResearchExecutionError) throw error;
+      if (error instanceof PendingCommandCodecError) {
+        throw new ApprovedResearchExecutionError("APPROVED_ACTION_CONTEXT_INVALID");
+      }
+      if (error instanceof ResearchWriteError) {
+        if (error.code === "RATE_LIMITED") {
+          throw new ApprovedResearchExecutionError("APPROVED_ACTION_RATE_LIMITED", {
+            retryAfterMs: error.retryAfterMs,
+          });
+        }
+        throw new ApprovedResearchExecutionError("APPROVED_ACTION_CONTEXT_INVALID");
+      }
+      throw error;
     }
   }
 
@@ -1374,13 +1843,66 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         and actor.status = 'active'
         and actor.deleted_at is null
       limit 1
-      for share of credential, agent, actor, policy
+      for share of credential, agent, actor, owner, policy
     `;
     const row = rows[0];
     if (!row) {
       throw new ResearchWriteError(
         "AUTHORIZATION_CONTEXT_STALE",
         "The authenticated Agent authority context is no longer valid.",
+      );
+    }
+    return row;
+  }
+
+  async #loadApprovedAuthorization(
+    transaction: TransactionSql,
+    action: FencedPendingAction,
+  ): Promise<AuthorizationRow> {
+    const rows = await transaction<AuthorizationRow[]>`
+      select
+        actor.id as actor_id,
+        credential.scopes as credential_scopes,
+        credential.policy_ceiling as credential_policy_ceiling,
+        policy.id as policy_id,
+        policy.tier as policy_tier,
+        policy.defaults_version,
+        policy.policy_schema_version,
+        policy.version::text as policy_version
+      from platform.credentials as credential
+      join platform.agents as agent
+        on agent.id = credential.agent_id
+       and agent.owner_id = credential.owner_id
+      join platform.actors as actor
+        on actor.id = agent.actor_id
+       and actor.owner_id = agent.owner_id
+      join platform.owners as owner on owner.id = credential.owner_id
+      join platform.agent_policies as policy
+        on policy.agent_id = agent.id
+       and policy.is_active
+      where credential.id = ${action.credentialId}
+        and credential.owner_id = ${action.ownerId}
+        and credential.agent_id = ${action.agentId}
+        and credential.revoked_at is null
+        and (
+          credential.expires_at is null
+          or credential.expires_at > clock_timestamp()
+        )
+        and owner.status = 'active'
+        and owner.email_verified_at is not null
+        and owner.deleted_at is null
+        and agent.status = 'active'
+        and agent.deleted_at is null
+        and actor.status = 'active'
+        and actor.deleted_at is null
+      limit 1
+      for share of credential, agent, actor, owner, policy
+    `;
+    const row = rows[0];
+    if (!row) {
+      throw new ResearchWriteError(
+        "AUTHORIZATION_CONTEXT_STALE",
+        "The approved Agent authority is no longer valid.",
       );
     }
     return row;
@@ -2060,7 +2582,6 @@ export class PostgresResearchWriteService implements ResearchWriteService {
   ): Promise<ResearchWriteOutcome> {
     const actionId = this.#newId("pending_action_id");
     const auditId = this.#newId("audit_id");
-    const outboxId = this.#newId("outbox_event_id");
     const expiresAt = new Date(input.now.valueOf() + this.#pendingActionTtlMs);
     const approvalSummary =
       input.command.operation === "create_post"
@@ -2082,12 +2603,12 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     const targetType =
       input.command.operation === "create_post" ? "community" : "content";
 
-    await this.#writeOutboxEvent(transaction, {
+    const { id: outboxId } = await appendOutboxEvent(transaction, {
       aggregateId: actionId,
       aggregateType: "pending_action",
-      eventId: outboxId,
       eventType: "action.pending_approval",
-      now: input.now,
+      eventVersion: 1,
+      occurredAt: input.now,
       payload: {
         action_id: actionId,
         actor_id: input.authorization.actor_id,
@@ -2207,7 +2728,8 @@ export class PostgresResearchWriteService implements ResearchWriteService {
           response_body = ${transaction.json(
             serializeOutcome(outcome) as unknown as postgres.JSONValue,
           )},
-          resource_id = ${actionId},
+          pending_action_id = ${actionId},
+          resource_id = null,
           updated_at = ${input.now}
       where id = ${input.idempotencyId}
         and status = 'in_progress'
@@ -2216,27 +2738,19 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     return outcome;
   }
 
-  async #commitAutonomousContent(
+  async #insertResearchContent(
     transaction: TransactionSql,
     input: {
       authorization: AuthorizationRow;
-      channel: string;
       command: NormalizedResearchCommand;
-      context: AgentCredentialContext;
-      decisionId: string;
-      evaluation: AgentOperationEvaluation;
       facts: ResolvedWriteFacts;
-      idempotencyId: string;
       now: Date;
       preparedRevision: PreparedRevision;
       replyTarget: ReplyTarget | null;
-      requestId: string;
     },
-  ): Promise<ResearchWriteOutcome> {
+  ): Promise<PersistedResearchContent> {
     const contentId = this.#newId("content_id");
     const revisionId = this.#newId("revision_id");
-    const outboxId = this.#newId("outbox_event_id");
-    const auditId = this.#newId("audit_id");
     const postCommand = input.command.operation === "create_post" ? input.command : null;
     const isPost = postCommand !== null;
     if (!isPost && input.replyTarget === null) {
@@ -2430,12 +2944,12 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     const communityIds = isPost
       ? [postCommand.primaryCommunityId, ...postCommand.additionalCommunityIds]
       : input.replyTarget!.communityIds;
-    await this.#writeOutboxEvent(transaction, {
+    const { id: outboxId } = await appendOutboxEvent(transaction, {
       aggregateId: contentId,
       aggregateType: "content",
-      eventId: outboxId,
       eventType: isPost ? "content.published" : "content.reply",
-      now: input.now,
+      eventVersion: 1,
+      occurredAt: input.now,
       payload: {
         actor_id: input.authorization.actor_id,
         community_ids: communityIds,
@@ -2448,14 +2962,58 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         topic_ids: input.facts.topicIds,
       },
     });
+
+    const result: CreatePostResearchResult | ReplyResearchResult = isPost
+      ? { contentId, resourceVersion: 1, revisionId }
+      : {
+          contentId,
+          resourceVersion: 1,
+          revisionId,
+          rootContentId: rootId,
+        };
+    return {
+      contentId,
+      outboxId,
+      result,
+      revisionId,
+      rootContentId: rootId,
+    };
+  }
+
+  async #commitAutonomousContent(
+    transaction: TransactionSql,
+    input: {
+      authorization: AuthorizationRow;
+      channel: string;
+      command: NormalizedResearchCommand;
+      context: AgentCredentialContext;
+      decisionId: string;
+      evaluation: AgentOperationEvaluation;
+      facts: ResolvedWriteFacts;
+      idempotencyId: string;
+      now: Date;
+      preparedRevision: PreparedRevision;
+      replyTarget: ReplyTarget | null;
+      requestId: string;
+    },
+  ): Promise<ResearchWriteOutcome> {
+    const persisted = await this.#insertResearchContent(transaction, {
+      authorization: input.authorization,
+      command: input.command,
+      facts: input.facts,
+      now: input.now,
+      preparedRevision: input.preparedRevision,
+      replyTarget: input.replyTarget,
+    });
+    const auditId = this.#newId("audit_id");
     await this.#writeActionLog(transaction, {
       action: actionName(input.command.operation),
       actorId: input.authorization.actor_id,
       after: {
-        content_id: contentId,
+        content_id: persisted.contentId,
         resource_version: 1,
-        revision_id: revisionId,
-        root_content_id: rootId,
+        revision_id: persisted.revisionId,
+        root_content_id: persisted.rootContentId,
       },
       agentId: input.context.agent.id,
       auditId,
@@ -2467,29 +3025,21 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       evaluation: input.evaluation,
       outcome: "succeeded",
       occurredAt: input.now,
-      outboxId,
+      outboxId: persisted.outboxId,
       ownerId: input.context.owner.id,
       policy: input.authorization,
       requestId: input.requestId,
-      targetId: contentId,
+      targetId: persisted.contentId,
       targetType: "content",
     });
 
-    const result: CreatePostResearchResult | ReplyResearchResult = isPost
-      ? { contentId, resourceVersion: 1, revisionId }
-      : {
-          contentId,
-          resourceVersion: 1,
-          revisionId,
-          rootContentId: rootId,
-        };
     const outcome: ResearchWriteOutcome = {
       decision: "allow",
       error: null,
       operation: input.command.operation,
       pendingAction: null,
       replayed: false,
-      result,
+      result: persisted.result,
       status: "succeeded",
     };
     await this.#finalizeIdempotency(
@@ -2498,49 +3048,10 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       "succeeded",
       201,
       outcome,
-      contentId,
+      persisted.contentId,
       input.now,
     );
     return outcome;
-  }
-
-  async #writeOutboxEvent(
-    transaction: TransactionSql,
-    event: {
-      aggregateId: string;
-      aggregateType: "content" | "pending_action";
-      eventId: string;
-      eventType: "action.pending_approval" | "content.published" | "content.reply";
-      now: Date;
-      payload: postgres.JSONValue;
-    },
-  ): Promise<void> {
-    await transaction`
-      insert into system.outbox_events (
-        id,
-        aggregate_type,
-        aggregate_id,
-        aggregate_sequence,
-        event_type,
-        event_version,
-        payload,
-        occurred_at,
-        available_at,
-        created_at
-      )
-      values (
-        ${event.eventId},
-        ${event.aggregateType},
-        ${event.aggregateId},
-        1,
-        ${event.eventType},
-        1,
-        ${transaction.json(event.payload)},
-        ${event.now},
-        ${event.now},
-        ${event.now}
-      )
-    `;
   }
 
   async #writeActionLog(
@@ -2550,7 +3061,10 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       actorId: string;
       after: postgres.JSONValue;
       agentId: string;
+      approvalMethod?: "owner_approval" | "policy_auto" | undefined;
+      approvedByOwnerId?: string | null | undefined;
       auditId: string;
+      authenticationAssurance?: string | undefined;
       channel: string;
       credentialId: string;
       decision: ResearchWriteDecision;
@@ -2562,6 +3076,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       outboxId: string | null;
       ownerId: string;
       policy: AuthorizationRow;
+      policySnapshotOverride?: postgres.JSONValue | undefined;
       reasonCode?: string | undefined;
       requestId: string;
       targetId: string;
@@ -2580,6 +3095,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         credential_id,
         channel,
         approval_method,
+        approved_by_owner_id,
         authentication_assurance,
         authorization_snapshot,
         action,
@@ -2604,10 +3120,12 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         ${event.agentId},
         ${event.credentialId},
         ${event.channel},
-        ${event.decision === "allow" ? "policy_auto" : null},
-        'agent_credential',
+        ${event.approvalMethod ?? (event.decision === "allow" ? "policy_auto" : null)},
+        ${event.approvedByOwnerId ?? null},
+        ${event.authenticationAssurance ?? "agent_credential"},
         ${transaction.json(
-          policySnapshot(event.policy, event.evaluation, event.decisionId),
+          event.policySnapshotOverride ??
+            policySnapshot(event.policy, event.evaluation, event.decisionId),
         )},
         ${event.action},
         ${event.targetType},

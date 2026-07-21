@@ -6,4 +6,5 @@ export * from "./content-write.js";
 export * from "./health.js";
 export * from "./http.js";
 export * from "./owner.js";
+export * from "./owner-action.js";
 export * from "./v1-error.js";

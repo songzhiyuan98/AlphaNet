@@ -12,7 +12,12 @@ import {
   type AgentCredentialContext,
   type AgentPolicyTier,
 } from "../../packages/domain/src/agent-connection.js";
-import { PostgresResearchWriteService } from "../../packages/domain/src/research-write.js";
+import { PostgresOwnerPendingActionService } from "../../packages/domain/src/owner-pending-action.js";
+import { PostgresPendingActionExecutionRepository } from "../../packages/domain/src/pending-action-execution.js";
+import {
+  ApprovedResearchExecutionError,
+  PostgresResearchWriteService,
+} from "../../packages/domain/src/research-write.js";
 
 const databaseUrl = process.env.DATABASE_URL;
 const mustRun = process.env.REQUIRE_INTEGRATION_SERVICES === "true";
@@ -80,15 +85,20 @@ async function withTimeout<T>(
 describeResearchWrite("PostgresResearchWriteService", () => {
   const postgres = createPostgresDependency(databaseUrl ?? "");
   const competingPostgres = createPostgresDependency(databaseUrl ?? "");
+  const pendingActionKeyRing = {
+    currentVersion: 1,
+    keys: { 1: randomBytes(32) },
+  } as const;
   const agentService = new PostgresAgentConnectionService(
     postgres.sql,
     agentConnectionOptions,
   );
   const service = new PostgresResearchWriteService(postgres.sql, {
-    pendingActionKeyRing: {
-      currentVersion: 1,
-      keys: { 1: randomBytes(32) },
-    },
+    pendingActionKeyRing,
+  });
+  const ownerActionService = new PostgresOwnerPendingActionService(postgres.sql, {
+    cursorSigningKey: randomBytes(32),
+    pendingActionKeyRing,
   });
   const competingService = new PostgresResearchWriteService(competingPostgres.sql, {
     pendingActionKeyRing: {
@@ -199,6 +209,25 @@ describeResearchWrite("PostgresResearchWriteService", () => {
           ${ownerId}
         )
       `;
+    });
+  }
+
+  async function claimIsolatedAction(
+    repository: PostgresPendingActionExecutionRepository,
+    actionId: string,
+  ) {
+    return postgres.sql.begin(async (transaction) => {
+      // Other integration files intentionally retain approved schema fixtures.
+      // Lock only those foreign rows so SKIP LOCKED proves that this repository
+      // claims our due action without mutating another test's queue history.
+      await transaction`
+        select id
+        from platform.pending_actions
+        where state = 'approved'
+          and id <> ${actionId}
+        for update
+      `;
+      return repository.claimNext();
     });
   }
 
@@ -807,6 +836,773 @@ describeResearchWrite("PostgresResearchWriteService", () => {
       where id = ${assistedSymbolCandidateId}
     `;
     expect(catalogCommunity).toEqual([{ count: 0 }]);
+  });
+
+  it("executes an Owner-approved Assisted post as one terminal workflow", async () => {
+    const privateMarker = `owner-approved-${randomUUID()}`;
+    const idempotencyKey = `approved-assisted-${randomUUID()}`;
+    const createRequestId = `req-${randomUUID()}`;
+    const detailRequestId = `req-${randomUUID()}`;
+    const approvalRequestId = `req-${randomUUID()}`;
+    const input = {
+      bodyMarkdown: `${privateMarker}: publish only after explicit Owner approval.`,
+      idempotencyKey,
+      primaryCommunityId: generalCommunityId,
+      title: "Owner-approved Assisted research",
+    } as const;
+
+    const pending = await service.createPost(assistedContext, input, {
+      channel: "mcp",
+      requestId: createRequestId,
+    });
+    expect(pending).toMatchObject({
+      decision: "require_approval",
+      error: null,
+      operation: "create_post",
+      pendingAction: {
+        operation: "create_post",
+        state: "pending_approval",
+      },
+      replayed: false,
+      result: null,
+      status: "pending_approval",
+    });
+    const actionId = pending.pendingAction?.id;
+    expectUuid(actionId);
+
+    const detail = await ownerActionService.getAction(
+      assistedContext.owner.id,
+      actionId,
+      { requestId: detailRequestId },
+    );
+    expect(detail).toMatchObject({
+      approvalOutcome: null,
+      command: {
+        bodyMarkdown: input.bodyMarkdown,
+        operation: "create_post",
+        primaryCommunityId: generalCommunityId,
+        title: input.title,
+      },
+      decisionReasonCode: null,
+      id: actionId,
+      publicError: null,
+      state: "pending_approval",
+      terminalAt: null,
+      version: 1,
+    });
+    expect(JSON.stringify(detail)).not.toContain(idempotencyKey);
+
+    const approved = await ownerActionService.approveAction(
+      assistedContext.owner.id,
+      actionId,
+      {
+        expectedVersion: detail.version,
+        reasonCode: "owner_approved",
+        requestId: approvalRequestId,
+      },
+    );
+    expect(approved).toMatchObject({
+      approvalOutcome: "approved",
+      decisionReasonCode: "owner_approved",
+      id: actionId,
+      publicError: null,
+      state: "approved",
+      terminalAt: null,
+      version: 2,
+    });
+
+    const executionRepository = new PostgresPendingActionExecutionRepository(
+      postgres.sql,
+      {
+        leaseOwner: `research-write-integration:${randomUUID()}`,
+        leaseSeconds: 30,
+      },
+    );
+    const claim = await claimIsolatedAction(executionRepository, actionId);
+    if (!claim) {
+      throw new Error("The approved Assisted action was not available to the worker");
+    }
+    expect(claim).toMatchObject({
+      actionId,
+      attemptCount: 1,
+      operation: "create_post",
+      version: "3",
+    });
+
+    const executed = await service.executeApprovedAction(executionRepository, claim);
+    expect(executed.action).toMatchObject({
+      actionId,
+      attemptCount: 1,
+      error: null,
+      idempotencyStatus: "succeeded",
+      operation: "create_post",
+      state: "succeeded",
+      version: "4",
+    });
+    const contentId = executed.content.contentId;
+    const revisionId = executed.content.revisionId;
+    expectUuid(contentId);
+    expectUuid(revisionId);
+    expectUuid(executed.resolvedOutboxEventId);
+    expect(executed.content).toEqual({
+      contentId,
+      resourceVersion: 1,
+      revisionId,
+    });
+    expect(executed.action.resourceId).toBe(contentId);
+    expect(executed.action.result).toEqual({
+      content_id: contentId,
+      resource_version: 1,
+      revision_id: revisionId,
+    });
+    expect(executed.action.terminalAt).toBeInstanceOf(Date);
+
+    const replay = await service.createPost(assistedContext, input, {
+      channel: "rest",
+      requestId: `req-${randomUUID()}`,
+    });
+    expect(replay).toMatchObject({
+      decision: "require_approval",
+      error: null,
+      operation: "create_post",
+      pendingAction: {
+        id: actionId,
+        operation: "create_post",
+        state: "succeeded",
+      },
+      replayed: true,
+      result: executed.content,
+      status: "succeeded",
+    });
+
+    const terminal = await postgres.sql<
+      {
+        action_attempt_count: number;
+        action_audit_id: string;
+        action_completed_at: Date | null;
+        action_decision_audit_id: string;
+        action_error: unknown;
+        action_result: unknown;
+        action_state: string;
+        action_terminal_at: Date | null;
+        action_version: number;
+        idempotency_pending_action_id: string;
+        idempotency_resource_id: string;
+        idempotency_response: unknown;
+        idempotency_response_code: number;
+        idempotency_status: string;
+        idempotency_terminal_at: Date | null;
+      }[]
+    >`
+      select
+        action.state as action_state,
+        action.version::integer as action_version,
+        action.attempt_count as action_attempt_count,
+        action.result as action_result,
+        action.error as action_error,
+        action.completed_at as action_completed_at,
+        action.terminal_at as action_terminal_at,
+        action.audit_id as action_audit_id,
+        action.decision_audit_id as action_decision_audit_id,
+        idempotency.status as idempotency_status,
+        idempotency.response_code as idempotency_response_code,
+        idempotency.response_body as idempotency_response,
+        idempotency.pending_action_id as idempotency_pending_action_id,
+        idempotency.resource_id as idempotency_resource_id,
+        idempotency.terminal_at as idempotency_terminal_at
+      from platform.pending_actions as action
+      inner join platform.idempotency_records as idempotency
+        on idempotency.id = action.idempotency_record_id
+      where action.id = ${actionId}
+    `;
+    expect(terminal).toHaveLength(1);
+    expect(terminal[0]).toMatchObject({
+      action_attempt_count: 1,
+      action_completed_at: expect.any(Date),
+      action_error: null,
+      action_result: {
+        content_id: contentId,
+        resource_version: 1,
+        revision_id: revisionId,
+      },
+      action_state: "succeeded",
+      action_terminal_at: expect.any(Date),
+      action_version: 4,
+      idempotency_pending_action_id: actionId,
+      idempotency_resource_id: contentId,
+      idempotency_response_code: 201,
+      idempotency_status: "succeeded",
+      idempotency_terminal_at: expect.any(Date),
+    });
+    expect(asRecord(terminal[0]?.idempotency_response)).toMatchObject({
+      decision: "require_approval",
+      operation: "create_post",
+      pending_action: { id: actionId, state: "succeeded" },
+      result: {
+        content_id: contentId,
+        resource_version: 1,
+        revision_id: revisionId,
+      },
+      status: "succeeded",
+      version: 1,
+    });
+    expect(terminal[0]?.action_completed_at?.valueOf()).toBe(
+      terminal[0]?.action_terminal_at?.valueOf(),
+    );
+    expect(terminal[0]?.idempotency_terminal_at?.valueOf()).toBe(
+      terminal[0]?.action_terminal_at?.valueOf(),
+    );
+
+    const content = await postgres.sql<
+      {
+        author_actor_id: string;
+        body_markdown: string;
+        content_id: string;
+        current_revision_id: string;
+        lifecycle_state: string;
+        primary_community_id: string;
+        revision_id: string;
+        revision_number: number;
+        title: string;
+        version: number;
+      }[]
+    >`
+      select
+        item.id as content_id,
+        item.author_actor_id,
+        item.primary_community_id,
+        item.current_revision_id,
+        item.lifecycle_state,
+        item.version::integer as version,
+        revision.id as revision_id,
+        revision.revision_number::integer as revision_number,
+        revision.title,
+        revision.body_markdown
+      from platform.content_items as item
+      inner join platform.content_revisions as revision
+        on revision.id = item.current_revision_id
+       and revision.content_id = item.id
+      where item.id = ${contentId}
+    `;
+    expect(content).toEqual([
+      {
+        author_actor_id: assistedContext.agent.actorId,
+        body_markdown: input.bodyMarkdown,
+        content_id: contentId,
+        current_revision_id: revisionId,
+        lifecycle_state: "published",
+        primary_community_id: generalCommunityId,
+        revision_id: revisionId,
+        revision_number: 1,
+        title: input.title,
+        version: 1,
+      },
+    ]);
+
+    const attempt = await postgres.sql<
+      {
+        claim_audit_id: string;
+        error_code: string | null;
+        finish_audit_id: string;
+        finished_at: Date | null;
+        next_attempt_at: Date | null;
+        outcome: string;
+      }[]
+    >`
+      select
+        outcome,
+        error_code,
+        finished_at,
+        next_attempt_at,
+        claim_audit_id,
+        finish_audit_id
+      from platform.pending_action_attempts
+      where action_id = ${actionId}
+        and attempt_number = 1
+    `;
+    expect(attempt).toEqual([
+      {
+        claim_audit_id: expect.any(String),
+        error_code: null,
+        finish_audit_id: expect.any(String),
+        finished_at: expect.any(Date),
+        next_attempt_at: null,
+        outcome: "succeeded",
+      },
+    ]);
+    expectUuid(attempt[0]?.claim_audit_id);
+    expectUuid(attempt[0]?.finish_audit_id);
+
+    const outbox = await postgres.sql<
+      { aggregate_type: string; event_type: string; id: string; payload: unknown }[]
+    >`
+      select id, aggregate_type, event_type, payload
+      from system.outbox_events
+      where (aggregate_type = 'pending_action' and aggregate_id = ${actionId})
+         or (aggregate_type = 'content' and aggregate_id = ${contentId})
+      order by occurred_at, id
+    `;
+    expect(outbox.map(({ event_type }) => event_type).sort()).toEqual([
+      "action.approved",
+      "action.pending_approval",
+      "action.resolved",
+      "content.published",
+    ]);
+    const approvedOutbox = outbox.find(
+      ({ event_type }) => event_type === "action.approved",
+    );
+    const contentOutbox = outbox.find(
+      ({ event_type }) => event_type === "content.published",
+    );
+    const resolvedOutbox = outbox.find(
+      ({ event_type }) => event_type === "action.resolved",
+    );
+    expectUuid(approvedOutbox?.id);
+    expectUuid(contentOutbox?.id);
+    expect(resolvedOutbox?.id);
+    expect(resolvedOutbox?.id).toBe(executed.resolvedOutboxEventId);
+    expect(asRecord(contentOutbox?.payload)).toMatchObject({
+      actor_id: assistedContext.agent.actorId,
+      content_id: contentId,
+      revision_id: revisionId,
+    });
+    expect(asRecord(resolvedOutbox?.payload)).toMatchObject({
+      action_id: actionId,
+      correlated_outbox_event_id: contentOutbox?.id,
+      resource_id: contentId,
+      state: "succeeded",
+    });
+
+    const audits = await postgres.sql<
+      {
+        action: string;
+        approval_method: string | null;
+        approved_by_owner_id: string | null;
+        authentication_assurance: string | null;
+        event_class: string;
+        id: string;
+        outbox_event_id: string | null;
+        outcome: string;
+        request_id: string;
+        target_id: string;
+      }[]
+    >`
+      select
+        id,
+        event_class,
+        action,
+        target_id,
+        outcome,
+        request_id,
+        outbox_event_id,
+        approval_method,
+        approved_by_owner_id,
+        authentication_assurance
+      from platform.action_logs
+      where owner_id = ${assistedContext.owner.id}
+        and (
+          request_id in (${createRequestId}, ${detailRequestId}, ${approvalRequestId})
+          or target_id in (${actionId}, ${contentId})
+        )
+      order by occurred_at, id
+    `;
+    expect(audits.map(({ action }) => action).sort()).toEqual([
+      "content.create_post",
+      "content.create_post",
+      "pending_action.approve",
+      "pending_action.claimed",
+      "pending_action.read",
+      "pending_action.succeeded",
+    ]);
+    const initialAudit = audits.find(({ request_id }) => request_id === createRequestId);
+    const readAudit = audits.find(({ request_id }) => request_id === detailRequestId);
+    const approvalAudit = audits.find(
+      ({ request_id }) => request_id === approvalRequestId,
+    );
+    const claimAudit = audits.find(({ action }) => action === "pending_action.claimed");
+    const executionAudit = audits.find(
+      ({ action, outcome }) =>
+        action === "content.create_post" && outcome === "succeeded",
+    );
+    const finishAudit = audits.find(
+      ({ action }) => action === "pending_action.succeeded",
+    );
+    expect(initialAudit).toMatchObject({
+      event_class: "domain_write",
+      outcome: "pending",
+      target_id: generalCommunityId,
+    });
+    expect(readAudit).toMatchObject({
+      event_class: "sensitive_read",
+      outcome: "succeeded",
+      target_id: actionId,
+    });
+    expect(approvalAudit).toMatchObject({
+      approval_method: "owner_approval",
+      approved_by_owner_id: assistedContext.owner.id,
+      authentication_assurance: "owner_session",
+      event_class: "approval_transition",
+      outbox_event_id: approvedOutbox?.id,
+      outcome: "pending",
+      target_id: actionId,
+    });
+    expect(claimAudit).toMatchObject({
+      event_class: "pending_action_transition",
+      outcome: "pending",
+      target_id: actionId,
+    });
+    expect(executionAudit).toMatchObject({
+      approval_method: "owner_approval",
+      approved_by_owner_id: assistedContext.owner.id,
+      authentication_assurance: "owner_approval_record",
+      event_class: "domain_write",
+      outbox_event_id: contentOutbox?.id,
+      outcome: "succeeded",
+      target_id: contentId,
+    });
+    expect(finishAudit).toMatchObject({
+      event_class: "pending_action_transition",
+      outbox_event_id: resolvedOutbox?.id,
+      outcome: "succeeded",
+      target_id: actionId,
+    });
+    expect(initialAudit?.id).toBe(terminal[0]?.action_audit_id);
+    expect(approvalAudit?.id).toBe(terminal[0]?.action_decision_audit_id);
+    expect(claimAudit?.id).toBe(attempt[0]?.claim_audit_id);
+    expect(finishAudit?.id).toBe(attempt[0]?.finish_audit_id);
+
+    const uniqueEffects = await postgres.sql<
+      {
+        actions: number;
+        attempts: number;
+        contents: number;
+        idempotency_records: number;
+        revisions: number;
+      }[]
+    >`
+      select
+        (
+          select count(*)::integer
+          from platform.pending_actions
+          where id = ${actionId}
+        ) as actions,
+        (
+          select count(*)::integer
+          from platform.pending_action_attempts
+          where action_id = ${actionId}
+        ) as attempts,
+        (
+          select count(*)::integer
+          from platform.content_items
+          where id = ${contentId}
+        ) as contents,
+        (
+          select count(*)::integer
+          from platform.content_revisions
+          where content_id = ${contentId}
+        ) as revisions,
+        (
+          select count(*)::integer
+          from platform.idempotency_records
+          where principal_scope_key = ${`credential:${assistedContext.credential.id}`}
+            and operation = 'create_post'
+            and idempotency_key = ${idempotencyKey}
+        ) as idempotency_records
+    `;
+    expect(uniqueEffects).toEqual([
+      {
+        actions: 1,
+        attempts: 1,
+        contents: 1,
+        idempotency_records: 1,
+        revisions: 1,
+      },
+    ]);
+  });
+
+  it("renews a live lease while a fenced execution transaction remains open", async () => {
+    const privateMarker = `heartbeat-fence-${randomUUID()}`;
+    const input = {
+      bodyMarkdown: `${privateMarker}: a lease-renewal regression fixture.`,
+      idempotencyKey: `heartbeat-fence-${randomUUID()}`,
+      primaryCommunityId: generalCommunityId,
+      title: "Long-running approved action heartbeat",
+    } as const;
+    const pending = await service.createPost(assistedContext, input, {
+      requestId: `req-${randomUUID()}`,
+    });
+    const actionId = pending.pendingAction?.id;
+    expectUuid(actionId);
+    const detail = await ownerActionService.getAction(
+      assistedContext.owner.id,
+      actionId,
+      { requestId: `req-${randomUUID()}` },
+    );
+    await ownerActionService.approveAction(assistedContext.owner.id, actionId, {
+      expectedVersion: detail.version,
+      reasonCode: "owner_approved",
+      requestId: `req-${randomUUID()}`,
+    });
+
+    const executionRepository = new PostgresPendingActionExecutionRepository(
+      postgres.sql,
+      {
+        leaseOwner: `heartbeat-fence-integration:${randomUUID()}`,
+        leaseSeconds: 2,
+      },
+    );
+    const claim = await claimIsolatedAction(executionRepository, actionId);
+    if (!claim) {
+      throw new Error("The heartbeat action was not available to the worker");
+    }
+    const originalLeaseExpiresAt = claim.leaseExpiresAt;
+    let renewedLeaseExpiresAt: Date | null = null;
+
+    const fencedResult = await withTimeout(
+      executionRepository.withFencedClaim(claim, async (_transaction, action) => {
+        expect(action.actionId).toBe(actionId);
+        const heartbeatDelayMs = Math.max(
+          0,
+          originalLeaseExpiresAt.valueOf() - Date.now() - 1_000,
+        );
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, heartbeatDelayMs);
+        });
+        const heartbeat = await withTimeout(
+          executionRepository.renewHeartbeat(claim),
+          1_500,
+          "The heartbeat was blocked by the fenced execution transaction",
+        );
+        expect(heartbeat).toMatchObject({
+          action: null,
+          renewed: true,
+        });
+        renewedLeaseExpiresAt = heartbeat.leaseExpiresAt;
+        expect(renewedLeaseExpiresAt).toBeInstanceOf(Date);
+        expect(renewedLeaseExpiresAt?.valueOf()).toBeGreaterThan(
+          originalLeaseExpiresAt.valueOf(),
+        );
+
+        const crossOriginalLeaseDelayMs = Math.max(
+          0,
+          originalLeaseExpiresAt.valueOf() - Date.now() + 100,
+        );
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, crossOriginalLeaseDelayMs);
+        });
+        return action.actionId;
+      }),
+      7_000,
+      "The fenced execution transaction did not complete after its heartbeat",
+    );
+    expect(fencedResult).toBe(actionId);
+
+    await expect(
+      executionRepository.withFencedClaim(claim, async (_transaction, action) =>
+        Promise.resolve(action.actionId),
+      ),
+    ).resolves.toBe(actionId);
+    const invalidated = await executionRepository.markInvalidated(claim);
+    expect(invalidated).toMatchObject({
+      action: {
+        actionId,
+        state: "invalidated",
+      },
+      applied: true,
+    });
+
+    const effects = await postgres.sql<{ content_count: number; state: string }[]>`
+      select
+        action.state,
+        (
+          select count(*)::integer
+          from platform.content_revisions as revision
+          join platform.content_items as item on item.id = revision.content_id
+          where item.author_actor_id = ${assistedContext.agent.actorId}
+            and revision.body_markdown = ${input.bodyMarkdown}
+        ) as content_count
+      from platform.pending_actions as action
+      where action.id = ${actionId}
+    `;
+    expect(effects).toEqual([{ content_count: 0, state: "invalidated" }]);
+  }, 15_000);
+
+  it("waits for a concurrent Owner suspension and invalidates before publishing", async () => {
+    const privateMarker = `suspended-owner-${randomUUID()}`;
+    const input = {
+      bodyMarkdown: `${privateMarker}: this must never become public content.`,
+      idempotencyKey: `suspended-owner-${randomUUID()}`,
+      primaryCommunityId: generalCommunityId,
+      title: "Authority race must invalidate this post",
+    } as const;
+    const pending = await service.createPost(assistedContext, input, {
+      requestId: `req-${randomUUID()}`,
+    });
+    const actionId = pending.pendingAction?.id;
+    expectUuid(actionId);
+    const detail = await ownerActionService.getAction(
+      assistedContext.owner.id,
+      actionId,
+      { requestId: `req-${randomUUID()}` },
+    );
+    await ownerActionService.approveAction(assistedContext.owner.id, actionId, {
+      expectedVersion: detail.version,
+      reasonCode: "owner_approved",
+      requestId: `req-${randomUUID()}`,
+    });
+
+    const executionRepository = new PostgresPendingActionExecutionRepository(
+      postgres.sql,
+      {
+        leaseOwner: `authority-race-integration:${randomUUID()}`,
+        leaseSeconds: 30,
+      },
+    );
+    const claim = await claimIsolatedAction(executionRepository, actionId);
+    if (!claim) {
+      throw new Error("The authority-race action was not available to the worker");
+    }
+    expect(claim.actionId).toBe(actionId);
+
+    try {
+      const concurrent = await competingPostgres.sql.begin(async (transaction) => {
+        await transaction`
+          update platform.owners
+          set status = 'suspended',
+              restriction_reason_code = 'integration_authority_race',
+              suspended_at = clock_timestamp()
+          where id = ${assistedContext.owner.id}
+        `;
+
+        const executionPromise = service.executeApprovedAction(
+          executionRepository,
+          claim,
+        );
+        const settledWhileLocked = await Promise.race([
+          executionPromise.then(
+            () => true,
+            () => true,
+          ),
+          new Promise<false>((resolve) => {
+            setTimeout(() => resolve(false), 200);
+          }),
+        ]);
+        return { executionPromise, settledWhileLocked };
+      });
+
+      expect(concurrent.settledWhileLocked).toBe(false);
+      let executionError: unknown = null;
+      try {
+        await concurrent.executionPromise;
+      } catch (error) {
+        executionError = error;
+      }
+      if (!(executionError instanceof ApprovedResearchExecutionError)) {
+        throw new Error("The suspended Owner did not produce a sanitized error", {
+          cause: executionError,
+        });
+      }
+      expect(executionError).toMatchObject({
+        code: "APPROVED_ACTION_CONTEXT_INVALID",
+        disposition: "invalidate",
+        message: "The approved action is no longer valid.",
+        retryAfterMs: null,
+      });
+      expect(executionError.message).not.toContain(privateMarker);
+      expect(executionError.message).not.toContain(assistedContext.owner.id);
+
+      const invalidated = await executionRepository.markInvalidated(claim);
+      expect(invalidated).toMatchObject({
+        action: {
+          actionId,
+          error: {
+            code: "ACTION_INVALIDATED",
+            details: null,
+            retry_after_ms: null,
+            retryable: false,
+          },
+          idempotencyStatus: "failed",
+          resourceId: null,
+          state: "invalidated",
+        },
+        applied: true,
+      });
+
+      const effects = await postgres.sql<
+        {
+          attempt_outcome: string;
+          content_count: number;
+          execution_audits: number;
+          idempotency_resource_id: string | null;
+          idempotency_status: string;
+          state: string;
+        }[]
+      >`
+        select
+          action.state,
+          attempt.outcome as attempt_outcome,
+          idempotency.status as idempotency_status,
+          idempotency.resource_id as idempotency_resource_id,
+          (
+            select count(*)::integer
+            from platform.content_revisions as revision
+            join platform.content_items as item on item.id = revision.content_id
+            where item.author_actor_id = ${assistedContext.agent.actorId}
+              and revision.body_markdown = ${input.bodyMarkdown}
+          ) as content_count,
+          (
+            select count(*)::integer
+            from platform.action_logs
+            where request_id = ${`worker:pending-action:${actionId}:attempt:${claim.attemptCount}`}
+              and event_class = 'domain_write'
+          ) as execution_audits
+        from platform.pending_actions as action
+        join platform.pending_action_attempts as attempt
+          on attempt.action_id = action.id
+         and attempt.attempt_number = ${claim.attemptCount}
+        join platform.idempotency_records as idempotency
+          on idempotency.id = action.idempotency_record_id
+        where action.id = ${actionId}
+      `;
+      expect(effects).toEqual([
+        {
+          attempt_outcome: "invalidated",
+          content_count: 0,
+          execution_audits: 0,
+          idempotency_resource_id: null,
+          idempotency_status: "failed",
+          state: "invalidated",
+        },
+      ]);
+    } finally {
+      await competingPostgres.sql`
+        update platform.owners
+        set status = 'active',
+            restriction_reason_code = null,
+            restricted_at = null,
+            suspended_at = null
+        where id = ${assistedContext.owner.id}
+      `;
+    }
+
+    const restoredOwner = await postgres.sql<
+      {
+        restriction_reason_code: string | null;
+        status: string;
+        suspended_at: Date | null;
+      }[]
+    >`
+      select status, restriction_reason_code, suspended_at
+      from platform.owners
+      where id = ${assistedContext.owner.id}
+    `;
+    expect(restoredOwner).toEqual([
+      {
+        restriction_reason_code: null,
+        status: "active",
+        suspended_at: null,
+      },
+    ]);
   });
 
   it("serializes concurrent Assisted protected-action intents", async () => {

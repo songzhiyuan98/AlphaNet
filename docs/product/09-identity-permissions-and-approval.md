@@ -358,10 +358,14 @@ allow < require_approval < deny
 | `approval_summary` | Owner 可理解的变更预览 |
 | `requested_at` / `expires_at` | 生命周期边界 |
 | `decided_at` / `decided_by_owner_id` | Owner 决策证据 |
+| `decision_audit_id` | 与本 action、Owner、Agent 一致的 Owner 决策 ActionLog |
+| `decision_reason_code` | 受控且不可变的决策原因；批准固定为 `owner_approved`，拒绝不保存自由文本 |
 | `executing_at` / `completed_at` | 执行时间 |
 | `terminal_at` | 进入任一终态时原子写入且不可变的统一终态时间 |
-| `lease_owner` / `lease_expires_at` / `attempt_count` | 可恢复的唯一执行租约、过期点与有界尝试次数 |
+| `lease_owner` / `lease_expires_at` / `attempt_count` | 可恢复的唯一执行租约、过期点与单调 fence generation；不是失败预算 |
+| `failure_count` | 真实瞬时执行失败的独立有界预算；额度/速率 defer 不增加 |
 | `next_attempt_at` | 因临时额度或依赖退避时的下一次尝试时间 |
+| `pending_action_attempts` | 每次执行 lease 的不可变代数、token 摘要、心跳、结束原因和退避历史 |
 | `result` / `error` | 最终资源结果或错误 |
 | `audit_id` | 完整审计链 |
 
@@ -395,7 +399,9 @@ allow < require_approval < deny
 | `approved` | `cancelled` | 执行开始前 Owner 撤销 |
 | `approved` | `invalidated` | 执行前复核发现不可批准覆盖的变化 |
 | `executing` | `succeeded` | 领域事务提交且 outbox 已写入 |
-| `executing` | `failed` | 领域事务未提交或不可恢复执行错误 |
+| `executing` | `approved` | 可重试错误或旧 lease 过期；清除当前 lease 并持久化 `next_attempt_at` |
+| `executing` | `failed` | 不可恢复错误、真实失败预算耗尽或 TTL 内已无安全重试机会 |
+| `executing` | `invalidated` | 执行期复核发现 credential、硬策略或目标上下文永久失效 |
 
 终态为：
 
@@ -403,7 +409,7 @@ allow < require_approval < deny
 succeeded | rejected | expired | cancelled | failed | invalidated
 ```
 
-终态不可转换。执行器对瞬时依赖故障可在 `executing` 内进行有界重试；一旦记录 `failed`，不得把同一 action 改回执行中。Agent 需根据错误修正上下文后用新幂等键发起新动作。
+终态不可转换。`approved` 是可调度状态且必须带非空 `next_attempt_at`；`executing` 只表示一个当前有效 lease。瞬时依赖故障或 lease 过期时，action 通过受控的 `executing -> approved` 恢复，清空当前 `executing_at`、lease 和 heartbeat，并由 `pending_action_attempts` 保留已经发生的执行证据。每次新 lease 只让 `attempt_count` 严格加一；真实瞬时失败另让 `failure_count` 加一并采用指数 full jitter。额度或速率压力使用 `defer`，会结束当前 lease 并推迟 `next_attempt_at`，但不消耗 `failure_count`，因此不会因为第二十次容量等待而错误进入 `failed`。一旦记录 `failed`，不得把同一 action 改回执行中。Agent 需根据错误修正上下文后用新幂等键发起新动作。
 
 任何到 `succeeded/rejected/expired/cancelled/failed/invalidated` 的转换都必须在同一事务设置且只设置一次 `terminal_at`。`completed_at` 只表示实际执行路径结束，因此未执行的 rejected、expired、cancelled 和 invalidated 可以没有 `completed_at`，但绝不能没有 `terminal_at`；关联幂等记录的 `terminal_at/expires_at` 在同一事务同步。
 
@@ -411,15 +417,16 @@ succeeded | rejected | expired | cancelled | failed | invalidated
 
 - Owner 的批准与拒绝用 action `version` 做乐观并发控制。
 - 只有一个执行器 lease 可以把 `approved` 转为 `executing`。
+- 执行 fence 使用 `action_id + executing state + attempt_count + lease_owner + lease_token_digest + 未过期 lease`；heartbeat 会推进 `version`，因此 `version` 不能充当 lease generation。
 - 重复审批返回当前状态，不重复执行。
 - 到期、撤销与开始执行竞争时，以原子状态转换成功者为准。
 - `succeeded` 必须包含已提交资源 ID 和版本；不能仅表示任务已排队。
-- lease 有心跳和短期 `lease_expires_at`。执行器崩溃后，恢复 Worker 只有在旧 lease 过期、确认不存在已提交终态且原幂等结果未成功时，才能以 CAS 获得新 lease；重试次数有上限。
+- lease 有心跳和短期 `lease_expires_at`。执行器崩溃后，恢复 Worker 只有在旧 lease 过期、确认不存在已提交终态且原幂等结果未成功时，才能原子地退回 `approved`；后续 Worker 再以新 attempt 和新 token CAS 获取 lease。`attempt_count` 是高上限的 fence generation，`failure_count` 才是 20 次的失败预算；真实失败退避使用持久化的指数 full jitter。
 - 领域写入、ActionLog、Outbox、幂等结果和 `PendingAction=succeeded` 在同一事务中提交，因此不会出现资源已创建而 action 永久停在 executing。达到尝试上限且仍未提交时进入 `failed`。
 
-### 7.3 执行前复核
+### 7.3 发布提交前复核
 
-批准不是绕过后续校验。`approved -> executing` 前必须重新验证：
+批准不是绕过后续校验。Worker 获得短期 fence 后、任何领域写入提交前必须在同一事务重新验证：
 
 1. 冻结输入摘要未变化；
 2. Owner、Agent 和 credential 仍有效；
