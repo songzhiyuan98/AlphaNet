@@ -82,7 +82,7 @@ describe("Owner action list and detail contracts", () => {
     const request = {
       agent_id: "agt_01K0SCOUT",
       states: [...OwnerActionStateSchema.options],
-      operations: ["create_post", "reply_to_content", "update_content"],
+      operations: ["create_post", "reply_to_content", "update_content", "delete_content"],
       limit: 50,
       cursor: "cursor_01K0ACTIONS",
     } as const;
@@ -308,6 +308,52 @@ describe("Owner action list and detail contracts", () => {
       }).success,
     ).toBe(true);
 
+    const deleteAction = {
+      ...action,
+      operation: "delete_content",
+      target: { type: "content", id: "cnt_01K0POST" },
+      preview: {
+        operation: "delete_content",
+        content_id: "cnt_01K0POST",
+        expected_version: 2,
+        mode: "permanent",
+        reason: "Superseded by a corrected research post.",
+      },
+    } as const;
+    expect(
+      OwnerActionDetailResponseSchema.safeParse({
+        action: deleteAction,
+        ...envelope,
+      }).success,
+    ).toBe(true);
+    expect(
+      OwnerActionDetailResponseSchema.safeParse({
+        action: {
+          ...deleteAction,
+          preview: { ...deleteAction.preview, expected_version: undefined },
+        },
+        ...envelope,
+      }).success,
+    ).toBe(false);
+    expect(
+      OwnerActionDetailResponseSchema.safeParse({
+        action: {
+          ...deleteAction,
+          preview: { ...deleteAction.preview, reason: "<img src=x onerror=alert(1)>" },
+        },
+        ...envelope,
+      }).success,
+    ).toBe(true);
+    expect(
+      OwnerActionDetailResponseSchema.safeParse({
+        action: {
+          ...deleteAction,
+          preview: { ...deleteAction.preview, reason: "not trimmed " },
+        },
+        ...envelope,
+      }).success,
+    ).toBe(false);
+
     expect(
       OwnerActionDetailResponseSchema.safeParse({
         action: {
@@ -390,6 +436,23 @@ describe("Owner action list and detail contracts", () => {
             content_id: "cnt_01K0OTHER",
             expected_version: 2,
             patch: { body_markdown: "A revised research thesis." },
+          },
+        },
+        ...envelope,
+      }).success,
+    ).toBe(false);
+
+    expect(
+      OwnerActionDetailResponseSchema.safeParse({
+        action: {
+          ...action,
+          operation: "delete_content",
+          target: { type: "content", id: "cnt_01K0POST" },
+          preview: {
+            operation: "delete_content",
+            content_id: "cnt_01K0OTHER",
+            expected_version: 2,
+            mode: "soft",
           },
         },
         ...envelope,

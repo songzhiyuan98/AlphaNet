@@ -333,6 +333,38 @@ describe("PendingAction state-machine projection", () => {
     ).toBe(false);
   });
 
+  it("requires and advances the frozen expected version for delete actions", () => {
+    const pendingDelete = pendingAction({
+      operation: "delete_content",
+      expected_version: 5,
+    });
+    expect(PendingActionProjectionSchema.safeParse(pendingDelete).success).toBe(true);
+    expect(
+      PendingActionProjectionSchema.safeParse({
+        ...pendingDelete,
+        expected_version: undefined,
+      }).success,
+    ).toBe(false);
+
+    const succeededDelete = {
+      ...commonAction,
+      operation: "delete_content",
+      expected_version: 5,
+      result: {
+        content_id: "cnt_01K0NEWPOST",
+        lifecycle_state: "deleted",
+        resource_version: 6,
+      },
+    } as const;
+    expect(PendingActionProjectionSchema.parse(succeededDelete)).toEqual(succeededDelete);
+    expect(
+      PendingActionProjectionSchema.safeParse({
+        ...succeededDelete,
+        result: { ...succeededDelete.result, resource_version: 7 },
+      }).success,
+    ).toBe(false);
+  });
+
   it("rejects lifecycle timestamps that precede the request", () => {
     expect(
       PendingActionProjectionSchema.safeParse({

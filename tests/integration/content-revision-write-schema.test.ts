@@ -10,6 +10,7 @@ import {
   type PostgresClient,
 } from "../../packages/database/src/index.js";
 import {
+  CONTENT_DELETE_ANTISPAM_MIGRATION_CHECKSUM,
   CONTENT_REVISION_WRITE_MIGRATION_CHECKSUM,
   PostgresAgentConnectionService,
 } from "../../packages/domain/src/index.js";
@@ -99,7 +100,7 @@ describeRevisionSchema("Content Revision write schema", () => {
     input: {
       id: string;
       key: string;
-      operation: "create_post" | "reply_to_content" | "update_content";
+      operation: "create_post" | "delete_content" | "reply_to_content" | "update_content";
     },
   ): Promise<void> {
     const now = new Date();
@@ -141,12 +142,16 @@ describeRevisionSchema("Content Revision write schema", () => {
     transaction: TransactionSql,
     input: {
       action:
-        "content.create_post" | "content.reply_to_content" | "content.update_content";
+        | "content.create_post"
+        | "content.delete_content"
+        | "content.reply_to_content"
+        | "content.update_content";
       approvedAction?: ApprovedActionFixture;
       contentId: string;
-      eventType: "content.published" | "content.reply" | "content.revised";
+      eventType:
+        "content.deleted" | "content.published" | "content.reply" | "content.revised";
       idempotencyId: string;
-      operation: "create_post" | "reply_to_content" | "update_content";
+      operation: "create_post" | "delete_content" | "reply_to_content" | "update_content";
       payload: Parameters<TransactionSql["json"]>[0];
       resourceVersion: number;
       revisionId: string | null;
@@ -201,11 +206,19 @@ describeRevisionSchema("Content Revision write schema", () => {
         update platform.pending_actions
         set state = 'succeeded',
             version = version + 1,
-            result = ${transaction.json({
-              content_id: input.contentId,
-              resource_version: input.resourceVersion,
-              revision_id: input.revisionId,
-            })}
+            result = ${transaction.json(
+              input.operation === "delete_content"
+                ? {
+                    content_id: input.contentId,
+                    lifecycle_state: "deleted",
+                    resource_version: input.resourceVersion,
+                  }
+                : {
+                    content_id: input.contentId,
+                    resource_version: input.resourceVersion,
+                    revision_id: input.revisionId,
+                  },
+            )}
         where id = ${input.approvedAction.actionId}
           and state = 'executing'
           and attempt_count = 1
@@ -274,11 +287,13 @@ describeRevisionSchema("Content Revision write schema", () => {
         ${transaction.json({
           content_id: input.contentId,
           idempotency_record_id: input.idempotencyId,
+          ...(input.operation === "delete_content"
+            ? { lifecycle_state: "deleted" }
+            : { revision_id: input.revisionId }),
           ...(approvalPendingActionId
             ? { pending_action_id: approvalPendingActionId }
             : {}),
           resource_version: input.resourceVersion,
-          revision_id: input.revisionId,
         })}
       )
     `;
@@ -301,9 +316,13 @@ describeRevisionSchema("Content Revision write schema", () => {
   }
 
   async function createApprovedAction(input: {
-    action: "content.create_post" | "content.reply_to_content" | "content.update_content";
+    action:
+      | "content.create_post"
+      | "content.delete_content"
+      | "content.reply_to_content"
+      | "content.update_content";
     expectedVersion?: number;
-    operation: "create_post" | "reply_to_content" | "update_content";
+    operation: "create_post" | "delete_content" | "reply_to_content" | "update_content";
     targetId: string;
   }): Promise<ApprovedActionFixture> {
     const actionId = randomUUID();
@@ -770,7 +789,12 @@ describeRevisionSchema("Content Revision write schema", () => {
       to ${quoteRole(runtimeRole)}
     `);
     await postgres.sql.unsafe(`
-      grant update (version, current_revision_id)
+      grant update (
+        version,
+        current_revision_id,
+        lifecycle_state,
+        deleted_at
+      )
       on table platform.content_items to ${quoteRole(runtimeRole)}
     `);
     await postgres.sql.unsafe(`
@@ -951,6 +975,71 @@ describeRevisionSchema("Content Revision write schema", () => {
     ]);
   });
 
+  it("records Content Delete/Anti-spam v1 and installs its bounded query paths", async () => {
+    const migration = await readFile(
+      `${process.cwd()}/db/migrations/000014_content_delete_antispam_v1.up.sql`,
+    );
+    const checksum = createHash("sha256").update(migration).digest("hex");
+    expect(checksum).toBe(CONTENT_DELETE_ANTISPAM_MIGRATION_CHECKSUM);
+
+    const ledger = await postgres.sql<
+      { checksum: string; name: string; version: string }[]
+    >`
+      select version, name, checksum
+      from system.schema_migrations
+      where version = '000014'
+    `;
+    expect(ledger).toEqual([
+      {
+        checksum: CONTENT_DELETE_ANTISPAM_MIGRATION_CHECKSUM,
+        name: "content_delete_antispam_v1",
+        version: "000014",
+      },
+    ]);
+
+    const shape = await postgres.sql<
+      {
+        actor_hash_index: boolean;
+        delete_action: boolean;
+        delete_event: boolean;
+        owner_publish_index: boolean;
+        reply_burst_index: boolean;
+      }[]
+    >`
+      select
+        to_regclass(
+          'platform.content_revisions_actor_hash_recent_idx'
+        ) is not null as actor_hash_index,
+        to_regclass(
+          'platform.content_items_reply_root_author_published_idx'
+        ) is not null as reply_burst_index,
+        to_regclass(
+          'platform.action_logs_owner_content_publish_succeeded_idx'
+        ) is not null as owner_publish_index,
+        position(
+          'content.delete_content'
+          in pg_get_functiondef(
+            'platform.validate_runtime_content_write_provenance()'::regprocedure
+          )
+        ) > 0 as delete_action,
+        position(
+          'content.deleted'
+          in pg_get_functiondef(
+            'platform.validate_runtime_content_write_provenance()'::regprocedure
+          )
+        ) > 0 as delete_event
+    `;
+    expect(shape).toEqual([
+      {
+        actor_hash_index: true,
+        delete_action: true,
+        delete_event: true,
+        owner_publish_index: true,
+        reply_burst_index: true,
+      },
+    ]);
+  });
+
   it("rejects Runtime facts attached directly to an existing Content or Revision", async () => {
     const content = await createPost("runtime-direct-facts");
     const target = await createPost("runtime-direct-facts-target");
@@ -1103,6 +1192,109 @@ describeRevisionSchema("Content Revision write schema", () => {
         `;
       }),
     ).rejects.toThrow(/active transaction tree/u);
+  });
+
+  it("rejects a raw Runtime soft delete without complete provenance", async () => {
+    const content = await createPost("runtime-raw-delete", runtimeActorId);
+
+    await expect(
+      asRuntime(async (transaction) => {
+        await transaction`
+          update platform.content_items
+          set version = version + 1,
+              lifecycle_state = 'deleted',
+              deleted_at = clock_timestamp()
+          where id = ${content.contentId}
+            and version = 1
+            and lifecycle_state = 'published'
+        `;
+      }),
+    ).rejects.toThrow(/Outbox, audit, and idempotency provenance/u);
+
+    const unchanged = await postgres.sql<
+      { current_revision_id: string; lifecycle_state: string; version: number }[]
+    >`
+      select
+        current_revision_id,
+        lifecycle_state,
+        version::integer as version
+      from platform.content_items
+      where id = ${content.contentId}
+    `;
+    expect(unchanged).toEqual([
+      {
+        current_revision_id: content.revisionId,
+        lifecycle_state: "published",
+        version: 1,
+      },
+    ]);
+  });
+
+  it("rejects a Runtime delete that also replaces the current Revision", async () => {
+    const content = await createPost("runtime-delete-revision", runtimeActorId);
+    const replacementRevisionId = randomUUID();
+
+    await expect(
+      asRuntime(async (transaction) => {
+        await transaction`
+          insert into platform.content_revisions (
+            id,
+            content_id,
+            revision_number,
+            title,
+            body_markdown,
+            body_plain_text,
+            created_by_actor_id,
+            source_version,
+            content_hash,
+            public_node_serialized_bytes
+          )
+          values (
+            ${replacementRevisionId},
+            ${content.contentId},
+            2,
+            'Delete must retain Revision',
+            'A soft-delete command cannot publish a replacement Revision.',
+            'A soft-delete command cannot publish a replacement Revision.',
+            ${runtimeActorId},
+            2,
+            ${randomBytes(32)},
+            512
+          )
+        `;
+        await transaction`
+          update platform.content_items
+          set version = 2,
+              current_revision_id = ${replacementRevisionId},
+              lifecycle_state = 'deleted',
+              deleted_at = clock_timestamp()
+          where id = ${content.contentId}
+            and version = 1
+            and lifecycle_state = 'published'
+        `;
+      }),
+    ).rejects.toThrow(/may change only version, lifecycle state, and deletion time/u);
+
+    const unchanged = await postgres.sql<
+      { current_revision_id: string; revisions: number; version: number }[]
+    >`
+      select
+        content.current_revision_id,
+        count(revision.id)::integer as revisions,
+        content.version::integer as version
+      from platform.content_items as content
+      join platform.content_revisions as revision
+        on revision.content_id = content.id
+      where content.id = ${content.contentId}
+      group by content.id
+    `;
+    expect(unchanged).toEqual([
+      {
+        current_revision_id: content.revisionId,
+        revisions: 1,
+        version: 1,
+      },
+    ]);
   });
 
   it("allows a complete Runtime create-post command with initial facts", async () => {
@@ -1533,6 +1725,215 @@ describeRevisionSchema("Content Revision write schema", () => {
       },
     ]);
   });
+
+  it("allows a policy-auto Runtime author soft delete without changing Revision", async () => {
+    const content = await createPost("runtime-auto-delete", runtimeActorId);
+    const idempotencyId = randomUUID();
+
+    await asRuntime(async (transaction) => {
+      await insertInProgressIdempotency(transaction, {
+        id: idempotencyId,
+        key: `runtime-auto-delete-${content.contentId}`,
+        operation: "delete_content",
+      });
+      await transaction`
+        update platform.content_items
+        set version = 2,
+            lifecycle_state = 'deleted',
+            deleted_at = clock_timestamp()
+        where id = ${content.contentId}
+          and version = 1
+          and lifecycle_state = 'published'
+      `;
+      await finishContentCommand(transaction, {
+        action: "content.delete_content",
+        contentId: content.contentId,
+        eventType: "content.deleted",
+        idempotencyId,
+        operation: "delete_content",
+        payload: {
+          actor_id: runtimeActorId,
+          content_id: content.contentId,
+          current_revision_id: content.revisionId,
+          kind: "post",
+          lifecycle_state: "deleted",
+          resource_version: 2,
+          root_content_id: content.contentId,
+        },
+        resourceVersion: 2,
+        revisionId: null,
+        responseCode: 200,
+      });
+    });
+
+    const persisted = await postgres.sql<
+      {
+        current_revision_id: string;
+        deleted: boolean;
+        lifecycle_state: string;
+        version: number;
+      }[]
+    >`
+      select
+        current_revision_id,
+        deleted_at is not null as deleted,
+        lifecycle_state,
+        version::integer as version
+      from platform.content_items
+      where id = ${content.contentId}
+    `;
+    expect(persisted).toEqual([
+      {
+        current_revision_id: content.revisionId,
+        deleted: true,
+        lifecycle_state: "deleted",
+        version: 2,
+      },
+    ]);
+  });
+
+  it("allows an Owner-approved Runtime soft delete with the old expected version", async () => {
+    const content = await createPost("runtime-approved-delete", runtimeActorId);
+    const approvedAction = await createApprovedAction({
+      action: "content.delete_content",
+      expectedVersion: 1,
+      operation: "delete_content",
+      targetId: content.contentId,
+    });
+
+    await asRuntime(async (transaction) => {
+      await transaction`
+        update platform.content_items
+        set version = 2,
+            lifecycle_state = 'deleted',
+            deleted_at = clock_timestamp()
+        where id = ${content.contentId}
+          and version = 1
+          and lifecycle_state = 'published'
+      `;
+      await finishContentCommand(transaction, {
+        action: "content.delete_content",
+        approvedAction,
+        contentId: content.contentId,
+        eventType: "content.deleted",
+        idempotencyId: approvedAction.idempotencyId,
+        operation: "delete_content",
+        payload: {
+          actor_id: runtimeActorId,
+          content_id: content.contentId,
+          current_revision_id: content.revisionId,
+          kind: "post",
+          lifecycle_state: "deleted",
+          resource_version: 2,
+          root_content_id: content.contentId,
+        },
+        resourceVersion: 2,
+        revisionId: null,
+        responseCode: 200,
+      });
+    });
+
+    const persisted = await postgres.sql<
+      {
+        action_result: Record<string, unknown>;
+        current_revision_id: string;
+        lifecycle_state: string;
+        version: number;
+      }[]
+    >`
+      select
+        action.result as action_result,
+        content.current_revision_id,
+        content.lifecycle_state,
+        content.version::integer as version
+      from platform.content_items as content
+      join platform.pending_actions as action
+        on action.id = ${approvedAction.actionId}
+      where content.id = ${content.contentId}
+    `;
+    expect(persisted).toEqual([
+      {
+        action_result: {
+          content_id: content.contentId,
+          lifecycle_state: "deleted",
+          resource_version: 2,
+        },
+        current_revision_id: content.revisionId,
+        lifecycle_state: "deleted",
+        version: 2,
+      },
+    ]);
+  });
+
+  it.each(["kind", "root_content_id", "current_revision_id"] as const)(
+    "rejects a Runtime delete whose Outbox payload tampers with %s",
+    async (field) => {
+      const content = await createPost(
+        `runtime-delete-tampered-${field}`,
+        runtimeActorId,
+      );
+      const idempotencyId = randomUUID();
+      const payload: Record<string, string | number> = {
+        actor_id: runtimeActorId,
+        content_id: content.contentId,
+        current_revision_id: content.revisionId,
+        kind: "post",
+        lifecycle_state: "deleted",
+        resource_version: 2,
+        root_content_id: content.contentId,
+      };
+      payload[field] = field === "kind" ? "reply" : randomUUID();
+
+      await expect(
+        asRuntime(async (transaction) => {
+          await insertInProgressIdempotency(transaction, {
+            id: idempotencyId,
+            key: `runtime-delete-tampered-${field}-${content.contentId}`,
+            operation: "delete_content",
+          });
+          await transaction`
+            update platform.content_items
+            set version = 2,
+                lifecycle_state = 'deleted',
+                deleted_at = clock_timestamp()
+            where id = ${content.contentId}
+              and version = 1
+              and lifecycle_state = 'published'
+          `;
+          await finishContentCommand(transaction, {
+            action: "content.delete_content",
+            contentId: content.contentId,
+            eventType: "content.deleted",
+            idempotencyId,
+            operation: "delete_content",
+            payload,
+            resourceVersion: 2,
+            revisionId: null,
+            responseCode: 200,
+          });
+          await transaction`set constraints all immediate`;
+        }),
+      ).rejects.toMatchObject({ code: "23514" });
+
+      const unchanged = await postgres.sql<
+        { current_revision_id: string; lifecycle_state: string; version: number }[]
+      >`
+        select
+          current_revision_id,
+          lifecycle_state,
+          version::integer as version
+        from platform.content_items
+        where id = ${content.contentId}
+      `;
+      expect(unchanged).toEqual([
+        {
+          current_revision_id: content.revisionId,
+          lifecycle_state: "published",
+          version: 1,
+        },
+      ]);
+    },
+  );
 
   it("allows a complete Runtime author-Revision update", async () => {
     const content = await createPost("runtime-revision-update", runtimeActorId);

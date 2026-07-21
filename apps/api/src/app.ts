@@ -657,7 +657,12 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
           ...(options.contentSearchService ? (["search_content"] as const) : []),
           ...(options.pendingActionStatusService ? (["get_action_status"] as const) : []),
           ...(options.researchWriteService
-            ? (["create_post", "reply_to_content", "update_content"] as const)
+            ? ([
+                "create_post",
+                "reply_to_content",
+                "update_content",
+                "delete_content",
+              ] as const)
             : []),
           ...(options.reactionWriteService ? (["set_reaction"] as const) : []),
           ...(options.followService ? (["set_follow", "list_follows"] as const) : []),

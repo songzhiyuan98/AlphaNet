@@ -275,6 +275,32 @@ export const UpdateContentRequestSchema = z
   });
 export type UpdateContentRequest = z.infer<typeof UpdateContentRequestSchema>;
 
+export const DeleteContentModeSchema = z.enum(["soft", "permanent"]);
+export type DeleteContentMode = z.infer<typeof DeleteContentModeSchema>;
+
+export const DeleteContentReasonSchema = boundedUnicodeString(
+  1,
+  500,
+  "Delete reason",
+).refine((value) => value.trim() === value && !/\p{Cc}/u.test(value), {
+  message: "Delete reason must be trimmed and cannot contain control characters.",
+});
+export type DeleteContentReason = z.infer<typeof DeleteContentReasonSchema>;
+
+export const DeleteContentRequestSchema = z
+  .object({
+    content_id: OpaqueIdSchema,
+    expected_version: z.number().int().positive().safe(),
+    mode: DeleteContentModeSchema,
+    reason: DeleteContentReasonSchema.optional(),
+    idempotency_key: IdempotencyKeySchema,
+  })
+  .strict()
+  .superRefine((request, context) => {
+    validateWriteBudgets(request, context);
+  });
+export type DeleteContentRequest = z.infer<typeof DeleteContentRequestSchema>;
+
 export const ContentWriteOperationSchema = z.enum([
   "create_post",
   "reply_to_content",
@@ -338,6 +364,17 @@ export type UpdateContentPendingActionSummary = z.infer<
   typeof UpdateContentPendingActionSummarySchema
 >;
 
+export const DeleteContentPendingActionSummarySchema = z
+  .object({
+    ...PendingActionSummaryShape,
+    operation: z.literal("delete_content"),
+    expected_version: z.number().int().positive().safe(),
+  })
+  .strict();
+export type DeleteContentPendingActionSummary = z.infer<
+  typeof DeleteContentPendingActionSummarySchema
+>;
+
 export const CreatePostResultSchema = z
   .object({
     content_id: OpaqueIdSchema,
@@ -366,6 +403,15 @@ export const UpdateContentResultSchema = z
   .strict();
 export type UpdateContentResult = z.infer<typeof UpdateContentResultSchema>;
 
+export const DeleteContentResultSchema = z
+  .object({
+    content_id: OpaqueIdSchema,
+    lifecycle_state: z.literal("deleted"),
+    resource_version: z.number().int().positive().safe(),
+  })
+  .strict();
+export type DeleteContentResult = z.infer<typeof DeleteContentResultSchema>;
+
 type WriteResultLike = {
   decision: z.infer<typeof PolicyDecisionSchema>;
   status: WriteStatus;
@@ -374,6 +420,7 @@ type WriteResultLike = {
     | CreatePostPendingActionSummary
     | ReplyPendingActionSummary
     | UpdateContentPendingActionSummary
+    | DeleteContentPendingActionSummary
     | null;
   error: z.infer<typeof V1ErrorDetailSchema> | null;
 };
@@ -499,10 +546,38 @@ export const UpdateContentWriteResultSchema = z
   .superRefine(validateWriteResult);
 export type UpdateContentWriteResult = z.infer<typeof UpdateContentWriteResultSchema>;
 
+export const DeleteContentWriteResultSchema = z
+  .object({
+    decision: PolicyDecisionSchema,
+    status: WriteStatusSchema,
+    result: DeleteContentResultSchema.nullable(),
+    pending_action: DeleteContentPendingActionSummarySchema.nullable(),
+    error: V1ErrorDetailSchema.nullable(),
+    ...V1EnvelopeShape,
+  })
+  .strict()
+  .superRefine(validateWriteResult)
+  .superRefine((write, context) => {
+    if (
+      write.status === "succeeded" &&
+      write.pending_action !== null &&
+      write.result !== null &&
+      write.result.resource_version !== write.pending_action.expected_version + 1
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["result", "resource_version"],
+        message: "An approved delete must advance exactly one content resource version.",
+      });
+    }
+  });
+export type DeleteContentWriteResult = z.infer<typeof DeleteContentWriteResultSchema>;
+
 export const PendingActionSummarySchema = z.union([
   CreatePostPendingActionSummarySchema,
   ReplyPendingActionSummarySchema,
   UpdateContentPendingActionSummarySchema,
+  DeleteContentPendingActionSummarySchema,
 ]);
 export type PendingActionSummary = z.infer<typeof PendingActionSummarySchema>;
 
@@ -548,6 +623,7 @@ export const UnifiedContentWriteResultSchema = z.union([
   CreatePostWriteResultSchema,
   ReplyToContentWriteResultSchema,
   UpdateContentWriteResultSchema,
+  DeleteContentWriteResultSchema,
   SetReactionWriteResultSchema,
   SetFollowWriteResultSchema,
 ]);

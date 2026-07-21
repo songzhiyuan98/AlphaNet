@@ -52,6 +52,13 @@ const fixtureAgentContentRateLimits = {
   newAgentPostsPerHour: 10_000,
   newAgentRepliesPerHour: 10_000,
 } as const;
+const fixtureResearchAntiSpamLimits = {
+  duplicateContentWindowMs: 60_000,
+  ownerContentWritesPerHour: 10_000,
+  ownerPostsPerHour: 10_000,
+  pairRepliesPerThirtyMinutes: 10_000,
+  threadRepliesPerHour: 10_000,
+} as const;
 const postingRules = {
   allowed_content: ["investment-research", "discussion", "question"],
   max_posts_per_hour: 1_000,
@@ -103,6 +110,14 @@ function requireId(value: string | undefined, label: string): string {
   return value;
 }
 
+function revisionIdOf(value: object | null | undefined): string | null | undefined {
+  if (value === null || value === undefined || !("revisionId" in value)) {
+    return undefined;
+  }
+  const revisionId = value.revisionId;
+  return typeof revisionId === "string" || revisionId === null ? revisionId : undefined;
+}
+
 function deterministicProvider(calls: string[] = []): TextEmbeddingProvider {
   return {
     dimensions: 512,
@@ -124,6 +139,7 @@ describeSearch("Postgres Content Search v1", () => {
   );
   const writeService = new PostgresResearchWriteService(postgres.sql, {
     agentContentRateLimits: fixtureAgentContentRateLimits,
+    antiSpamLimits: fixtureResearchAntiSpamLimits,
     pendingActionKeyRing: {
       currentVersion: 1,
       keys: { 1: randomBytes(32) },
@@ -323,7 +339,7 @@ describeSearch("Postgres Content Search v1", () => {
     return {
       contentId: outcome.result.contentId,
       revisionId: requireId(
-        outcome.result.revisionId ?? undefined,
+        revisionIdOf(outcome.result) ?? undefined,
         "Content Search post Revision",
       ),
     };
@@ -348,7 +364,7 @@ describeSearch("Postgres Content Search v1", () => {
     return {
       contentId: outcome.result.contentId,
       revisionId: requireId(
-        outcome.result.revisionId ?? undefined,
+        revisionIdOf(outcome.result) ?? undefined,
         "Content Search reply Revision",
       ),
     };
@@ -582,7 +598,10 @@ describeSearch("Postgres Content Search v1", () => {
     }
     currentRevisionContent = {
       contentId: updated.result.contentId,
-      revisionId: requireId(updated.result.revisionId ?? undefined, "Updated Revision"),
+      revisionId: requireId(
+        revisionIdOf(updated.result) ?? undefined,
+        "Updated Revision",
+      ),
     };
 
     classificationContent = await createPost({
@@ -602,7 +621,7 @@ describeSearch("Postgres Content Search v1", () => {
     if (
       classificationUpdate.status !== "succeeded" ||
       classificationUpdate.result === null ||
-      classificationUpdate.result.revisionId !== null
+      revisionIdOf(classificationUpdate.result) !== null
     ) {
       throw new Error("Content Search classification-only fixture failed");
     }
@@ -1223,10 +1242,11 @@ describeSearch("Postgres Content Search v1", () => {
       },
       { channel: "rest", requestId: `req-${randomUUID()}` },
     );
+    const updatedAfterSnapshotRevisionId = revisionIdOf(updatedAfterSnapshot.result);
     if (
       updatedAfterSnapshot.status !== "succeeded" ||
-      updatedAfterSnapshot.result?.revisionId === null ||
-      updatedAfterSnapshot.result?.revisionId === undefined
+      updatedAfterSnapshotRevisionId === null ||
+      updatedAfterSnapshotRevisionId === undefined
     ) {
       throw new Error("Content Search snapshot edit fixture failed");
     }
@@ -1242,7 +1262,7 @@ describeSearch("Postgres Content Search v1", () => {
     expect(continuedAfterEdit.items[0]).toMatchObject({
       contentId: second.items[0]!.contentId,
       contentVersion: 2,
-      currentRevisionId: updatedAfterSnapshot.result.revisionId,
+      currentRevisionId: updatedAfterSnapshotRevisionId,
       snippetSourceRevisionId: snapshotRevisionId,
     });
     expect(continuedAfterEdit.items[0]!.currentRevisionId).not.toBe(

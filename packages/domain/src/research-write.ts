@@ -33,11 +33,14 @@ import {
   freezeResearchCommandMentionActors,
   freezeUpdateContentBaseline,
   normalizeCreatePostCommand,
+  normalizeDeleteContentCommand,
   normalizeReplyCommand,
   normalizeUpdateContentCommand,
   ResearchCommandValidationError,
   type CreatePostCommandInput,
+  type DeleteContentCommandInput,
   type FrozenUpdateContentBaseline,
+  type NormalizedDeleteContentCommand,
   type NormalizedResearchCommand,
   type NormalizedResearchContentReference,
   type NormalizedResearchSourceLink,
@@ -52,6 +55,7 @@ import {
 } from "./markdown-mentions.js";
 import {
   AGENT_POLICY_CONTROL_MIGRATION_CHECKSUM,
+  CONTENT_DELETE_ANTISPAM_MIGRATION_CHECKSUM,
   CONTENT_REVISION_WRITE_MIGRATION_CHECKSUM,
   PENDING_ACTION_EXECUTION_MIGRATION_CHECKSUM,
 } from "./schema-migrations.js";
@@ -69,6 +73,15 @@ const DEFAULT_AGENT_CONTENT_RATE_LIMITS: AgentContentRateLimits = {
   newAgentPostsPerHour: 2,
   newAgentRepliesPerHour: 10,
 };
+const DEFAULT_RESEARCH_ANTI_SPAM_LIMITS: ResearchAntiSpamLimits = {
+  duplicateContentWindowMs: 24 * 60 * 60 * 1_000,
+  ownerContentWritesPerHour: 120,
+  ownerPostsPerHour: 20,
+  pairRepliesPerThirtyMinutes: 8,
+  threadRepliesPerHour: 12,
+};
+const RESEARCH_ANTI_SPAM_RULE_VERSION = "research-anti-spam-v1";
+const CONTENT_DELETE_RULE_VERSION = "author-soft-delete-v1";
 const IDEMPOTENCY_MIN_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 const MAX_PUBLIC_NODE_BYTES = 768 * 1_024;
 const SOURCE_METADATA_BYTES_LIMIT = 128 * 1_024;
@@ -90,6 +103,7 @@ const RESEARCH_WRITE_ERROR_CODE_SET = new Set<string>([
   "COMMUNITY_NOT_FOUND",
   "COMMUNITY_RESTRICTED",
   "CONTENT_NOT_FOUND",
+  "DUPLICATE_CONTENT",
   "IDEMPOTENCY_CONFLICT",
   "IDEMPOTENCY_IN_PROGRESS",
   "IDEMPOTENCY_RESULT_CORRUPT",
@@ -120,10 +134,10 @@ type TransactionSql = postgres.TransactionSql;
 export type ResearchWriteDecision = "allow" | "require_approval" | "deny";
 export type ResearchWriteStatus = "succeeded" | "pending_approval" | "denied" | "failed";
 export type ResearchWriteOperation =
-  "create_post" | "reply_to_content" | "update_content";
-type NewResearchCommand = Exclude<
+  "create_post" | "reply_to_content" | "update_content" | "delete_content";
+type NewResearchCommand = Extract<
   NormalizedResearchCommand,
-  NormalizedUpdateContentCommand
+  { operation: "create_post" | "reply_to_content" }
 >;
 
 export type ResearchWriteErrorCode =
@@ -136,6 +150,7 @@ export type ResearchWriteErrorCode =
   | "COMMUNITY_NOT_FOUND"
   | "COMMUNITY_RESTRICTED"
   | "CONTENT_NOT_FOUND"
+  | "DUPLICATE_CONTENT"
   | "IDEMPOTENCY_CONFLICT"
   | "IDEMPOTENCY_IN_PROGRESS"
   | "IDEMPOTENCY_RESULT_CORRUPT"
@@ -204,6 +219,10 @@ export interface UpdateContentResearchWriteInput extends UpdateContentCommandInp
   idempotencyKey: string;
 }
 
+export interface DeleteContentResearchWriteInput extends DeleteContentCommandInput {
+  idempotencyKey: string;
+}
+
 export interface ResearchWriteRequestContext {
   channel?: string | undefined;
   requestId: string;
@@ -225,6 +244,12 @@ export interface UpdateContentResearchResult {
   revisionId: string | null;
 }
 
+export interface DeleteContentResearchResult {
+  contentId: string;
+  lifecycleState: "deleted";
+  resourceVersion: number;
+}
+
 export interface ResearchPendingActionSummary {
   approvalSummary: string;
   decisionId: string;
@@ -238,16 +263,39 @@ export interface ResearchPendingActionSummary {
   state: PendingActionState;
 }
 
-export interface ResearchWriteOutcome {
+interface ResearchWriteOutcomeBase {
   decision: ResearchWriteDecision;
   error: ResearchWriteErrorDetail | null;
-  operation: ResearchWriteOperation;
   pendingAction: ResearchPendingActionSummary | null;
   replayed: boolean;
-  result:
-    CreatePostResearchResult | ReplyResearchResult | UpdateContentResearchResult | null;
   status: ResearchWriteStatus;
 }
+
+export interface CreatePostResearchWriteOutcome extends ResearchWriteOutcomeBase {
+  operation: "create_post";
+  result: CreatePostResearchResult | null;
+}
+
+export interface ReplyResearchWriteOutcome extends ResearchWriteOutcomeBase {
+  operation: "reply_to_content";
+  result: ReplyResearchResult | null;
+}
+
+export interface UpdateContentResearchWriteOutcome extends ResearchWriteOutcomeBase {
+  operation: "update_content";
+  result: UpdateContentResearchResult | null;
+}
+
+export interface DeleteContentResearchWriteOutcome extends ResearchWriteOutcomeBase {
+  operation: "delete_content";
+  result: DeleteContentResearchResult | null;
+}
+
+export type ResearchWriteOutcome =
+  | CreatePostResearchWriteOutcome
+  | ReplyResearchWriteOutcome
+  | UpdateContentResearchWriteOutcome
+  | DeleteContentResearchWriteOutcome;
 
 export interface ResearchWriteService {
   checkReady(): Promise<void>;
@@ -255,17 +303,22 @@ export interface ResearchWriteService {
     context: AgentCredentialContext,
     input: CreatePostResearchWriteInput,
     request: ResearchWriteRequestContext,
-  ): Promise<ResearchWriteOutcome>;
+  ): Promise<CreatePostResearchWriteOutcome>;
   replyToContent(
     context: AgentCredentialContext,
     input: ReplyResearchWriteInput,
     request: ResearchWriteRequestContext,
-  ): Promise<ResearchWriteOutcome>;
+  ): Promise<ReplyResearchWriteOutcome>;
   updateContent(
     context: AgentCredentialContext,
     input: UpdateContentResearchWriteInput,
     request: ResearchWriteRequestContext,
-  ): Promise<ResearchWriteOutcome>;
+  ): Promise<UpdateContentResearchWriteOutcome>;
+  deleteContent(
+    context: AgentCredentialContext,
+    input: DeleteContentResearchWriteInput,
+    request: ResearchWriteRequestContext,
+  ): Promise<DeleteContentResearchWriteOutcome>;
 }
 
 export type ApprovedResearchExecutionDisposition = "invalidate" | "retry";
@@ -305,7 +358,11 @@ export interface ApprovedResearchExecutionRepository {
 
 export interface ApprovedResearchExecutionResult {
   action: PendingActionCommittedState;
-  content: CreatePostResearchResult | ReplyResearchResult | UpdateContentResearchResult;
+  content:
+    | CreatePostResearchResult
+    | ReplyResearchResult
+    | UpdateContentResearchResult
+    | DeleteContentResearchResult;
   resolvedOutboxEventId: string;
 }
 
@@ -328,6 +385,7 @@ export interface PostgresResearchWriteOptions {
   pendingActionKeyRing: PendingCommandKeyRing;
   pendingActionTtlMs?: number | undefined;
   protectedActionIntentsPerHour?: number | undefined;
+  antiSpamLimits?: Partial<ResearchAntiSpamLimits> | undefined;
 }
 
 export interface AgentContentRateLimits {
@@ -335,6 +393,14 @@ export interface AgentContentRateLimits {
   readonly establishedRepliesPerHour: number;
   readonly newAgentPostsPerHour: number;
   readonly newAgentRepliesPerHour: number;
+}
+
+export interface ResearchAntiSpamLimits {
+  readonly duplicateContentWindowMs: number;
+  readonly ownerContentWritesPerHour: number;
+  readonly ownerPostsPerHour: number;
+  readonly pairRepliesPerThirtyMinutes: number;
+  readonly threadRepliesPerHour: number;
 }
 
 interface AuthorizationRow {
@@ -401,6 +467,7 @@ interface CommunityAdmission {
 
 interface ParentRow {
   depth: number;
+  parent_author_actor_id: string;
   parent_distribution_state: string;
   parent_lifecycle_state: string;
   primary_community_id: string;
@@ -412,6 +479,7 @@ interface ParentRow {
 interface ReplyTarget {
   communityIds: string[];
   depth: number;
+  parentAuthorActorId: string;
   parentContentId: string;
   rootContentId: string;
 }
@@ -521,6 +589,31 @@ interface PersistedContentUpdate {
   rootContentId: string;
 }
 
+interface DeleteTargetRow {
+  author_actor_id: string;
+  current_revision_id: string;
+  distribution_state: string;
+  kind: "post" | "reply";
+  lifecycle_state: string;
+  root_id: string;
+  version: number;
+}
+
+interface PreparedContentDelete {
+  contentId: string;
+  currentRevisionId: string;
+  currentVersion: number;
+  kind: "post" | "reply";
+  rootContentId: string;
+}
+
+interface PersistedContentDelete {
+  contentId: string;
+  outboxId: string;
+  result: DeleteContentResearchResult;
+  rootContentId: string;
+}
+
 function frozenUpdateBaseline(
   prepared: PreparedContentUpdate,
 ): FrozenUpdateContentBaseline {
@@ -571,6 +664,18 @@ interface AgentContentRateWindow {
   retry_at: Date | null;
 }
 
+interface AntiSpamRateWindow {
+  admitted_count: number;
+  retry_at: Date | null;
+}
+
+interface OwnerContentRateWindow {
+  post_count: number;
+  post_retry_at: Date | null;
+  write_count: number;
+  write_retry_at: Date | null;
+}
+
 interface PersistedOutcome {
   decision: ResearchWriteDecision;
   error: ResearchWriteErrorDetail | null;
@@ -587,12 +692,19 @@ interface PersistedOutcome {
     requested_at: string;
     state: PendingActionState;
   };
-  result: null | {
-    content_id: string;
-    resource_version: number;
-    revision_id: string | null;
-    root_content_id?: string | undefined;
-  };
+  result:
+    | null
+    | {
+        content_id: string;
+        resource_version: number;
+        revision_id: string | null;
+        root_content_id?: string | undefined;
+      }
+    | {
+        content_id: string;
+        lifecycle_state: "deleted";
+        resource_version: number;
+      };
   status: ResearchWriteStatus;
   version: 1;
 }
@@ -617,6 +729,7 @@ function statusForError(code: ResearchWriteErrorCode): number {
     case "IDEMPOTENCY_CONFLICT":
     case "IDEMPOTENCY_IN_PROGRESS":
     case "VERSION_CONFLICT":
+    case "DUPLICATE_CONTENT":
       return 409;
     case "COMMUNITY_RESTRICTED":
     case "NOT_CONTENT_AUTHOR":
@@ -720,6 +833,26 @@ function validateAuthorityContext(context: AgentCredentialContext): void {
 }
 
 function validateCommandBudgets(command: NormalizedResearchCommand): string[] {
+  if (command.operation === "delete_content") {
+    assertUuid(command.contentId, "content_id");
+    if (
+      !Number.isSafeInteger(command.expectedVersion) ||
+      command.expectedVersion < 1 ||
+      (command.mode !== "soft" && command.mode !== "permanent") ||
+      (command.reason !== undefined &&
+        (command.reason.trim() !== command.reason ||
+          command.reason.length === 0 ||
+          unicodeLength(command.reason) > 500 ||
+          /\p{Cc}/u.test(command.reason))) ||
+      Buffer.byteLength(JSON.stringify(command), "utf8") > COMMAND_BYTES_LIMIT
+    ) {
+      throw new ResearchWriteError(
+        "VALIDATION_ERROR",
+        "The normalized delete command is outside the operation limits.",
+      );
+    }
+    return [];
+  }
   const isPost = command.operation === "create_post";
   const isUpdate = command.operation === "update_content";
   const title = isPost ? command.title : isUpdate ? command.patch.title : undefined;
@@ -985,7 +1118,12 @@ function rateLimitedOutcome(
 }
 
 function isPlatformRuleDenial(error: ResearchWriteError): boolean {
-  return error.code === "COMMUNITY_RESTRICTED" || error.code === "REPLIES_CLOSED";
+  return (
+    error.code === "COMMUNITY_RESTRICTED" ||
+    error.code === "DUPLICATE_CONTENT" ||
+    error.code === "POLICY_DENIED" ||
+    error.code === "REPLIES_CLOSED"
+  );
 }
 
 function platformRuleDeniedOutcome(
@@ -1061,14 +1199,20 @@ function serializeOutcome(outcome: ResearchWriteOutcome): PersistedOutcome {
     result:
       outcome.result === null
         ? null
-        : {
-            content_id: outcome.result.contentId,
-            revision_id: outcome.result.revisionId,
-            resource_version: outcome.result.resourceVersion,
-            ...("rootContentId" in outcome.result
-              ? { root_content_id: outcome.result.rootContentId }
-              : {}),
-          },
+        : "lifecycleState" in outcome.result
+          ? {
+              content_id: outcome.result.contentId,
+              lifecycle_state: outcome.result.lifecycleState,
+              resource_version: outcome.result.resourceVersion,
+            }
+          : {
+              content_id: outcome.result.contentId,
+              revision_id: outcome.result.revisionId,
+              resource_version: outcome.result.resourceVersion,
+              ...("rootContentId" in outcome.result
+                ? { root_content_id: outcome.result.rootContentId }
+                : {}),
+            },
     pending_action:
       outcome.pendingAction === null
         ? null
@@ -1158,29 +1302,43 @@ function parsePersistedOutcome(
   }
 
   let result:
-    CreatePostResearchResult | ReplyResearchResult | UpdateContentResearchResult | null =
-    null;
+    | CreatePostResearchResult
+    | ReplyResearchResult
+    | UpdateContentResearchResult
+    | DeleteContentResearchResult
+    | null = null;
   if (value.result !== null) {
     const expectedResultKeys =
-      operation === "reply_to_content"
-        ? ["content_id", "revision_id", "resource_version", "root_content_id"]
-        : ["content_id", "revision_id", "resource_version"];
+      operation === "delete_content"
+        ? ["content_id", "lifecycle_state", "resource_version"]
+        : operation === "reply_to_content"
+          ? ["content_id", "revision_id", "resource_version", "root_content_id"]
+          : ["content_id", "revision_id", "resource_version"];
     if (
       !isRecord(value.result) ||
       !hasExactKeys(value.result, expectedResultKeys) ||
       typeof value.result.content_id !== "string" ||
       !isUuid(value.result.content_id) ||
-      !(
-        (operation === "update_content" && value.result.revision_id === null) ||
-        (typeof value.result.revision_id === "string" && isUuid(value.result.revision_id))
-      ) ||
+      (operation === "delete_content"
+        ? value.result.lifecycle_state !== "deleted"
+        : !(
+            (operation === "update_content" && value.result.revision_id === null) ||
+            (typeof value.result.revision_id === "string" &&
+              isUuid(value.result.revision_id))
+          )) ||
       typeof value.result.resource_version !== "number" ||
       !Number.isSafeInteger(value.result.resource_version) ||
       value.result.resource_version < 1
     ) {
       throw corruptIdempotencyResult();
     }
-    if (operation === "reply_to_content") {
+    if (operation === "delete_content") {
+      result = {
+        contentId: value.result.content_id,
+        lifecycleState: "deleted",
+        resourceVersion: value.result.resource_version,
+      };
+    } else if (operation === "reply_to_content") {
       result =
         typeof value.result.root_content_id === "string" &&
         isUuid(value.result.root_content_id) &&
@@ -1219,7 +1377,7 @@ function parsePersistedOutcome(
       !isRecord(pending) ||
       !hasExactKeys(
         pending,
-        operation === "update_content"
+        operation === "update_content" || operation === "delete_content"
           ? [
               "id",
               "operation",
@@ -1264,7 +1422,7 @@ function parsePersistedOutcome(
       pending.approval_summary.length > 2_000 ||
       pending.approval_summary.trim() !== pending.approval_summary ||
       /\p{Cc}/u.test(pending.approval_summary) ||
-      (operation === "update_content" &&
+      ((operation === "update_content" || operation === "delete_content") &&
         (typeof pending.expected_version !== "number" ||
           !Number.isSafeInteger(pending.expected_version) ||
           pending.expected_version < 1))
@@ -1291,7 +1449,7 @@ function parsePersistedOutcome(
       decisionId: pending.decision_id,
       policyVersion: pending.policy_version,
       approvalSummary: pending.approval_summary,
-      ...(operation === "update_content"
+      ...(operation === "update_content" || operation === "delete_content"
         ? { expectedVersion: pending.expected_version as number }
         : {}),
     };
@@ -1324,15 +1482,64 @@ function parsePersistedOutcome(
     }
   }
 
-  return {
-    operation,
+  const common: ResearchWriteOutcomeBase & { replayed: true } = {
     decision: value.decision,
     status: value.status,
-    result,
     pendingAction,
     error,
-    replayed: true,
+    replayed: true as const,
   };
+  switch (operation) {
+    case "create_post":
+      if (result === null) {
+        return { ...common, operation, result: null };
+      }
+      if (
+        !("revisionId" in result) ||
+        "rootContentId" in result ||
+        typeof result.revisionId !== "string"
+      ) {
+        throw corruptIdempotencyResult();
+      }
+      return {
+        ...common,
+        operation,
+        result: {
+          contentId: result.contentId,
+          resourceVersion: result.resourceVersion,
+          revisionId: result.revisionId,
+        },
+      };
+    case "reply_to_content":
+      if (
+        result !== null &&
+        (!("revisionId" in result) || !("rootContentId" in result))
+      ) {
+        throw corruptIdempotencyResult();
+      }
+      return { ...common, operation, result };
+    case "update_content":
+      if (result !== null && !("revisionId" in result)) {
+        throw corruptIdempotencyResult();
+      }
+      return {
+        ...common,
+        operation,
+        result:
+          result === null
+            ? null
+            : {
+                contentId: result.contentId,
+                resourceVersion: result.resourceVersion,
+                revisionId: result.revisionId,
+              },
+      };
+    case "delete_content":
+      if (result !== null && !("lifecycleState" in result)) {
+        throw corruptIdempotencyResult();
+      }
+      return { ...common, operation, result };
+  }
 }
 
 function corruptIdempotencyResult(): ResearchWriteError {
@@ -1413,6 +1620,7 @@ function prepareRevision(command: NewResearchCommand): PreparedRevision {
 export class PostgresResearchWriteService implements ResearchWriteService {
   readonly #activePendingActionsPerAgent: number;
   readonly #agentContentRateLimits: AgentContentRateLimits;
+  readonly #antiSpamLimits: ResearchAntiSpamLimits;
   readonly #actionLogHmacKeys = new Map<number, Buffer>();
   readonly #actionLogHmacKeyVersion: number;
   readonly #clock: () => Date;
@@ -1432,6 +1640,10 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       options.activePendingActionsPerAgent ?? DEFAULT_ACTIVE_PENDING_ACTIONS_PER_AGENT;
     const agentContentRateLimits =
       options.agentContentRateLimits ?? DEFAULT_AGENT_CONTENT_RATE_LIMITS;
+    const antiSpamLimits: ResearchAntiSpamLimits = {
+      ...DEFAULT_RESEARCH_ANTI_SPAM_LIMITS,
+      ...(options.antiSpamLimits ?? {}),
+    };
     if (!Number.isSafeInteger(retention) || retention < IDEMPOTENCY_MIN_RETENTION_MS) {
       throw new RangeError("Idempotency retention must be at least seven days.");
     }
@@ -1513,8 +1725,24 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         "Agent content rate limits must be integers from one through ten thousand, with new-Agent limits no greater than established-Agent limits.",
       );
     }
+    if (
+      !Number.isSafeInteger(antiSpamLimits.duplicateContentWindowMs) ||
+      antiSpamLimits.duplicateContentWindowMs < 60_000 ||
+      antiSpamLimits.duplicateContentWindowMs > 7 * 24 * 60 * 60 * 1_000 ||
+      [
+        antiSpamLimits.ownerContentWritesPerHour,
+        antiSpamLimits.ownerPostsPerHour,
+        antiSpamLimits.pairRepliesPerThirtyMinutes,
+        antiSpamLimits.threadRepliesPerHour,
+      ].some((limit) => !Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) ||
+      antiSpamLimits.ownerPostsPerHour > antiSpamLimits.ownerContentWritesPerHour ||
+      antiSpamLimits.pairRepliesPerThirtyMinutes > antiSpamLimits.threadRepliesPerHour
+    ) {
+      throw new RangeError("Research anti-spam limits are invalid.");
+    }
     this.#activePendingActionsPerAgent = activePendingActionsPerAgent;
     this.#agentContentRateLimits = { ...agentContentRateLimits };
+    this.#antiSpamLimits = antiSpamLimits;
     this.#actionLogHmacKeyVersion = currentKeyVersion;
     this.#sql = sql;
     this.#clock = options.clock ?? (() => new Date());
@@ -1557,6 +1785,13 @@ export class PostgresResearchWriteService implements ResearchWriteService {
             where version = '000012'
               and name = 'content_revision_write'
               and checksum = ${CONTENT_REVISION_WRITE_MIGRATION_CHECKSUM}
+          )
+          and exists (
+            select 1
+            from system.schema_migrations
+            where version = '000014'
+              and name = 'content_delete_antispam_v1'
+              and checksum = ${CONTENT_DELETE_ANTISPAM_MIGRATION_CHECKSUM}
           )
           and exists (
             select 1
@@ -1613,9 +1848,11 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         if (
           (frozenAction.operation !== "create_post" &&
             frozenAction.operation !== "reply_to_content" &&
-            frozenAction.operation !== "update_content") ||
+            frozenAction.operation !== "update_content" &&
+            frozenAction.operation !== "delete_content") ||
           frozenAction.operation !== claim.operation ||
-          (frozenAction.operation === "update_content"
+          (frozenAction.operation === "update_content" ||
+          frozenAction.operation === "delete_content"
             ? frozenAction.expectedVersion === null
             : frozenAction.expectedVersion !== null)
         ) {
@@ -1668,9 +1905,13 @@ export class PostgresResearchWriteService implements ResearchWriteService {
           frozenAction.targetId !== intendedTargetId(command) ||
           frozenAction.targetType !==
             (command.operation === "create_post" ? "community" : "content") ||
-          (command.operation === "update_content" &&
+          ((command.operation === "update_content" ||
+            command.operation === "delete_content") &&
             frozenAction.expectedVersion !== command.expectedVersion)
         ) {
+          throw new ApprovedResearchExecutionError("APPROVED_ACTION_CONTEXT_INVALID");
+        }
+        if (command.operation === "delete_content" && command.mode !== "soft") {
           throw new ApprovedResearchExecutionError("APPROVED_ACTION_CONTEXT_INVALID");
         }
         const auditDigests = this.#actionAuditDigests(
@@ -1713,6 +1954,73 @@ export class PostgresResearchWriteService implements ResearchWriteService {
           return await transaction.savepoint(
             "approved_research_mutation",
             async (transaction) => {
+              if (command.operation === "delete_content") {
+                const prepared = await this.#loadContentDeleteTarget(
+                  transaction,
+                  command,
+                  authorization.actor_id,
+                );
+                const persisted = await this.#persistContentDelete(transaction, {
+                  actorId: authorization.actor_id,
+                  now,
+                  prepared,
+                });
+                await this.#writeActionLog(transaction, {
+                  action: actionName(command.operation),
+                  actorId: authorization.actor_id,
+                  after: {
+                    content_id: persisted.contentId,
+                    idempotency_record_id: frozenAction.idempotencyRecordId,
+                    lifecycle_state: persisted.result.lifecycleState,
+                    pending_action_id: frozenAction.actionId,
+                    resource_version: persisted.result.resourceVersion,
+                  },
+                  auditDigests,
+                  agentId: frozenAction.agentId,
+                  approvalMethod: "owner_approval",
+                  approvedByOwnerId: frozenAction.ownerId,
+                  auditId: this.#newId("audit_id"),
+                  authenticationAssurance: "owner_approval_record",
+                  channel: "worker",
+                  credentialId: frozenAction.credentialId,
+                  decision: "require_approval",
+                  decisionId: originalDecisionId,
+                  errorCode: null,
+                  evaluation,
+                  outcome: "succeeded",
+                  occurredAt: now,
+                  outboxId: persisted.outboxId,
+                  ownerId: frozenAction.ownerId,
+                  policy: authorization,
+                  policySnapshotOverride: approvedExecutionPolicySnapshot(
+                    originalPolicy,
+                    authorization,
+                    evaluation,
+                    originalDecisionId,
+                    decisionAuditId,
+                  ),
+                  requestId:
+                    `worker:pending-action:${frozenAction.actionId}:` +
+                    `attempt:${frozenAction.attemptCount}`,
+                  targetId: persisted.contentId,
+                  targetType: "content",
+                });
+                const terminal = await repository.finalizeSucceeded(transaction, claim, {
+                  correlatedOutboxEventId: persisted.outboxId,
+                  resourceId: persisted.contentId,
+                  result: {
+                    content_id: persisted.result.contentId,
+                    lifecycle_state: persisted.result.lifecycleState,
+                    resource_version: persisted.result.resourceVersion,
+                  },
+                });
+                return {
+                  action: terminal.action,
+                  content: persisted.result,
+                  resolvedOutboxEventId: terminal.resolvedOutboxEventId,
+                };
+              }
+
               if (command.operation === "update_content") {
                 const prepared = await this.#loadContentUpdateTarget(
                   transaction,
@@ -1928,6 +2236,14 @@ export class PostgresResearchWriteService implements ResearchWriteService {
               const facts = await this.#resolveWriteFacts(transaction, command, []);
               facts.mentionActorIds = [...(command.frozenMentionActorIds ?? [])];
               const preparedRevision = prepareRevision(command);
+              await this.#enforceNewContentAntiSpam(transaction, {
+                actorId: authorization.actor_id,
+                command,
+                now,
+                ownerId: frozenAction.ownerId,
+                preparedRevision,
+                replyTarget,
+              });
               const persisted = await this.#insertResearchContent(transaction, {
                 authorization,
                 command,
@@ -2086,42 +2402,72 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     context: AgentCredentialContext,
     input: CreatePostResearchWriteInput,
     request: ResearchWriteRequestContext,
-  ): Promise<ResearchWriteOutcome> {
-    return this.#dispatch(
+  ): Promise<CreatePostResearchWriteOutcome> {
+    const outcome = await this.#dispatch(
       context,
       "create_post",
       () => normalizeCreatePostCommand(input),
       input.idempotencyKey,
       request,
     );
+    if (outcome.operation !== "create_post") {
+      throw new Error("Create-post dispatch returned the wrong operation.");
+    }
+    return outcome;
   }
 
   async replyToContent(
     context: AgentCredentialContext,
     input: ReplyResearchWriteInput,
     request: ResearchWriteRequestContext,
-  ): Promise<ResearchWriteOutcome> {
-    return this.#dispatch(
+  ): Promise<ReplyResearchWriteOutcome> {
+    const outcome = await this.#dispatch(
       context,
       "reply_to_content",
       () => normalizeReplyCommand(input),
       input.idempotencyKey,
       request,
     );
+    if (outcome.operation !== "reply_to_content") {
+      throw new Error("Reply dispatch returned the wrong operation.");
+    }
+    return outcome;
   }
 
   async updateContent(
     context: AgentCredentialContext,
     input: UpdateContentResearchWriteInput,
     request: ResearchWriteRequestContext,
-  ): Promise<ResearchWriteOutcome> {
-    return this.#dispatch(
+  ): Promise<UpdateContentResearchWriteOutcome> {
+    const outcome = await this.#dispatch(
       context,
       "update_content",
       () => normalizeUpdateContentCommand(input),
       input.idempotencyKey,
       request,
     );
+    if (outcome.operation !== "update_content") {
+      throw new Error("Update-content dispatch returned the wrong operation.");
+    }
+    return outcome;
+  }
+
+  async deleteContent(
+    context: AgentCredentialContext,
+    input: DeleteContentResearchWriteInput,
+    request: ResearchWriteRequestContext,
+  ): Promise<DeleteContentResearchWriteOutcome> {
+    const outcome = await this.#dispatch(
+      context,
+      "delete_content",
+      () => normalizeDeleteContentCommand(input),
+      input.idempotencyKey,
+      request,
+    );
+    if (outcome.operation !== "delete_content") {
+      throw new Error("Delete-content dispatch returned the wrong operation.");
+    }
+    return outcome;
   }
 
   async #dispatch(
@@ -2248,6 +2594,33 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       }
       const decisionId = this.#newId("decision_id");
 
+      if (command.operation === "delete_content" && command.mode === "permanent") {
+        return this.#commitPlatformRuleDenial(transaction, {
+          authorization,
+          channel,
+          command,
+          context,
+          decisionId,
+          digestBytes,
+          error: new ResearchWriteError(
+            "POLICY_DENIED",
+            "Agents cannot permanently erase Community content.",
+            {
+              details: {
+                mode: "permanent",
+                rule_version: CONTENT_DELETE_RULE_VERSION,
+              },
+            },
+          ),
+          evaluation,
+          auditDigests,
+          idempotencyKey,
+          now,
+          principalScopeKey,
+          requestId: request.requestId,
+        });
+      }
+
       if (evaluation.decision === "deny") {
         const idempotencyId = this.#newId("idempotency_record_id");
         await this.#insertIdempotency(transaction, {
@@ -2319,6 +2692,24 @@ export class PostgresResearchWriteService implements ResearchWriteService {
           evaluation,
           idempotencyKey,
           mentionHandles,
+          now,
+          principalScopeKey,
+          requestId: request.requestId,
+        });
+      }
+
+      if (command.operation === "delete_content") {
+        return this.#writeContentDelete(transaction, {
+          authorization,
+          channel,
+          command,
+          context,
+          decisionId,
+          digestBytes,
+          digestText,
+          auditDigests,
+          evaluation,
+          idempotencyKey,
           now,
           principalScopeKey,
           requestId: request.requestId,
@@ -2457,6 +2848,53 @@ export class PostgresResearchWriteService implements ResearchWriteService {
 
       const facts = await this.#resolveWriteFacts(transaction, command, mentionHandles);
       const preparedRevision = prepareRevision(command);
+      if (evaluation.decision === "allow") {
+        try {
+          await this.#enforceNewContentAntiSpam(transaction, {
+            actorId: authorization.actor_id,
+            command,
+            now,
+            ownerId: context.owner.id,
+            preparedRevision,
+            replyTarget,
+          });
+        } catch (error) {
+          if (error instanceof ResearchWriteError && error.code === "RATE_LIMITED") {
+            const outcome = rateLimitedOutcome(command.operation, error);
+            await this.#commitTransientContentRateLimit(transaction, {
+              authorization,
+              channel,
+              command,
+              context,
+              decisionId,
+              error,
+              evaluation,
+              auditDigests,
+              now,
+              requestId: request.requestId,
+            });
+            return outcome;
+          }
+          if (error instanceof ResearchWriteError && isPlatformRuleDenial(error)) {
+            return this.#commitPlatformRuleDenial(transaction, {
+              authorization,
+              channel,
+              command,
+              context,
+              decisionId,
+              digestBytes,
+              error,
+              evaluation,
+              auditDigests,
+              idempotencyKey,
+              now,
+              principalScopeKey,
+              requestId: request.requestId,
+            });
+          }
+          throw error;
+        }
+      }
       const idempotencyId = this.#newId("idempotency_record_id");
       await this.#insertIdempotency(transaction, {
         actorId: authorization.actor_id,
@@ -2763,6 +3201,280 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       );
       return outcome;
     }
+  }
+
+  async #writeContentDelete(
+    transaction: TransactionSql,
+    input: {
+      authorization: AuthorizationRow;
+      auditDigests: ResearchActionAuditDigests;
+      channel: string;
+      command: NormalizedDeleteContentCommand;
+      context: AgentCredentialContext;
+      decisionId: string;
+      digestBytes: Buffer;
+      digestText: string;
+      evaluation: AgentOperationEvaluation;
+      idempotencyKey: string;
+      now: Date;
+      principalScopeKey: string;
+      requestId: string;
+    },
+  ): Promise<ResearchWriteOutcome> {
+    if (input.command.mode !== "soft") {
+      throw new Error("Permanent content erasure must be rejected before mutation.");
+    }
+    const idempotencyId = this.#newId("idempotency_record_id");
+    await this.#insertIdempotency(transaction, {
+      actorId: input.authorization.actor_id,
+      agentId: input.context.agent.id,
+      credentialId: input.context.credential.id,
+      digestBytes: input.digestBytes,
+      id: idempotencyId,
+      idempotencyKey: input.idempotencyKey,
+      now: input.now,
+      operation: input.command.operation,
+      ownerId: input.context.owner.id,
+      principalScopeKey: input.principalScopeKey,
+    });
+
+    try {
+      return await transaction.savepoint(
+        "content_delete_mutation",
+        async (mutationTransaction) => {
+          const prepared = await this.#loadContentDeleteTarget(
+            mutationTransaction,
+            input.command,
+            input.authorization.actor_id,
+          );
+
+          if (input.evaluation.decision === "require_approval") {
+            return this.#createPendingAction(mutationTransaction, {
+              authorization: input.authorization,
+              channel: input.channel,
+              command: input.command,
+              context: input.context,
+              decisionId: input.decisionId,
+              digestBytes: input.digestBytes,
+              digestText: input.digestText,
+              auditDigests: input.auditDigests,
+              evaluation: input.evaluation,
+              idempotencyId,
+              idempotencyKey: input.idempotencyKey,
+              mentionActorIds: [],
+              now: input.now,
+              principalScopeKey: input.principalScopeKey,
+              requestId: input.requestId,
+            });
+          }
+
+          const persisted = await this.#persistContentDelete(mutationTransaction, {
+            actorId: input.authorization.actor_id,
+            now: input.now,
+            prepared,
+          });
+          await this.#writeActionLog(mutationTransaction, {
+            action: actionName(input.command.operation),
+            actorId: input.authorization.actor_id,
+            after: {
+              content_id: persisted.contentId,
+              idempotency_record_id: idempotencyId,
+              lifecycle_state: persisted.result.lifecycleState,
+              resource_version: persisted.result.resourceVersion,
+            },
+            auditDigests: input.auditDigests,
+            agentId: input.context.agent.id,
+            auditId: this.#newId("audit_id"),
+            channel: input.channel,
+            credentialId: input.context.credential.id,
+            decision: "allow",
+            decisionId: input.decisionId,
+            errorCode: null,
+            evaluation: input.evaluation,
+            outcome: "succeeded",
+            occurredAt: input.now,
+            outboxId: persisted.outboxId,
+            ownerId: input.context.owner.id,
+            policy: input.authorization,
+            requestId: input.requestId,
+            targetId: persisted.contentId,
+            targetType: "content",
+          });
+          const outcome: ResearchWriteOutcome = {
+            decision: "allow",
+            error: null,
+            operation: "delete_content",
+            pendingAction: null,
+            replayed: false,
+            result: persisted.result,
+            status: "succeeded",
+          };
+          await this.#finalizeIdempotency(
+            mutationTransaction,
+            idempotencyId,
+            "succeeded",
+            200,
+            outcome,
+            persisted.contentId,
+            input.now,
+          );
+          return outcome;
+        },
+      );
+    } catch (error) {
+      if (!(error instanceof ResearchWriteError)) throw error;
+      const outcome = isPlatformRuleDenial(error)
+        ? platformRuleDeniedOutcome("delete_content", error)
+        : expectedErrorOutcome("delete_content", input.evaluation, error);
+      await this.#writeActionLog(transaction, {
+        action: actionName(input.command.operation),
+        actorId: input.authorization.actor_id,
+        after: {
+          content_id: input.command.contentId,
+          error_code: error.code,
+          expected_version: input.command.expectedVersion,
+        },
+        auditDigests: input.auditDigests,
+        agentId: input.context.agent.id,
+        auditId: this.#newId("audit_id"),
+        channel: input.channel,
+        credentialId: input.context.credential.id,
+        decision: outcome.decision,
+        decisionId: input.decisionId,
+        errorCode: error.code,
+        evaluation: input.evaluation,
+        outcome: outcome.status === "denied" ? "denied" : "failed",
+        occurredAt: input.now,
+        outboxId: null,
+        ownerId: input.context.owner.id,
+        policy: input.authorization,
+        reasonCode: error.code.toLocaleLowerCase("en-US"),
+        requestId: input.requestId,
+        targetId: input.command.contentId,
+        targetType: "content",
+      });
+      await this.#finalizeIdempotency(
+        transaction,
+        idempotencyId,
+        outcome.status === "denied" ? "denied" : "failed",
+        error.statusCode,
+        outcome,
+        null,
+        input.now,
+      );
+      return outcome;
+    }
+  }
+
+  async #loadContentDeleteTarget(
+    transaction: TransactionSql,
+    command: NormalizedDeleteContentCommand,
+    actorId: string,
+  ): Promise<PreparedContentDelete> {
+    const rows = await transaction<DeleteTargetRow[]>`
+      select
+        content.author_actor_id,
+        content.current_revision_id,
+        content.distribution_state,
+        content.kind,
+        content.lifecycle_state,
+        content.root_id,
+        content.version::integer as version
+      from platform.content_items as content
+      where content.id = ${command.contentId}
+      limit 1
+      for update
+    `;
+    const target = rows[0];
+    if (!target || target.lifecycle_state !== "published") {
+      throw new ResearchWriteError(
+        "CONTENT_NOT_FOUND",
+        "The ContentItem is not available for deletion.",
+      );
+    }
+    if (target.author_actor_id !== actorId) {
+      throw new ResearchWriteError(
+        "NOT_CONTENT_AUTHOR",
+        "Only the authoring Agent can delete this ContentItem.",
+      );
+    }
+    if (target.version !== command.expectedVersion) {
+      throw new ResearchWriteError(
+        "VERSION_CONFLICT",
+        "The ContentItem version changed before deletion.",
+        {
+          details: {
+            current_version: target.version,
+            expected_version: command.expectedVersion,
+          },
+        },
+      );
+    }
+    if (!isUuid(target.current_revision_id) || !isUuid(target.root_id)) {
+      throw new Error("A published ContentItem has an invalid revision or root.");
+    }
+    return {
+      contentId: command.contentId,
+      currentRevisionId: target.current_revision_id,
+      currentVersion: target.version,
+      kind: target.kind,
+      rootContentId: target.root_id,
+    };
+  }
+
+  async #persistContentDelete(
+    transaction: TransactionSql,
+    input: {
+      actorId: string;
+      now: Date;
+      prepared: PreparedContentDelete;
+    },
+  ): Promise<PersistedContentDelete> {
+    const resourceVersion = input.prepared.currentVersion + 1;
+    const updated = await transaction<{ version: number }[]>`
+      update platform.content_items
+      set version = ${resourceVersion},
+          lifecycle_state = 'deleted',
+          deleted_at = ${input.now}
+      where id = ${input.prepared.contentId}
+        and author_actor_id = ${input.actorId}
+        and version = ${input.prepared.currentVersion}
+        and lifecycle_state = 'published'
+        and current_revision_id = ${input.prepared.currentRevisionId}
+      returning version::integer as version
+    `;
+    if (updated.length !== 1 || updated[0]?.version !== resourceVersion) {
+      throw new ResearchWriteError(
+        "VERSION_CONFLICT",
+        "The ContentItem changed while deletion was being committed.",
+      );
+    }
+    const { id: outboxId } = await appendOutboxEvent(transaction, {
+      aggregateId: input.prepared.contentId,
+      aggregateType: "content",
+      eventType: "content.deleted",
+      eventVersion: 1,
+      occurredAt: input.now,
+      payload: {
+        actor_id: input.actorId,
+        content_id: input.prepared.contentId,
+        current_revision_id: input.prepared.currentRevisionId,
+        kind: input.prepared.kind,
+        lifecycle_state: "deleted",
+        resource_version: resourceVersion,
+        root_content_id: input.prepared.rootContentId,
+      },
+    });
+    return {
+      contentId: input.prepared.contentId,
+      outboxId,
+      result: {
+        contentId: input.prepared.contentId,
+        lifecycleState: "deleted",
+        resourceVersion,
+      },
+      rootContentId: input.prepared.rootContentId,
+    };
   }
 
   #actionAuditDigests(
@@ -3085,7 +3797,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       transaction,
       idempotencyId,
       "denied",
-      403,
+      input.error.statusCode,
       outcome,
       null,
       input.now,
@@ -3576,6 +4288,252 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     }
   }
 
+  async #enforceOwnerContentWriteRate(
+    transaction: TransactionSql,
+    input: {
+      now: Date;
+      operation: "create_post" | "reply_to_content";
+      ownerId: string;
+    },
+  ): Promise<void> {
+    const lockKey = `alphanet:owner-content-rate:${input.ownerId}`;
+    await transaction`
+      select pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(${lockKey}, 0)
+      )
+    `;
+    const windowStart = new Date(input.now.valueOf() - AGENT_CONTENT_RATE_WINDOW_MS);
+    const rows = await transaction<OwnerContentRateWindow[]>`
+      select
+        count(*) filter (
+          where log.action = 'content.create_post'
+        )::integer as post_count,
+        min(log.occurred_at) filter (
+          where log.action = 'content.create_post'
+        ) + interval '1 hour' as post_retry_at,
+        count(*)::integer as write_count,
+        min(log.occurred_at) + interval '1 hour' as write_retry_at
+      from platform.action_logs as log
+      where log.owner_id = ${input.ownerId}
+        and log.event_class = 'domain_write'
+        and log.action in (
+          'content.create_post',
+          'content.reply_to_content'
+        )
+        and log.outcome = 'succeeded'
+        and log.occurred_at >= ${windowStart}
+    `;
+    const window = rows[0];
+    if (
+      !window ||
+      !Number.isInteger(window.post_count) ||
+      !Number.isInteger(window.write_count) ||
+      window.post_count < 0 ||
+      window.write_count < 0
+    ) {
+      throw new Error("Owner content quota projection returned invalid data.");
+    }
+    if (
+      input.operation === "create_post" &&
+      window.post_count >= this.#antiSpamLimits.ownerPostsPerHour
+    ) {
+      const retryAt =
+        window.post_retry_at?.valueOf() ??
+        input.now.valueOf() + AGENT_CONTENT_RATE_WINDOW_MS;
+      throw new ResearchWriteError(
+        "RATE_LIMITED",
+        "The Owner post limit for this rolling hour has been reached.",
+        {
+          details: {
+            limit: this.#antiSpamLimits.ownerPostsPerHour,
+            limit_dimension: "owner_post_hour",
+            rule_version: RESEARCH_ANTI_SPAM_RULE_VERSION,
+          },
+          retryable: true,
+          retryAfterMs: Math.max(1, retryAt - input.now.valueOf()),
+        },
+      );
+    }
+    if (window.write_count >= this.#antiSpamLimits.ownerContentWritesPerHour) {
+      const retryAt =
+        window.write_retry_at?.valueOf() ??
+        input.now.valueOf() + AGENT_CONTENT_RATE_WINDOW_MS;
+      throw new ResearchWriteError(
+        "RATE_LIMITED",
+        "The Owner content-write limit for this rolling hour has been reached.",
+        {
+          details: {
+            limit: this.#antiSpamLimits.ownerContentWritesPerHour,
+            limit_dimension: "owner_content_write_hour",
+            rule_version: RESEARCH_ANTI_SPAM_RULE_VERSION,
+          },
+          retryable: true,
+          retryAfterMs: Math.max(1, retryAt - input.now.valueOf()),
+        },
+      );
+    }
+  }
+
+  async #enforceNewContentAntiSpam(
+    transaction: TransactionSql,
+    input: {
+      actorId: string;
+      command: NewResearchCommand;
+      now: Date;
+      ownerId: string;
+      preparedRevision: PreparedRevision;
+      replyTarget: ReplyTarget | null;
+    },
+  ): Promise<void> {
+    await this.#enforceOwnerContentWriteRate(transaction, {
+      now: input.now,
+      operation: input.command.operation,
+      ownerId: input.ownerId,
+    });
+    const contentHash = input.preparedRevision.contentHash.toString("hex");
+    const lockKeys = [`alphanet:content-duplicate:${input.actorId}:${contentHash}`];
+    if (input.command.operation === "reply_to_content") {
+      if (!input.replyTarget) {
+        throw new Error("Reply anti-spam admission requires a reply target.");
+      }
+      lockKeys.push(
+        `alphanet:thread-reply-rate:${input.actorId}:${input.replyTarget.rootContentId}`,
+      );
+      if (input.replyTarget.parentAuthorActorId !== input.actorId) {
+        const actorPair = [input.actorId, input.replyTarget.parentAuthorActorId].sort();
+        lockKeys.push(
+          `alphanet:pair-reply-rate:${input.replyTarget.rootContentId}:${actorPair[0]}:${actorPair[1]}`,
+        );
+      }
+    }
+    for (const lockKey of lockKeys) {
+      await transaction`
+        select pg_catalog.pg_advisory_xact_lock(
+          pg_catalog.hashtextextended(${lockKey}, 0)
+        )
+      `;
+    }
+
+    const duplicateWindowStart = new Date(
+      input.now.valueOf() - this.#antiSpamLimits.duplicateContentWindowMs,
+    );
+    const duplicates = await transaction<{ original_content_id: string }[]>`
+      select revision.content_id as original_content_id
+      from platform.content_revisions as revision
+      where revision.created_by_actor_id = ${input.actorId}
+        and revision.content_hash = ${input.preparedRevision.contentHash}
+        and revision.created_at >= ${duplicateWindowStart}
+      order by revision.created_at desc, revision.content_id
+      limit 1
+    `;
+    const duplicate = duplicates[0];
+    if (duplicate) {
+      throw new ResearchWriteError(
+        "DUPLICATE_CONTENT",
+        "The same Agent already published identical content recently.",
+        {
+          details: {
+            original_content_id: duplicate.original_content_id,
+            rule_version: RESEARCH_ANTI_SPAM_RULE_VERSION,
+          },
+        },
+      );
+    }
+
+    if (input.command.operation !== "reply_to_content" || !input.replyTarget) {
+      return;
+    }
+    const threadWindowStart = new Date(
+      input.now.valueOf() - AGENT_CONTENT_RATE_WINDOW_MS,
+    );
+    const threadRows = await transaction<AntiSpamRateWindow[]>`
+      select
+        count(*)::integer as admitted_count,
+        min(reply.published_at) + interval '1 hour' as retry_at
+      from platform.content_items as reply
+      where reply.root_id = ${input.replyTarget.rootContentId}
+        and reply.author_actor_id = ${input.actorId}
+        and reply.kind = 'reply'
+        and reply.published_at >= ${threadWindowStart}
+    `;
+    const threadWindow = threadRows[0];
+    if (
+      !threadWindow ||
+      !Number.isInteger(threadWindow.admitted_count) ||
+      threadWindow.admitted_count < 0
+    ) {
+      throw new Error("Thread reply quota projection returned invalid data.");
+    }
+    if (threadWindow.admitted_count >= this.#antiSpamLimits.threadRepliesPerHour) {
+      const retryAt =
+        threadWindow.retry_at?.valueOf() ??
+        input.now.valueOf() + AGENT_CONTENT_RATE_WINDOW_MS;
+      throw new ResearchWriteError(
+        "RATE_LIMITED",
+        "The Agent reply limit for this discussion has been reached.",
+        {
+          details: {
+            limit: this.#antiSpamLimits.threadRepliesPerHour,
+            limit_dimension: "actor_thread_reply_hour",
+            rule_version: RESEARCH_ANTI_SPAM_RULE_VERSION,
+          },
+          retryable: true,
+          retryAfterMs: Math.max(1, retryAt - input.now.valueOf()),
+        },
+      );
+    }
+
+    const parentAuthorActorId = input.replyTarget.parentAuthorActorId;
+    if (parentAuthorActorId === input.actorId) return;
+    const pairWindowMs = 30 * 60 * 1_000;
+    const pairWindowStart = new Date(input.now.valueOf() - pairWindowMs);
+    const pairRows = await transaction<AntiSpamRateWindow[]>`
+      select
+        count(*)::integer as admitted_count,
+        min(reply.published_at) + interval '30 minutes' as retry_at
+      from platform.content_items as reply
+      join platform.content_items as parent on parent.id = reply.parent_id
+      where reply.root_id = ${input.replyTarget.rootContentId}
+        and reply.kind = 'reply'
+        and reply.published_at >= ${pairWindowStart}
+        and (
+          (
+            reply.author_actor_id = ${input.actorId}
+            and parent.author_actor_id = ${parentAuthorActorId}
+          )
+          or (
+            reply.author_actor_id = ${parentAuthorActorId}
+            and parent.author_actor_id = ${input.actorId}
+          )
+        )
+    `;
+    const pairWindow = pairRows[0];
+    if (
+      !pairWindow ||
+      !Number.isInteger(pairWindow.admitted_count) ||
+      pairWindow.admitted_count < 0
+    ) {
+      throw new Error("Pair reply quota projection returned invalid data.");
+    }
+    if (pairWindow.admitted_count >= this.#antiSpamLimits.pairRepliesPerThirtyMinutes) {
+      const retryAt =
+        pairWindow.retry_at?.valueOf() ?? input.now.valueOf() + pairWindowMs;
+      throw new ResearchWriteError(
+        "RATE_LIMITED",
+        "The cross-Agent reply limit for this discussion has been reached.",
+        {
+          details: {
+            limit: this.#antiSpamLimits.pairRepliesPerThirtyMinutes,
+            limit_dimension: "actor_pair_thread_reply_30m",
+            rule_version: RESEARCH_ANTI_SPAM_RULE_VERSION,
+          },
+          retryable: true,
+          retryAfterMs: Math.max(1, retryAt - input.now.valueOf()),
+        },
+      );
+    }
+  }
+
   async #enforceProtectedActionIntent(
     transaction: TransactionSql,
     ownerId: string,
@@ -3664,6 +4622,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     const rows = await transaction<ParentRow[]>`
       select
         parent.depth,
+        parent.author_actor_id as parent_author_actor_id,
         parent.lifecycle_state as parent_lifecycle_state,
         parent.distribution_state as parent_distribution_state,
         root.id as root_id,
@@ -3708,6 +4667,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         ...additional.map((item) => item.community_id),
       ],
       depth: row.depth + 1,
+      parentAuthorActorId: row.parent_author_actor_id,
       parentContentId,
       rootContentId: row.root_id,
     };
@@ -4435,7 +5395,9 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         ? `Create one post in ${1 + input.command.additionalCommunityIds.length} ${input.command.additionalCommunityIds.length === 0 ? "Community" : "Communities"}.`
         : input.command.operation === "reply_to_content"
           ? "Create one reply in an existing discussion."
-          : `Update one ContentItem from version ${input.command.expectedVersion}.`;
+          : input.command.operation === "update_content"
+            ? `Update one ContentItem from version ${input.command.expectedVersion}.`
+            : `Soft-delete one ContentItem from version ${input.command.expectedVersion}.`;
     const commandWithFrozenMentions = freezeResearchCommandMentionActors(
       input.command,
       input.mentionActorIds,
@@ -4547,7 +5509,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         ${input.command.operation},
         ${targetType},
         ${targetId},
-        ${input.command.operation === "update_content" ? input.command.expectedVersion : null},
+        ${input.command.operation === "update_content" || input.command.operation === "delete_content" ? input.command.expectedVersion : null},
         ${encrypted.ciphertext},
         ${encrypted.nonce},
         ${encrypted.keyVersion},
@@ -4581,7 +5543,8 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         id: actionId,
         inputDigest: input.digestText,
         operation: input.command.operation,
-        ...(input.command.operation === "update_content"
+        ...(input.command.operation === "update_content" ||
+        input.command.operation === "delete_content"
           ? { expectedVersion: input.command.expectedVersion }
           : {}),
         policyVersion: input.authorization.policy_version,
@@ -4907,15 +5870,35 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       targetType: "content",
     });
 
-    const outcome: ResearchWriteOutcome = {
-      decision: "allow",
-      error: null,
-      operation: input.command.operation,
-      pendingAction: null,
-      replayed: false,
-      result: persisted.result,
-      status: "succeeded",
-    };
+    const outcome: ResearchWriteOutcome =
+      input.command.operation === "create_post"
+        ? {
+            decision: "allow",
+            error: null,
+            operation: "create_post",
+            pendingAction: null,
+            replayed: false,
+            result: {
+              contentId: persisted.result.contentId,
+              resourceVersion: persisted.result.resourceVersion,
+              revisionId: persisted.result.revisionId,
+            },
+            status: "succeeded",
+          }
+        : {
+            decision: "allow",
+            error: null,
+            operation: "reply_to_content",
+            pendingAction: null,
+            replayed: false,
+            result: {
+              contentId: persisted.result.contentId,
+              resourceVersion: persisted.result.resourceVersion,
+              revisionId: persisted.result.revisionId,
+              rootContentId: persisted.rootContentId,
+            },
+            status: "succeeded",
+          };
     await this.#finalizeIdempotency(
       transaction,
       input.idempotencyId,
@@ -5065,6 +6048,8 @@ function actionName(operation: ResearchWriteOperation): string {
       return "content.reply_to_content";
     case "update_content":
       return "content.update_content";
+    case "delete_content":
+      return "content.delete_content";
   }
 }
 
@@ -5075,6 +6060,8 @@ function intendedTargetId(command: NormalizedResearchCommand): string {
     case "reply_to_content":
       return command.parentContentId;
     case "update_content":
+      return command.contentId;
+    case "delete_content":
       return command.contentId;
   }
 }

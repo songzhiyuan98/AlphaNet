@@ -119,6 +119,14 @@ function updatePendingAction(): AgentPendingActionView {
   };
 }
 
+function deletePendingAction(): AgentPendingActionView {
+  return {
+    ...pendingAction(),
+    operation: "delete_content",
+    expectedVersion: 7,
+  };
+}
+
 function createApp(options?: {
   action?: AgentPendingActionView;
   context?: AgentCredentialContext;
@@ -190,6 +198,79 @@ describe("PendingAction Agent route", () => {
         operation: "update_content",
       },
     });
+  });
+
+  it("returns the optimistic-concurrency version for a content delete action", async () => {
+    const { app } = createApp({ action: deletePendingAction() });
+    const response = await app.inject({
+      headers: { authorization: `Bearer ${apiKey}` },
+      method: "GET",
+      url: `/v1/actions/${ids.action}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(GetActionStatusResponseSchema.safeParse(response.json()).success).toBe(true);
+    expect(response.json()).toMatchObject({
+      action: {
+        expected_version: 7,
+        operation: "delete_content",
+      },
+    });
+  });
+
+  it("returns the terminal result for an Owner-approved content delete", async () => {
+    const completedAt = new Date(requestedAt.valueOf() + 3_000);
+    const action: AgentPendingActionView = {
+      ...deletePendingAction(),
+      status: "succeeded",
+      state: "succeeded",
+      decidedAt: new Date(requestedAt.valueOf() + 1_000),
+      executingAt: new Date(requestedAt.valueOf() + 2_000),
+      completedAt,
+      terminalAt: completedAt,
+      approvalOutcome: "approved",
+      approvalMethod: "owner_approval",
+      decidedByOwnerId: ids.owner,
+      result: {
+        content_id: "80000000-0000-4000-8000-000000000001",
+        lifecycle_state: "deleted",
+        resource_version: 8,
+      },
+    };
+    const { app } = createApp({ action });
+    const response = await app.inject({
+      headers: { authorization: `Bearer ${apiKey}` },
+      method: "GET",
+      url: `/v1/actions/${ids.action}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(GetActionStatusResponseSchema.parse(response.json())).toMatchObject({
+      action: {
+        operation: "delete_content",
+        expected_version: 7,
+        state: "succeeded",
+        result: {
+          lifecycle_state: "deleted",
+          resource_version: 8,
+        },
+      },
+    });
+  });
+
+  it("fails closed when a content delete action loses its frozen version", async () => {
+    const invalid = { ...deletePendingAction(), expectedVersion: null };
+    const { app } = createApp({ action: invalid });
+    const response = await app.inject({
+      headers: { authorization: `Bearer ${apiKey}` },
+      method: "GET",
+      url: `/v1/actions/${ids.action}`,
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
+      "ACTION_STATUS_UNAVAILABLE",
+    );
   });
 
   it("requires actions:read before querying the action service", async () => {

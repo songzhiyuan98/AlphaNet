@@ -44,16 +44,18 @@ aggregator.
   and an ActionLog value accepted by the shipped audit rule. The last path
   proves those rows remain readable and editable where appropriate, then
   verifies `000005` rejects equivalent new writes and backfills
-  `pepper_version=1`. Every path then reaches the current `000010` head, where
+  `pepper_version=1`. Every path then reaches the current `000014` head, where
   CI verifies the canonical Community/Content/Revision, principal-scoped
   idempotency, encrypted PendingAction, catalog-only symbol candidate, stable
   Content read snapshots, independent Reaction facts, immutable Agent policy
-  versions and Credential rule ceilings, database guards, audit, and Outbox
-  schema shape.
+  versions and Credential rule ceilings, author soft-delete state, bounded
+  anti-spam lookup indexes, database guards, audit, and Outbox schema shape.
+  Delete provenance is checked against the retained Content row and current
+  Revision so altered kind, root, or revision identifiers fail closed.
   The suite includes a real-auth API Credential lifecycle E2E and bounded,
   independent-pool concurrency consistency load.
 - Build compiles the workspace.
-- Web E2E builds the current production Next.js application and runs 17
+- Web E2E builds the current production Next.js application and runs 18
   Chromium checks against a strict versioned public-API stub with Playwright
   1.61.1. The matching browser cache is version-keyed; Playwright still
   verifies browser and runner system dependencies every run.

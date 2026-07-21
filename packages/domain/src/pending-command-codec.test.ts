@@ -13,6 +13,7 @@ import {
   freezeResearchCommandMentionActors,
   freezeUpdateContentBaseline,
   normalizeCreatePostCommand,
+  normalizeDeleteContentCommand,
   normalizeUpdateContentCommand,
 } from "./research-command.js";
 
@@ -160,5 +161,31 @@ describe("PendingAction frozen command codec", () => {
         keys: { 1: keyV1, 2: keyV2 },
       }),
     ).toEqual(updateCommand);
+  });
+
+  it("round-trips an explicit delete intent without adding mention state", () => {
+    const deleteCommand = normalizeDeleteContentCommand({
+      contentId: randomUUID(),
+      expectedVersion: 3,
+      mode: "soft",
+      reason: "The underlying source was withdrawn.",
+    });
+    const deleteAuthority: PendingCommandAuthority = {
+      ...authority,
+      actionId: randomUUID(),
+      operation: deleteCommand.operation,
+      inputDigest: digestResearchCommand(deleteCommand),
+    };
+    const encrypted = encryptPendingCommand(deleteCommand, deleteAuthority, {
+      currentVersion: 2,
+      keys: { 1: keyV1, 2: keyV2 },
+    });
+
+    expect(
+      decryptPendingCommand(encrypted, deleteAuthority, {
+        currentVersion: 2,
+        keys: { 1: keyV1, 2: keyV2 },
+      }),
+    ).toEqual(deleteCommand);
   });
 });

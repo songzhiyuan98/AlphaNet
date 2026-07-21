@@ -10,6 +10,7 @@ import {
   freezeResearchCommandMentionActors,
   freezeUpdateContentBaseline,
   normalizeCreatePostCommand,
+  normalizeDeleteContentCommand,
   normalizeReplyCommand,
   normalizeUpdateContentCommand,
   type NormalizedResearchCommand,
@@ -381,6 +382,24 @@ function parseNormalizedCommand(value: unknown): NormalizedResearchCommand {
         ),
       );
     }
+  }
+
+  if (
+    command.operation === "delete_content" &&
+    Object.keys(command).every((key) =>
+      ["operation", "contentId", "expectedVersion", "mode", "reason"].includes(key),
+    ) &&
+    typeof command.contentId === "string" &&
+    typeof command.expectedVersion === "number" &&
+    (command.mode === "soft" || command.mode === "permanent") &&
+    (command.reason === undefined || typeof command.reason === "string")
+  ) {
+    return normalizeDeleteContentCommand({
+      contentId: command.contentId,
+      expectedVersion: command.expectedVersion,
+      mode: command.mode,
+      ...(command.reason === undefined ? {} : { reason: command.reason }),
+    });
   }
 
   throw new PendingCommandCodecError("PENDING_COMMAND_PAYLOAD_INVALID");

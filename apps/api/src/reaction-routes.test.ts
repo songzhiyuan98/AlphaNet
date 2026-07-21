@@ -224,7 +224,7 @@ describe("Reaction Agent route", () => {
       expect(insufficientScopeResponse.headers["www-authenticate"]).toContain(
         'scope="reaction:write"',
       );
-      expect(insufficientScopeLimit).toHaveBeenCalledTimes(4);
+      expect(insufficientScopeLimit).toHaveBeenCalledTimes(5);
       expect(insufficientScope.authenticateStaticApiKey).toHaveBeenCalledOnce();
       expect(insufficientScope.setReaction).not.toHaveBeenCalled();
 
@@ -243,13 +243,13 @@ describe("Reaction Agent route", () => {
       });
 
       expect(authorizedResponse.statusCode).toBe(expectedParseStatus);
-      expect(authorizedLimit).toHaveBeenCalledTimes(4);
+      expect(authorizedLimit).toHaveBeenCalledTimes(5);
       expect(authorized.authenticateStaticApiKey).toHaveBeenCalledOnce();
       expect(authorized.setReaction).not.toHaveBeenCalled();
     },
   );
 
-  it("serializes a successful target-state write and applies the route credential limit", async () => {
+  it("serializes a successful write and consumes global plus shared write budgets", async () => {
     const consume = vi.fn(() => Promise.resolve({ allowed: true, retryAfter: null }));
     const { app, setReaction } = createApp({ rateLimiter: { consume } });
     const response = await app.inject({
@@ -291,12 +291,13 @@ describe("Reaction Agent route", () => {
       { channel: "rest", requestId: setReaction.mock.calls[0]?.[2].requestId },
     );
     expect(setReaction.mock.calls[0]?.[2].requestId).toBeTypeOf("string");
-    expect(consume).toHaveBeenCalledTimes(4);
+    expect(consume).toHaveBeenCalledTimes(5);
     expect(consume.mock.calls).toEqual([
       ["ip:127.0.0.1:agent-api", { max: 120, window: 60 }],
-      [`credential:${ids.credential}:agent-api`, { max: 20, window: 60 }],
+      [`credential:${ids.credential}:agent-api`, { max: 120, window: 60 }],
       [`agent:${ids.agent}:agent-api`, { max: 120, window: 60 }],
       [`owner:${ids.owner}:agent-api`, { max: 120, window: 60 }],
+      [`credential:${ids.credential}:agent-api:write`, { max: 20, window: 60 }],
     ]);
   });
 

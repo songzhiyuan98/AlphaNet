@@ -16,6 +16,7 @@ import {
   digestResearchCommand,
   freezeUpdateContentBaseline,
   normalizeCreatePostCommand,
+  normalizeDeleteContentCommand,
   normalizeUpdateContentCommand,
 } from "./research-command.js";
 import { PENDING_ACTION_EXECUTION_MIGRATION_CHECKSUM } from "./schema-migrations.js";
@@ -127,6 +128,13 @@ const updateCommand = freezeUpdateContentBaseline(
   },
 );
 const updateInputDigest = digestResearchCommand(updateCommand);
+const deleteCommand = normalizeDeleteContentCommand({
+  contentId,
+  expectedVersion: 7,
+  mode: "soft",
+  reason: "UGC_DELETE_SECRET_MARKER: superseded by corrected evidence.",
+});
+const deleteInputDigest = digestResearchCommand(deleteCommand);
 
 function service(sql: PostgresClient) {
   return new PostgresOwnerPendingActionService(sql, {
@@ -230,6 +238,34 @@ function updateDetailRow(overrides: Readonly<Record<string, unknown>> = {}) {
     normalized_input_key_version: encrypted.keyVersion,
     normalized_input_format_version: encrypted.formatVersion,
     input_digest_text: updateInputDigest,
+    expected_version_text: "7",
+    ...overrides,
+  });
+}
+
+function deleteDetailRow(overrides: Readonly<Record<string, unknown>> = {}) {
+  const encrypted = encryptPendingCommand(
+    deleteCommand,
+    {
+      actionId,
+      agentId,
+      credentialId,
+      inputDigest: deleteInputDigest,
+      operation: "delete_content",
+      ownerId,
+    },
+    keyRing,
+  );
+  return detailRow({
+    operation: "delete_content",
+    target_type: "content",
+    target_id: contentId,
+    approval_summary: "Soft-delete one published research item.",
+    normalized_input_ciphertext: encrypted.ciphertext,
+    normalized_input_nonce: encrypted.nonce,
+    normalized_input_key_version: encrypted.keyVersion,
+    normalized_input_format_version: encrypted.formatVersion,
+    input_digest_text: deleteInputDigest,
     expected_version_text: "7",
     ...overrides,
   });
@@ -390,6 +426,29 @@ describe("PostgresOwnerPendingActionService readiness and list", () => {
     expect(page.items).toEqual([
       expect.objectContaining({
         operation: "update_content",
+        target: { id: contentId, type: "content" },
+      }),
+    ]);
+  });
+
+  it("lists delete_content as a content-targeted Owner action", async () => {
+    const row = summaryRow({
+      operation: "delete_content",
+      target_type: "content",
+      target_id: contentId,
+      approval_summary: "Soft-delete one published research item.",
+    });
+    const harness = createTestSql((text) =>
+      text.includes("order by action.requested_at desc") ? [row] : [],
+    );
+
+    const page = await service(harness.sql).listActions(ownerId, {
+      operations: ["delete_content"],
+    });
+
+    expect(page.items).toEqual([
+      expect.objectContaining({
+        operation: "delete_content",
         target: { id: contentId, type: "content" },
       }),
     ]);
@@ -557,6 +616,29 @@ describe("PostgresOwnerPendingActionService detail boundary", () => {
     expect(JSON.stringify(harness.calls)).not.toContain("UGC_UPDATE_SECRET_MARKER");
   });
 
+  it("decrypts a delete preview while keeping its UGC reason out of audit values", async () => {
+    const row = deleteDetailRow();
+    const harness = createTestSql((text) => {
+      if (text.startsWith("set local")) return [];
+      if (text.includes("for share of action")) return [row];
+      if (text.includes("insert into platform.action_logs")) return [];
+      return [];
+    });
+
+    const view = await service(harness.sql).getAction(ownerId, actionId, {
+      requestId: "request-delete-detail",
+    });
+
+    expect(view).toMatchObject({
+      command: deleteCommand,
+      expectedVersion: 7,
+      operation: "delete_content",
+      target: { id: contentId, type: "content" },
+    });
+    const audit = harness.calls.find((call) => call.text.includes("'owner_detail_view'"));
+    expect(JSON.stringify(audit?.values)).not.toContain("UGC_DELETE_SECRET_MARKER");
+  });
+
   it("fails closed when an update target or expected version contradicts ciphertext", async () => {
     for (const row of [
       updateDetailRow({ expected_version_text: "8" }),
@@ -573,6 +655,29 @@ describe("PostgresOwnerPendingActionService detail boundary", () => {
       await expect(
         service(harness.sql).getAction(ownerId, actionId, {
           requestId: "request-update-mismatch",
+        }),
+      ).rejects.toSatisfy((error: unknown) => {
+        expectOwnerError(error, "OWNER_ACTION_UNAVAILABLE");
+        return true;
+      });
+    }
+  });
+
+  it("fails closed when a delete target or expected version contradicts ciphertext", async () => {
+    for (const row of [
+      deleteDetailRow({ expected_version_text: "8" }),
+      deleteDetailRow({ expected_version_text: null }),
+      deleteDetailRow({ target_id: communityId }),
+    ]) {
+      const harness = createTestSql((text) => {
+        if (text.startsWith("set local")) return [];
+        if (text.includes("for share of action")) return [row];
+        if (text.includes("insert into platform.action_logs")) return [];
+        return [];
+      });
+      await expect(
+        service(harness.sql).getAction(ownerId, actionId, {
+          requestId: "request-delete-mismatch",
         }),
       ).rejects.toSatisfy((error: unknown) => {
         expectOwnerError(error, "OWNER_ACTION_UNAVAILABLE");
@@ -732,6 +837,41 @@ describe("PostgresOwnerPendingActionService decisions", () => {
       operation: "update_content",
     });
     expect(JSON.stringify(envelope)).not.toContain("UGC_UPDATE_SECRET_MARKER");
+  });
+
+  it("preserves delete expected_version in replay without logging its UGC reason", async () => {
+    const harness = decisionHarness(deleteDetailRow(), "approve");
+
+    const view = await service(harness.sql).approveAction(ownerId, actionId, {
+      expectedVersion: 1,
+      reasonCode: "owner_approved",
+      requestId: "request-approve-delete",
+    });
+
+    expect(view).toMatchObject({
+      command: deleteCommand,
+      expectedVersion: 7,
+      operation: "delete_content",
+      state: "approved",
+    });
+    const idempotency = harness.calls.find((call) =>
+      call.text.includes("update platform.idempotency_records as idempotency"),
+    );
+    const envelope = idempotency?.values.find(
+      (value) => typeof value === "object" && value !== null && "pending_action" in value,
+    ) as
+      | {
+          pending_action: {
+            expected_version?: number;
+            operation: string;
+          };
+        }
+      | undefined;
+    expect(envelope?.pending_action).toMatchObject({
+      expected_version: 7,
+      operation: "delete_content",
+    });
+    expect(JSON.stringify(harness.calls)).not.toContain("UGC_DELETE_SECRET_MARKER");
   });
 
   it("rejects atomically with exact DB/public errors, terminal retention, and camel replay error", async () => {
