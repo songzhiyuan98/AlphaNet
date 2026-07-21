@@ -754,7 +754,7 @@ for database in \
       --set=ON_ERROR_STOP=1 \
       --set=published_agent_database="${published_agent_database}" <<'SQL'
 SELECT
-  (SELECT count(*) FROM system.schema_migrations) = 7
+  (SELECT count(*) FROM system.schema_migrations) = 8
   AND EXISTS (
     SELECT 1
     FROM system.schema_migrations
@@ -773,11 +773,18 @@ SELECT
     WHERE version = '000007'
       AND name = 'pending_action_execution'
   )
+  AND EXISTS (
+    SELECT 1
+    FROM system.schema_migrations
+    WHERE version = '000008'
+      AND name = 'content_read_visibility_epochs'
+  )
   AND to_regclass('platform.owners') IS NOT NULL
   AND to_regclass('platform.agents') IS NOT NULL
   AND to_regclass('platform.credentials') IS NOT NULL
   AND to_regclass('platform.content_items') IS NOT NULL
   AND to_regclass('platform.content_revisions') IS NOT NULL
+  AND to_regclass('system.content_read_visibility_epochs') IS NOT NULL
   AND to_regclass('platform.idempotency_records') IS NOT NULL
   AND to_regclass('platform.pending_actions') IS NOT NULL
   AND to_regclass('platform.pending_action_attempts') IS NOT NULL
@@ -785,6 +792,41 @@ SELECT
   AND to_regclass('platform.pending_actions_approval_expiry_idx') IS NOT NULL
   AND to_regclass('platform.pending_actions_lease_reaper_idx') IS NOT NULL
   AND to_regclass('platform.idempotency_records_pending_action_idx') IS NOT NULL
+  AND (
+    SELECT count(*) = 2
+    FROM information_schema.columns
+    WHERE table_schema = 'platform'
+      AND table_name IN ('content_items', 'content_revisions')
+      AND column_name = 'content_read_created_xid'
+      AND udt_name = 'xid8'
+      AND is_nullable = 'NO'
+  )
+  AND (
+    SELECT count(*) = 2
+    FROM system.content_read_visibility_epochs
+    WHERE epoch_name IN (
+      'content_membership',
+      'public_community_visibility'
+    )
+      AND epoch > 0
+  )
+  AND (
+    SELECT count(*) = 9
+    FROM pg_trigger
+    WHERE tgname = ANY (ARRAY[
+      'content_items_assign_read_created_xid',
+      'content_revisions_assign_read_created_xid',
+      'content_items_advance_read_membership_epoch',
+      'communities_advance_public_read_visibility_epoch',
+      'symbols_advance_read_membership_epoch',
+      'topics_advance_read_membership_epoch',
+      'content_additional_communities_advance_read_membership_epoch',
+      'content_symbols_advance_read_membership_epoch',
+      'content_topics_advance_read_membership_epoch'
+    ])
+      AND NOT tgisinternal
+      AND tgenabled IN ('O', 'A')
+  )
   AND (
     SELECT count(*) = 3
     FROM information_schema.columns
@@ -918,4 +960,4 @@ SQL
   fi
 done
 
-echo "Empty, Owner-schema, and published Agent-v1 paths all reach the PendingAction execution schema."
+echo "Empty, Owner-schema, and published Agent-v1 paths all reach the Content read snapshot schema."
