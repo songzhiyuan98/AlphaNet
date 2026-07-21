@@ -89,6 +89,7 @@ function pendingAction(): AgentPendingActionView {
   return {
     id: ids.action,
     operation: "create_post",
+    expectedVersion: null,
     decision: "require_approval",
     status: "pending_approval",
     state: "pending_approval",
@@ -107,6 +108,14 @@ function pendingAction(): AgentPendingActionView {
     decidedByOwnerId: null,
     result: null,
     error: null,
+  };
+}
+
+function updatePendingAction(): AgentPendingActionView {
+  return {
+    ...pendingAction(),
+    operation: "update_content",
+    expectedVersion: 7,
   };
 }
 
@@ -163,6 +172,24 @@ describe("PendingAction Agent route", () => {
       { ownerId: ids.owner, agentId: ids.agent },
       ids.action,
     );
+  });
+
+  it("returns the optimistic-concurrency version for a content update action", async () => {
+    const { app } = createApp({ action: updatePendingAction() });
+    const response = await app.inject({
+      headers: { authorization: `Bearer ${apiKey}` },
+      method: "GET",
+      url: `/v1/actions/${ids.action}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(GetActionStatusResponseSchema.safeParse(response.json()).success).toBe(true);
+    expect(response.json()).toMatchObject({
+      action: {
+        expected_version: 7,
+        operation: "update_content",
+      },
+    });
   });
 
   it("requires actions:read before querying the action service", async () => {

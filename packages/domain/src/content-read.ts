@@ -14,6 +14,7 @@ import {
 
 export const CONTENT_READ_ORDERING_VERSION = "content-read-v1";
 export const DISCUSSION_ORDERING_VERSION = "discussion-flat-v1";
+export const REVISION_HISTORY_ORDERING_VERSION = "revision-history-desc-v1";
 
 const COMMUNITY_RESEARCH_MIGRATION_NAME = "community_research_core";
 const COMMUNITY_RESEARCH_MIGRATION_VERSION = "000006";
@@ -36,6 +37,8 @@ const MAXIMUM_BROWSE_LIMIT = 100;
 const MAXIMUM_MATCHED_FOLLOWS = 40;
 const DEFAULT_DISCUSSION_LIMIT = 20;
 const MAXIMUM_DISCUSSION_LIMIT = 50;
+const DEFAULT_REVISION_HISTORY_LIMIT = 25;
+const MAXIMUM_REVISION_HISTORY_LIMIT = 100;
 const DEFAULT_DISCUSSION_BYTE_BUDGET = 1_048_576;
 const MINIMUM_DISCUSSION_BYTE_BUDGET = 786_432;
 const MAXIMUM_DISCUSSION_BYTE_BUDGET = 4_194_304;
@@ -183,7 +186,32 @@ export interface ContentDetailProjection {
   replyCount: number;
   resourceVersion: number;
   revision: RevisionProjection | null;
+  revisionHistory?: RevisionHistoryItemProjection[] | undefined;
+  revisionOrdering?: RevisionHistoryOrderingProjection | undefined;
+  revisionPage?: RevisionHistoryPageProjection | undefined;
   viewerState: ViewerContentStateProjection;
+}
+
+export interface RevisionHistoryItemProjection {
+  contentHash: string;
+  createdAt: Date;
+  createdByActorId: string;
+  editSummary: string | null;
+  id: string;
+  revisionNumber: number;
+  sourceVersion: number;
+}
+
+export interface RevisionHistoryPageProjection {
+  hasMore: boolean;
+  limit: number;
+  nextCursor: string | null;
+}
+
+export interface RevisionHistoryOrderingProjection {
+  asOf: Date;
+  orderingVersion: typeof REVISION_HISTORY_ORDERING_VERSION;
+  snapshotId: string;
 }
 
 export interface ContentBrowseItem {
@@ -252,6 +280,10 @@ export interface ContentBrowsePage {
 
 export interface GetContentInput {
   contentId: string;
+  includeRevisionHistory?: boolean | undefined;
+  revisionCursor?: string | null | undefined;
+  revisionId?: string | undefined;
+  revisionLimit?: number | undefined;
 }
 
 export interface GetDiscussionInput {
@@ -324,6 +356,7 @@ export type ContentReadErrorCode =
   | "CURSOR_INVALID"
   | "INVALID_ARGUMENT"
   | "POLICY_DENIED"
+  | "REVISION_NOT_FOUND"
   | "SNAPSHOT_EXPIRED"
   | "SCOPE_REQUIRED";
 
@@ -336,6 +369,7 @@ const errorMessages: Record<ContentReadErrorCode, string> = {
   CURSOR_INVALID: "The content cursor is invalid for this request.",
   INVALID_ARGUMENT: "The content read request is invalid.",
   POLICY_DENIED: "Owner policy does not permit this content read operation.",
+  REVISION_NOT_FOUND: "The requested revision was not found for this content.",
   SNAPSHOT_EXPIRED:
     "The content visibility or ordering snapshot changed during pagination.",
   SCOPE_REQUIRED: "The Agent credential requires research:read.",
@@ -350,6 +384,7 @@ const errorStatuses: Record<ContentReadErrorCode, number> = {
   CURSOR_INVALID: 400,
   INVALID_ARGUMENT: 400,
   POLICY_DENIED: 403,
+  REVISION_NOT_FOUND: 404,
   SNAPSHOT_EXPIRED: 410,
   SCOPE_REQUIRED: 403,
 };
@@ -430,6 +465,14 @@ export interface NormalizedDiscussionInput {
   sort: DiscussionSort;
 }
 
+interface NormalizedGetContentInput {
+  contentId: string;
+  includeRevisionHistory: boolean;
+  revisionCursor: string | null;
+  revisionId: string | null;
+  revisionLimit: number;
+}
+
 interface CursorLast {
   at: string;
   createdAt: string | null;
@@ -459,6 +502,31 @@ interface ParsedCursor {
   lastCreatedAt: Date | null;
   lastId: string;
   position: number;
+  snapshotId: string;
+  visibilityEpoch: string;
+}
+
+interface RevisionCursorPayload {
+  asOf: string;
+  binding: string;
+  expiresAt: string;
+  headRevisionNumber: number;
+  kind: "revision_history";
+  last: {
+    id: string;
+    revisionNumber: number;
+  };
+  snapshotId: string;
+  visibilityEpoch: string;
+  v: number;
+}
+
+interface ParsedRevisionCursor {
+  asOf: Date;
+  expiresAt: Date;
+  headRevisionNumber: number;
+  lastRevisionId: string;
+  lastRevisionNumber: number;
   snapshotId: string;
   visibilityEpoch: string;
 }
@@ -563,6 +631,36 @@ interface ProjectionRow {
   topics: string[] | null;
   updated_at: Date;
   version: number;
+}
+
+interface RevisionPayloadRow {
+  body_markdown: string;
+  body_plain_text: string;
+  content_hash: string;
+  content_id: string;
+  content_kind: string;
+  created_at: Date;
+  created_by_actor_id: string;
+  edit_summary: string | null;
+  id: string;
+  mentions: unknown;
+  public_node_serialized_bytes: number;
+  references: unknown;
+  revision_number: number;
+  source_links: unknown;
+  source_version: number;
+  title: string | null;
+}
+
+interface RevisionHistoryRow {
+  content_hash: string;
+  content_id: string;
+  created_at: Date;
+  created_by_actor_id: string;
+  edit_summary: string | null;
+  id: string;
+  revision_number: number;
+  source_version: number;
 }
 
 type QuerySql = postgres.Sql | postgres.TransactionSql;
@@ -790,6 +888,35 @@ function normalizeInteger(
   return candidate;
 }
 
+function normalizeGetContentInput(input: GetContentInput): NormalizedGetContentInput {
+  const includeRevisionHistory = input.includeRevisionHistory ?? false;
+  if (typeof includeRevisionHistory !== "boolean") {
+    throw new ContentReadError("INVALID_ARGUMENT");
+  }
+  if (
+    !includeRevisionHistory &&
+    (input.revisionLimit !== undefined ||
+      (input.revisionCursor !== undefined && input.revisionCursor !== null))
+  ) {
+    throw new ContentReadError("INVALID_ARGUMENT");
+  }
+  return {
+    contentId: normalizeUuid(input.contentId, "INVALID_ARGUMENT"),
+    includeRevisionHistory,
+    revisionCursor: normalizeCursor(input.revisionCursor),
+    revisionId:
+      input.revisionId === undefined
+        ? null
+        : normalizeUuid(input.revisionId, "INVALID_ARGUMENT"),
+    revisionLimit: normalizeInteger(
+      input.revisionLimit,
+      DEFAULT_REVISION_HISTORY_LIMIT,
+      1,
+      MAXIMUM_REVISION_HISTORY_LIMIT,
+    ),
+  };
+}
+
 export function normalizeContentBrowseInput(
   input: ContentBrowseInput,
   defaultLimit = DEFAULT_BROWSE_LIMIT,
@@ -995,6 +1122,43 @@ function discussionCursorBinding(
   );
 }
 
+function revisionCursorBinding(
+  key: Buffer,
+  viewer: ContentReadViewer,
+  contentId: string,
+  limit: number,
+): string {
+  return keyedDigest(
+    key,
+    CURSOR_BINDING_DOMAIN,
+    JSON.stringify({
+      kind: "revision_history",
+      query: { contentId, limit },
+      viewer: viewerCursorIdentity(viewer),
+    }),
+  );
+}
+
+function makeRevisionSnapshotId(
+  key: Buffer,
+  binding: string,
+  asOf: Date,
+  headRevisionNumber: number,
+  visibilityEpoch: string,
+): string {
+  return `crs_${keyedDigest(
+    key,
+    SNAPSHOT_ID_DOMAIN,
+    JSON.stringify({
+      asOf: asOf.toISOString(),
+      binding,
+      headRevisionNumber,
+      kind: "revision_history",
+      visibilityEpoch,
+    }),
+  ).slice(0, 32)}`;
+}
+
 function makeSnapshotId(
   key: Buffer,
   kind: "browse" | "discussion",
@@ -1090,6 +1254,57 @@ function decodeCursorPayload(value: unknown): CursorPayload | null {
     snapshotId: value.snapshotId,
     visibilityEpoch: value.visibilityEpoch,
     v: value.v,
+  };
+}
+
+function decodeRevisionCursorPayload(value: unknown): RevisionCursorPayload | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  if (
+    Object.keys(value).sort().join(",") !==
+    "asOf,binding,expiresAt,headRevisionNumber,kind,last,snapshotId,v,visibilityEpoch"
+  ) {
+    return null;
+  }
+  const last = value.last;
+  if (
+    !isRecord(last) ||
+    Object.keys(last).sort().join(",") !== "id,revisionNumber" ||
+    value.v !== CURSOR_VERSION ||
+    value.kind !== "revision_history" ||
+    typeof value.asOf !== "string" ||
+    typeof value.expiresAt !== "string" ||
+    typeof value.binding !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(value.binding) ||
+    typeof value.snapshotId !== "string" ||
+    !/^crs_[0-9a-f]{32}$/u.test(value.snapshotId) ||
+    typeof value.visibilityEpoch !== "string" ||
+    !/^content:[1-9][0-9]{0,19}(?:;public:[1-9][0-9]{0,19})?$/u.test(
+      value.visibilityEpoch,
+    ) ||
+    typeof value.headRevisionNumber !== "number" ||
+    !Number.isSafeInteger(value.headRevisionNumber) ||
+    value.headRevisionNumber < 1 ||
+    typeof last.id !== "string" ||
+    !UUID_PATTERN.test(last.id) ||
+    typeof last.revisionNumber !== "number" ||
+    !Number.isSafeInteger(last.revisionNumber) ||
+    last.revisionNumber < 1 ||
+    last.revisionNumber > value.headRevisionNumber
+  ) {
+    return null;
+  }
+  return {
+    asOf: value.asOf,
+    binding: value.binding,
+    expiresAt: value.expiresAt,
+    headRevisionNumber: value.headRevisionNumber,
+    kind: "revision_history",
+    last: { id: last.id, revisionNumber: last.revisionNumber },
+    snapshotId: value.snapshotId,
+    visibilityEpoch: value.visibilityEpoch,
+    v: CURSOR_VERSION,
   };
 }
 
@@ -1280,6 +1495,80 @@ function mapRevision(row: ProjectionRow): RevisionProjection | null {
     sourceVersion: asPositiveInteger(row.source_version),
     title: row.revision_title,
   };
+}
+
+function mapRevisionPayload(row: RevisionPayloadRow): RevisionProjection {
+  if (
+    !UUID_PATTERN.test(row.id) ||
+    !UUID_PATTERN.test(row.content_id) ||
+    !UUID_PATTERN.test(row.created_by_actor_id) ||
+    (row.content_kind !== "post" && row.content_kind !== "reply") ||
+    typeof row.body_markdown !== "string" ||
+    typeof row.body_plain_text !== "string" ||
+    (row.edit_summary !== null && typeof row.edit_summary !== "string") ||
+    !/^[0-9a-f]{64}$/u.test(row.content_hash) ||
+    !Number.isSafeInteger(row.public_node_serialized_bytes) ||
+    row.public_node_serialized_bytes < 1 ||
+    row.public_node_serialized_bytes > MINIMUM_DISCUSSION_BYTE_BUDGET ||
+    (row.content_kind === "post" && typeof row.title !== "string") ||
+    (row.content_kind === "reply" && row.title !== null) ||
+    !Array.isArray(row.mentions) ||
+    row.mentions.length > 100
+  ) {
+    throw new ContentReadError("CONTENT_DATA_INVALID");
+  }
+  return {
+    bodyMarkdown: row.body_markdown,
+    bodyPlainText: row.body_plain_text,
+    contentHash: `sha256:${row.content_hash}`,
+    contentId: row.content_id,
+    createdAt: asDate(row.created_at),
+    createdByActorId: row.created_by_actor_id,
+    editSummary: row.edit_summary,
+    id: row.id,
+    mentions: row.mentions.map(mapAuthor),
+    references: mapReferences(row.references),
+    revisionNumber: asPositiveInteger(row.revision_number),
+    sourceLinks: mapSourceLinks(row.source_links),
+    sourceVersion: asPositiveInteger(row.source_version),
+    title: row.title,
+  };
+}
+
+function mapRevisionHistoryRows(
+  rows: RevisionHistoryRow[],
+  contentId: string,
+  headRevisionNumber: number,
+  afterRevisionNumber: number | null,
+): RevisionHistoryItemProjection[] {
+  let previousRevisionNumber = afterRevisionNumber ?? headRevisionNumber + 1;
+  const seenIds = new Set<string>();
+  return rows.map((row) => {
+    const revisionNumber = asPositiveInteger(row.revision_number);
+    if (
+      row.content_id !== contentId ||
+      !UUID_PATTERN.test(row.id) ||
+      !UUID_PATTERN.test(row.created_by_actor_id) ||
+      !/^[0-9a-f]{64}$/u.test(row.content_hash) ||
+      (row.edit_summary !== null && typeof row.edit_summary !== "string") ||
+      revisionNumber > headRevisionNumber ||
+      revisionNumber >= previousRevisionNumber ||
+      seenIds.has(row.id)
+    ) {
+      throw new ContentReadError("CONTENT_DATA_INVALID");
+    }
+    previousRevisionNumber = revisionNumber;
+    seenIds.add(row.id);
+    return {
+      contentHash: `sha256:${row.content_hash}`,
+      createdAt: asDate(row.created_at),
+      createdByActorId: row.created_by_actor_id,
+      editSummary: row.edit_summary,
+      id: row.id,
+      revisionNumber,
+      sourceVersion: asPositiveInteger(row.source_version),
+    };
+  });
 }
 
 function mapProjectionRow(row: ProjectionRow): ContentDetailProjection {
@@ -1882,22 +2171,138 @@ export class PostgresContentReadService implements ContentReadService {
     input: GetContentInput,
   ): Promise<ContentDetailProjection> {
     assertReadAllowed(viewer, "get_content");
-    const contentId = normalizeUuid(input.contentId, "INVALID_ARGUMENT");
+    const normalized = normalizeGetContentInput(input);
     const result = await this.#sql.begin(
       "isolation level repeatable read read only",
       async (transaction) => {
         await this.#setStatementTimeout(transaction);
         const countsAsOf = await this.#databaseTime(transaction);
-        const details = await this.#hydrateContent(transaction, [contentId], viewer);
-        return { countsAsOf, details };
+        const details = await this.#hydrateContent(
+          transaction,
+          [normalized.contentId],
+          viewer,
+        );
+        const detail = details[0];
+        if (detail === undefined) {
+          return null;
+        }
+        detail.countsAsOf = countsAsOf;
+
+        // A tombstone is the complete public projection for deleted content. Never
+        // consult append-only payload tables after deletion, even when callers pass
+        // a formerly valid Revision ID or history cursor.
+        if (detail.content.lifecycleState === "deleted") {
+          return detail;
+        }
+        const currentRevision = detail.revision;
+        if (currentRevision === null || detail.content.currentRevisionId === null) {
+          throw new ContentReadError("CONTENT_DATA_INVALID");
+        }
+
+        if (
+          normalized.revisionId !== null &&
+          normalized.revisionId !== detail.content.currentRevisionId
+        ) {
+          const selectedRevision = await this.#selectRevisionPayload(
+            transaction,
+            normalized.contentId,
+            normalized.revisionId,
+          );
+          if (selectedRevision === null) {
+            throw new ContentReadError("REVISION_NOT_FOUND");
+          }
+          if (selectedRevision.revisionNumber > currentRevision.revisionNumber) {
+            throw new ContentReadError("CONTENT_DATA_INVALID");
+          }
+          detail.revision = selectedRevision;
+        }
+
+        if (normalized.includeRevisionHistory) {
+          const binding = revisionCursorBinding(
+            this.#cursorSigningKey,
+            viewer,
+            normalized.contentId,
+            normalized.revisionLimit,
+          );
+          const cursor =
+            normalized.revisionCursor === null
+              ? null
+              : this.#parseRevisionCursor(normalized.revisionCursor, binding);
+          const visibilityEpoch = await this.#contentReadVisibilityEpoch(
+            transaction,
+            viewer === null,
+          );
+          if (cursor !== null && cursor.visibilityEpoch !== visibilityEpoch) {
+            throw new ContentReadError("SNAPSHOT_EXPIRED");
+          }
+          const headRevisionNumber =
+            cursor?.headRevisionNumber ?? currentRevision.revisionNumber;
+          if (headRevisionNumber > currentRevision.revisionNumber) {
+            throw new ContentReadError("CONTENT_DATA_INVALID");
+          }
+          const asOf = cursor?.asOf ?? countsAsOf;
+          const snapshotId = makeRevisionSnapshotId(
+            this.#cursorSigningKey,
+            binding,
+            asOf,
+            headRevisionNumber,
+            visibilityEpoch,
+          );
+          if (cursor !== null && cursor.snapshotId !== snapshotId) {
+            throw new ContentReadError("CURSOR_INVALID");
+          }
+          const rows = await this.#selectRevisionHistory(
+            transaction,
+            normalized.contentId,
+            headRevisionNumber,
+            cursor,
+            normalized.revisionLimit + 1,
+          );
+          const projected = mapRevisionHistoryRows(
+            rows,
+            normalized.contentId,
+            headRevisionNumber,
+            cursor?.lastRevisionNumber ?? null,
+          );
+          if (cursor === null && projected.length === 0) {
+            throw new ContentReadError("CONTENT_DATA_INVALID");
+          }
+          const hasMore = projected.length > normalized.revisionLimit;
+          const revisionHistory = projected.slice(0, normalized.revisionLimit);
+          const last = revisionHistory.at(-1);
+          const expiresAt =
+            cursor?.expiresAt ?? new Date(asOf.valueOf() + this.#cursorTtlMilliseconds);
+          detail.revisionHistory = revisionHistory;
+          detail.revisionPage = {
+            hasMore,
+            limit: normalized.revisionLimit,
+            nextCursor:
+              hasMore && last !== undefined
+                ? this.#createRevisionCursor({
+                    asOf,
+                    binding,
+                    expiresAt,
+                    headRevisionNumber,
+                    lastRevisionId: last.id,
+                    lastRevisionNumber: last.revisionNumber,
+                    snapshotId,
+                    visibilityEpoch,
+                  })
+                : null,
+          };
+          detail.revisionOrdering = {
+            asOf,
+            orderingVersion: REVISION_HISTORY_ORDERING_VERSION,
+            snapshotId,
+          };
+        }
+        return detail;
       },
     );
-    const detail = result.details[0];
-    if (detail === undefined) {
+    if (result === null) {
       throw new ContentReadError("CONTENT_NOT_FOUND");
     }
-    detail.countsAsOf = result.countsAsOf;
-    return detail;
+    return result;
   }
 
   async getDiscussion(
@@ -2781,6 +3186,147 @@ export class PostgresContentReadService implements ContentReadService {
     `;
   }
 
+  async #selectRevisionPayload(
+    sql: QuerySql,
+    contentId: string,
+    revisionId: string,
+  ): Promise<RevisionProjection | null> {
+    const rows = await sql<RevisionPayloadRow[]>`
+      select
+        selected_revision.id::text as id,
+        selected_revision.content_id::text as content_id,
+        selected_content.kind as content_kind,
+        selected_revision.revision_number::integer as revision_number,
+        selected_revision.source_version::integer as source_version,
+        selected_revision.title,
+        selected_revision.body_markdown,
+        selected_revision.body_plain_text,
+        selected_revision.edit_summary,
+        selected_revision.created_by_actor_id::text as created_by_actor_id,
+        selected_revision.created_at,
+        encode(selected_revision.content_hash, 'hex') as content_hash,
+        selected_revision.public_node_serialized_bytes::integer
+          as public_node_serialized_bytes,
+        coalesce((
+          select jsonb_agg(
+            jsonb_build_object(
+              'sourceLinkId', source.id::text,
+              'url', source.url,
+              'title', source.title,
+              'description', source.description,
+              'addedRevisionId', source.added_revision_id::text,
+              'addedByActorId', source.added_by_actor_id::text,
+              'addedAt', source.added_at
+            ) order by source.position, source.id
+          )
+          from platform.source_links as source
+          join platform.content_revisions as added_revision
+            on added_revision.id = source.added_revision_id
+           and added_revision.content_id = source.content_id
+          left join platform.content_revisions as removed_revision
+            on removed_revision.id = source.removed_revision_id
+           and removed_revision.content_id = source.content_id
+          where source.content_id = selected_revision.content_id
+            and added_revision.revision_number <=
+              selected_revision.revision_number
+            and (
+              removed_revision.id is null
+              or removed_revision.revision_number >
+                selected_revision.revision_number
+            )
+        ), '[]'::jsonb) as source_links,
+        coalesce((
+          select jsonb_agg(
+            jsonb_build_object(
+              'actorId', mentioned.id::text,
+              'kind', mentioned.kind,
+              'handle', mentioned.handle::text,
+              'agentId', mentioned_agent.id::text
+            ) order by mention.position, mentioned.id
+          )
+          from platform.mentions as mention
+          join platform.actors as mentioned
+            on mentioned.id = mention.mentioned_actor_id
+          left join platform.agents as mentioned_agent
+            on mentioned_agent.actor_id = mentioned.id
+          where mention.revision_id = selected_revision.id
+            and mention.content_id = selected_revision.content_id
+        ), '[]'::jsonb) as mentions,
+        coalesce((
+          select jsonb_agg(
+            jsonb_build_object(
+              'targetContentId', relation.to_content_id::text,
+              'relationType', relation.relation_type
+            ) order by relation.position, relation.id
+          )
+          from platform.content_relations as relation
+          join platform.content_revisions as added_revision
+            on added_revision.id = relation.added_revision_id
+           and added_revision.content_id = relation.from_content_id
+          left join platform.content_revisions as removed_revision
+            on removed_revision.id = relation.removed_revision_id
+           and removed_revision.content_id = relation.from_content_id
+          where relation.from_content_id = selected_revision.content_id
+            and added_revision.revision_number <=
+              selected_revision.revision_number
+            and (
+              removed_revision.id is null
+              or removed_revision.revision_number >
+                selected_revision.revision_number
+            )
+        ), '[]'::jsonb) as references
+      from platform.content_revisions as selected_revision
+      join platform.content_items as selected_content
+        on selected_content.id = selected_revision.content_id
+      where selected_revision.content_id = ${contentId}::uuid
+        and selected_revision.id = ${revisionId}::uuid
+      limit 1
+    `;
+    if (rows.length === 0) {
+      return null;
+    }
+    if (rows.length !== 1) {
+      throw new ContentReadError("CONTENT_DATA_INVALID");
+    }
+    const revision = mapRevisionPayload(rows[0]!);
+    if (revision.contentId !== contentId || revision.id !== revisionId) {
+      throw new ContentReadError("CONTENT_DATA_INVALID");
+    }
+    return revision;
+  }
+
+  async #selectRevisionHistory(
+    sql: QuerySql,
+    contentId: string,
+    headRevisionNumber: number,
+    cursor: ParsedRevisionCursor | null,
+    rowLimit: number,
+  ): Promise<RevisionHistoryRow[]> {
+    return sql<RevisionHistoryRow[]>`
+      select
+        history_revision.id::text as id,
+        history_revision.content_id::text as content_id,
+        history_revision.revision_number::integer as revision_number,
+        history_revision.source_version::integer as source_version,
+        history_revision.edit_summary,
+        history_revision.created_by_actor_id::text as created_by_actor_id,
+        history_revision.created_at,
+        encode(history_revision.content_hash, 'hex') as content_hash
+      from platform.content_revisions as history_revision
+      where history_revision.content_id = ${contentId}::uuid
+        and history_revision.revision_number <= ${headRevisionNumber}::bigint
+        and (
+          ${cursor?.lastRevisionNumber ?? null}::bigint is null
+          or (history_revision.revision_number, history_revision.id) < (
+            ${cursor?.lastRevisionNumber ?? null}::bigint,
+            ${cursor?.lastRevisionId ?? null}::uuid
+          )
+        )
+      order by history_revision.revision_number desc, history_revision.id desc
+      limit ${rowLimit}
+    `;
+  }
+
   async #hydrateContent(
     sql: QuerySql,
     contentIds: readonly string[],
@@ -3175,6 +3721,109 @@ export class PostgresContentReadService implements ContentReadService {
         )
     `;
     return rows.map(mapProjectionRow);
+  }
+
+  #createRevisionCursor(options: {
+    asOf: Date;
+    binding: string;
+    expiresAt: Date;
+    headRevisionNumber: number;
+    lastRevisionId: string;
+    lastRevisionNumber: number;
+    snapshotId: string;
+    visibilityEpoch: string;
+  }): string {
+    const payload: RevisionCursorPayload = {
+      asOf: options.asOf.toISOString(),
+      binding: options.binding,
+      expiresAt: options.expiresAt.toISOString(),
+      headRevisionNumber: options.headRevisionNumber,
+      kind: "revision_history",
+      last: {
+        id: options.lastRevisionId,
+        revisionNumber: options.lastRevisionNumber,
+      },
+      snapshotId: options.snapshotId,
+      visibilityEpoch: options.visibilityEpoch,
+      v: CURSOR_VERSION,
+    };
+    const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+    const signature = createHmac("sha256", this.#cursorSigningKey)
+      .update(CURSOR_SIGNATURE_DOMAIN, "utf8")
+      .update("\u0000", "utf8")
+      .update(encoded, "ascii")
+      .digest("base64url");
+    const cursor = `${encoded}.${signature}`;
+    if (cursor.length > MAXIMUM_CURSOR_LENGTH) {
+      throw new ContentReadError("CONTENT_READ_NOT_READY");
+    }
+    return cursor;
+  }
+
+  #parseRevisionCursor(cursor: string, expectedBinding: string): ParsedRevisionCursor {
+    const [encoded, suppliedSignature, extra] = cursor.split(".");
+    if (
+      !encoded ||
+      !suppliedSignature ||
+      extra !== undefined ||
+      !/^[A-Za-z0-9_-]+$/u.test(encoded) ||
+      !/^[A-Za-z0-9_-]{43}$/u.test(suppliedSignature)
+    ) {
+      throw new ContentReadError("CURSOR_INVALID");
+    }
+    const expectedSignature = createHmac("sha256", this.#cursorSigningKey)
+      .update(CURSOR_SIGNATURE_DOMAIN, "utf8")
+      .update("\u0000", "utf8")
+      .update(encoded, "ascii")
+      .digest();
+    const supplied = Buffer.from(suppliedSignature, "base64url");
+    if (
+      supplied.length !== expectedSignature.length ||
+      !timingSafeEqual(supplied, expectedSignature)
+    ) {
+      throw new ContentReadError("CURSOR_INVALID");
+    }
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+    } catch {
+      throw new ContentReadError("CURSOR_INVALID");
+    }
+    const payload = decodeRevisionCursorPayload(decoded);
+    if (payload === null || !fixedHexMatches(payload.binding, expectedBinding)) {
+      throw new ContentReadError("CURSOR_INVALID");
+    }
+    const asOf = new Date(payload.asOf);
+    const expiresAt = new Date(payload.expiresAt);
+    const now = this.#clock();
+    if (
+      !Number.isFinite(asOf.valueOf()) ||
+      !Number.isFinite(expiresAt.valueOf()) ||
+      expiresAt <= asOf ||
+      asOf.valueOf() > now.valueOf() + MAXIMUM_CLOCK_SKEW_MILLISECONDS ||
+      payload.snapshotId !==
+        makeRevisionSnapshotId(
+          this.#cursorSigningKey,
+          expectedBinding,
+          asOf,
+          payload.headRevisionNumber,
+          payload.visibilityEpoch,
+        )
+    ) {
+      throw new ContentReadError("CURSOR_INVALID");
+    }
+    if (now >= expiresAt) {
+      throw new ContentReadError("CURSOR_EXPIRED");
+    }
+    return {
+      asOf,
+      expiresAt,
+      headRevisionNumber: payload.headRevisionNumber,
+      lastRevisionId: payload.last.id,
+      lastRevisionNumber: payload.last.revisionNumber,
+      snapshotId: payload.snapshotId,
+      visibilityEpoch: payload.visibilityEpoch,
+    };
   }
 
   #createCursor(options: {

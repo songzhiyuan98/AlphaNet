@@ -13,6 +13,8 @@ import {
   CreatePostResultSchema,
   PendingActionStateSchema,
   ReplyToContentResultSchema,
+  UpdateContentResultSchema,
+  type UpdateContentResult,
   WriteStatusSchema,
 } from "./content-write.ts";
 
@@ -69,14 +71,8 @@ export const PendingActionPublicErrorSchema = z.union([
 ]);
 export type PendingActionPublicError = z.infer<typeof PendingActionPublicErrorSchema>;
 
-export const UpdateContentActionResultSchema = z
-  .object({
-    content_id: OpaqueIdSchema,
-    revision_id: OpaqueIdSchema.nullable(),
-    resource_version: z.number().int().positive(),
-  })
-  .strict();
-export type UpdateContentActionResult = z.infer<typeof UpdateContentActionResultSchema>;
+export const UpdateContentActionResultSchema = UpdateContentResultSchema;
+export type UpdateContentActionResult = UpdateContentResult;
 
 export const DeleteContentActionResultSchema = z
   .object({
@@ -143,6 +139,7 @@ const PendingActionProjectionBaseSchema = z.discriminatedUnion("operation", [
     .object({
       ...PendingActionProjectionCommonShape,
       operation: z.literal("update_content"),
+      expected_version: z.number().int().positive().safe(),
       result: UpdateContentActionResultSchema.nullable(),
     })
     .strict(),
@@ -326,6 +323,17 @@ export const PendingActionProjectionSchema =
         code: "custom",
         path: ["result"],
         message: "Only a succeeded PendingAction may expose a resource result.",
+      });
+    }
+    if (
+      action.operation === "update_content" &&
+      action.result !== null &&
+      action.result.resource_version !== action.expected_version + 1
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["result", "resource_version"],
+        message: "A succeeded update must advance exactly one content resource version.",
       });
     }
 

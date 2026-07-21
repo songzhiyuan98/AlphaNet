@@ -8,7 +8,13 @@ import {
   PendingCommandCodecError,
   type PendingCommandAuthority,
 } from "./pending-command-codec.js";
-import { digestResearchCommand, normalizeCreatePostCommand } from "./research-command.js";
+import {
+  digestResearchCommand,
+  freezeResearchCommandMentionActors,
+  freezeUpdateContentBaseline,
+  normalizeCreatePostCommand,
+  normalizeUpdateContentCommand,
+} from "./research-command.js";
 
 const keyV1 = randomBytes(32);
 const keyV2 = randomBytes(32);
@@ -109,5 +115,50 @@ describe("PendingAction frozen command codec", () => {
         code: "PENDING_COMMAND_KEY_INVALID",
       }),
     );
+  });
+
+  it("round-trips an update command without collapsing omitted and cleared fields", () => {
+    const baselineCommunityId = randomUUID();
+    const updateCommand = freezeResearchCommandMentionActors(
+      freezeUpdateContentBaseline(
+        normalizeUpdateContentCommand({
+          contentId: randomUUID(),
+          expectedVersion: 4,
+          patch: {
+            bodyMarkdown: "Revised research body",
+            sourceLinks: [],
+            topics: [],
+          },
+          editSummary: "Remove stale sources",
+        }),
+        {
+          additionalCommunityIds: [],
+          bodyMarkdown: "Original research body",
+          contentKind: "post",
+          primaryCommunityId: baselineCommunityId,
+          resourceVersion: 4,
+          revisionId: randomUUID(),
+          title: "Original research title",
+        },
+      ),
+      [randomUUID()],
+    );
+    const updateAuthority: PendingCommandAuthority = {
+      ...authority,
+      actionId: randomUUID(),
+      operation: updateCommand.operation,
+      inputDigest: digestResearchCommand(updateCommand),
+    };
+    const encrypted = encryptPendingCommand(updateCommand, updateAuthority, {
+      currentVersion: 2,
+      keys: { 1: keyV1, 2: keyV2 },
+    });
+
+    expect(
+      decryptPendingCommand(encrypted, updateAuthority, {
+        currentVersion: 2,
+        keys: { 1: keyV1, 2: keyV2 },
+      }),
+    ).toEqual(updateCommand);
   });
 });

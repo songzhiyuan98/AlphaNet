@@ -295,6 +295,44 @@ describe("PendingAction state-machine projection", () => {
     expect(PendingActionProjectionSchema.parse(reactionAction)).toEqual(reactionAction);
   });
 
+  it("requires the frozen expected version for update actions", () => {
+    const pendingUpdate = pendingAction({
+      operation: "update_content",
+      expected_version: 2,
+    });
+    expect(PendingActionProjectionSchema.safeParse(pendingUpdate).success).toBe(true);
+    expect(
+      PendingActionProjectionSchema.safeParse({
+        ...pendingUpdate,
+        expected_version: undefined,
+      }).success,
+    ).toBe(false);
+
+    const succeededUpdate = {
+      ...commonAction,
+      operation: "update_content",
+      expected_version: 2,
+      result: {
+        content_id: "cnt_01K0NEWPOST",
+        revision_id: null,
+        resource_version: 3,
+      },
+    } as const;
+    expect(PendingActionProjectionSchema.parse(succeededUpdate)).toEqual(succeededUpdate);
+    expect(
+      PendingActionProjectionSchema.safeParse({
+        ...succeededUpdate,
+        result: { ...succeededUpdate.result, resource_version: 4 },
+      }).success,
+    ).toBe(false);
+    expect(
+      PendingActionProjectionSchema.safeParse({
+        ...commonAction,
+        expected_version: 2,
+      }).success,
+    ).toBe(false);
+  });
+
   it("rejects lifecycle timestamps that precede the request", () => {
     expect(
       PendingActionProjectionSchema.safeParse({

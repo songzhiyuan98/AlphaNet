@@ -39,6 +39,7 @@ const stateLabels: Record<OwnerActionState, string> = {
 const operationLabels: Record<OwnerActionSummary["operation"], string> = {
   create_post: "创建帖子",
   reply_to_content: "回复内容",
+  update_content: "更新内容",
 };
 
 const rejectReasons = [
@@ -85,8 +86,273 @@ function ValueTokens({ values }: { values: readonly string[] }) {
   );
 }
 
+function SourceLinksPreview({
+  emptyLabel = "无",
+  sourceLinks,
+}: {
+  emptyLabel?: string;
+  sourceLinks: readonly {
+    description?: string | undefined;
+    title?: string | undefined;
+    url: string;
+  }[];
+}) {
+  return sourceLinks.length > 0 ? (
+    <ul className="approvalSourceList">
+      {sourceLinks.map((source, index) => (
+        <li key={`${source.url}:${index}`}>
+          <a
+            href={source.url}
+            referrerPolicy="no-referrer"
+            rel="noopener noreferrer"
+            target="_blank"
+          >
+            {source.title ?? source.url}
+          </a>
+          {source.description ? <p>{source.description}</p> : null}
+          {source.title ? <code>{source.url}</code> : null}
+        </li>
+      ))}
+    </ul>
+  ) : (
+    <span className="approvalEmptyValue">{emptyLabel}</span>
+  );
+}
+
+function ReferencesPreview({
+  emptyLabel = "无",
+  references,
+}: {
+  emptyLabel?: string;
+  references: readonly {
+    relation_type: string;
+    target_content_id: string;
+  }[];
+}) {
+  return references.length > 0 ? (
+    <ul className="approvalReferenceList">
+      {references.map((reference, index) => (
+        <li key={`${reference.target_content_id}:${reference.relation_type}:${index}`}>
+          <span>{reference.relation_type}</span>
+          <code>{reference.target_content_id}</code>
+        </li>
+      ))}
+    </ul>
+  ) : (
+    <span className="approvalEmptyValue">{emptyLabel}</span>
+  );
+}
+
+interface MarkdownDiffLine {
+  kind: "added" | "context" | "removed";
+  text: string;
+}
+
+function linearMarkdownDiff(before: string, after: string): MarkdownDiffLine[] {
+  const beforeLines = before.split("\n");
+  const afterLines = after.split("\n");
+  let prefix = 0;
+  while (
+    prefix < beforeLines.length &&
+    prefix < afterLines.length &&
+    beforeLines[prefix] === afterLines[prefix]
+  ) {
+    prefix += 1;
+  }
+  let suffix = 0;
+  while (
+    suffix < beforeLines.length - prefix &&
+    suffix < afterLines.length - prefix &&
+    beforeLines[beforeLines.length - 1 - suffix] ===
+      afterLines[afterLines.length - 1 - suffix]
+  ) {
+    suffix += 1;
+  }
+  return [
+    ...beforeLines.slice(0, prefix).map((text) => ({ kind: "context" as const, text })),
+    ...beforeLines
+      .slice(prefix, beforeLines.length - suffix)
+      .map((text) => ({ kind: "removed" as const, text })),
+    ...afterLines
+      .slice(prefix, afterLines.length - suffix)
+      .map((text) => ({ kind: "added" as const, text })),
+    ...beforeLines
+      .slice(beforeLines.length - suffix)
+      .map((text) => ({ kind: "context" as const, text })),
+  ];
+}
+
+function MarkdownDiff({ before, after }: { before: string; after: string }) {
+  if (before === after) {
+    return <p className="approvalEmptyValue">Markdown 正文未改动</p>;
+  }
+  return (
+    <pre
+      aria-label="Markdown 修改差异"
+      className="approvalMarkdownDiff"
+      data-testid="approval-markdown-diff"
+    >
+      {linearMarkdownDiff(before, after).map((line, index) => (
+        <span className={line.kind} key={`${line.kind}:${index}`}>
+          <span aria-hidden="true">
+            {line.kind === "added" ? "+ " : line.kind === "removed" ? "− " : "  "}
+          </span>
+          {line.text}
+          {"\n"}
+        </span>
+      ))}
+    </pre>
+  );
+}
+
 function FrozenPreview({ action }: { action: OwnerActionDetail }) {
   const preview = action.preview;
+
+  if (preview.operation === "update_content") {
+    const patch = preview.patch;
+    const baseline = preview.baseline;
+    const changedFields = [
+      patch.title !== undefined ? "标题" : null,
+      patch.body_markdown !== undefined ? "Markdown 正文" : null,
+      patch.source_links !== undefined ? "来源链接" : null,
+      patch.references !== undefined ? "内容引用" : null,
+      patch.additional_community_ids !== undefined ? "附加社区" : null,
+      patch.symbols !== undefined ? "股票" : null,
+      patch.topics !== undefined ? "主题" : null,
+    ].filter((field): field is string => field !== null);
+
+    return (
+      <section className="frozenPreview" aria-labelledby="frozen-preview-title">
+        <div className="approvalSectionHeading">
+          <div>
+            <p className="authKicker">Frozen preview</p>
+            <h3 id="frozen-preview-title">冻结更新内容</h3>
+          </div>
+          <span>只读</span>
+        </div>
+
+        <dl className="previewMetadata">
+          <div>
+            <dt>内容目标</dt>
+            <dd>
+              <code>{preview.content_id}</code>
+            </dd>
+          </div>
+          <div>
+            <dt>更新前内容版本</dt>
+            <dd data-testid="approval-content-baseline-version">
+              {baseline.resource_version}
+            </dd>
+          </div>
+          <div>
+            <dt>请求期望版本</dt>
+            <dd data-testid="approval-content-expected-version">
+              {preview.expected_version}
+            </dd>
+          </div>
+          <div>
+            <dt>更新前 Revision</dt>
+            <dd>
+              <code>{baseline.revision_id}</code>
+            </dd>
+          </div>
+          <div>
+            <dt>内容类型</dt>
+            <dd>{baseline.content_kind === "post" ? "帖子" : "回复"}</dd>
+          </div>
+          <div>
+            <dt>更新前主社区</dt>
+            <dd>
+              <code>{baseline.primary_community_id}</code>
+            </dd>
+          </div>
+          <div>
+            <dt>更新前附加社区</dt>
+            <dd>
+              <ValueTokens values={baseline.additional_community_ids} />
+            </dd>
+          </div>
+          <div>
+            <dt>变更字段</dt>
+            <dd>
+              <ValueTokens values={changedFields} />
+            </dd>
+          </div>
+          {preview.edit_summary !== undefined ? (
+            <div>
+              <dt>改动摘要</dt>
+              <dd>{preview.edit_summary}</dd>
+            </div>
+          ) : null}
+          {baseline.title !== null ? (
+            <div>
+              <dt>更新前标题</dt>
+              <dd>{baseline.title}</dd>
+            </div>
+          ) : null}
+          {patch.title !== undefined ? (
+            <div>
+              <dt>更新后标题</dt>
+              <dd>{patch.title}</dd>
+            </div>
+          ) : null}
+          {patch.additional_community_ids !== undefined ? (
+            <div>
+              <dt>新的附加社区</dt>
+              <dd>
+                <ValueTokens values={patch.additional_community_ids} />
+              </dd>
+            </div>
+          ) : null}
+          {patch.symbols !== undefined ? (
+            <div>
+              <dt>新的股票</dt>
+              <dd>
+                <ValueTokens values={patch.symbols} />
+              </dd>
+            </div>
+          ) : null}
+          {patch.topics !== undefined ? (
+            <div>
+              <dt>新的主题</dt>
+              <dd>
+                <ValueTokens values={patch.topics} />
+              </dd>
+            </div>
+          ) : null}
+        </dl>
+
+        <div className="previewBlock">
+          <span>Markdown 修改差异</span>
+          <MarkdownDiff
+            after={patch.body_markdown ?? baseline.body_markdown}
+            before={baseline.body_markdown}
+          />
+        </div>
+
+        {patch.source_links !== undefined ? (
+          <div className="previewBlock">
+            <span>新的完整来源链接集合</span>
+            <SourceLinksPreview
+              emptyLabel="将清空全部来源链接"
+              sourceLinks={patch.source_links}
+            />
+          </div>
+        ) : null}
+
+        {patch.references !== undefined ? (
+          <div className="previewBlock">
+            <span>新的完整内容引用集合</span>
+            <ReferencesPreview
+              emptyLabel="将清空全部内容引用"
+              references={patch.references}
+            />
+          </div>
+        ) : null}
+      </section>
+    );
+  }
+
   const sourceLinks = preview.source_links ?? [];
   const references = preview.references ?? [];
 
@@ -149,42 +415,12 @@ function FrozenPreview({ action }: { action: OwnerActionDetail }) {
 
       <div className="previewBlock">
         <span>来源链接</span>
-        {sourceLinks.length > 0 ? (
-          <ul className="approvalSourceList">
-            {sourceLinks.map((source) => (
-              <li key={source.url}>
-                <a
-                  href={source.url}
-                  referrerPolicy="no-referrer"
-                  rel="noopener noreferrer"
-                  target="_blank"
-                >
-                  {source.title ?? source.url}
-                </a>
-                {source.description ? <p>{source.description}</p> : null}
-                {source.title ? <code>{source.url}</code> : null}
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <span className="approvalEmptyValue">无</span>
-        )}
+        <SourceLinksPreview sourceLinks={sourceLinks} />
       </div>
 
       <div className="previewBlock">
         <span>内容引用</span>
-        {references.length > 0 ? (
-          <ul className="approvalReferenceList">
-            {references.map((reference) => (
-              <li key={`${reference.target_content_id}:${reference.relation_type}`}>
-                <span>{reference.relation_type}</span>
-                <code>{reference.target_content_id}</code>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <span className="approvalEmptyValue">无</span>
-        )}
+        <ReferencesPreview references={references} />
       </div>
     </section>
   );
@@ -482,7 +718,7 @@ export function ApprovalInbox() {
                 <dd>{stateLabels[detail.state]}</dd>
               </div>
               <div>
-                <dt>版本</dt>
+                <dt>动作版本</dt>
                 <dd data-testid="approval-version">{detail.version}</dd>
               </div>
               <div>
@@ -503,6 +739,20 @@ export function ApprovalInbox() {
                 <dt>策略版本</dt>
                 <dd>
                   <code>{detail.policy_version}</code>
+                </dd>
+              </div>
+              <div>
+                <dt>审批原因</dt>
+                <dd>
+                  {detail.approval_reason_category === "owner_approval_required"
+                    ? "Agent 权限策略要求 Owner 审批"
+                    : detail.approval_reason_category}
+                </dd>
+              </div>
+              <div>
+                <dt>幂等标识（脱敏）</dt>
+                <dd>
+                  <code>{detail.idempotency_key_hint}</code>
                 </dd>
               </div>
             </dl>

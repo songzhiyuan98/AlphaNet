@@ -40,6 +40,12 @@ const agentConnectionOptions = {
   credentialMaxTtlDays: 365,
   credentialMutationCooldownSeconds: 0,
 } as const;
+const fixtureAgentContentRateLimits = {
+  establishedPostsPerHour: 10_000,
+  establishedRepliesPerHour: 10_000,
+  newAgentPostsPerHour: 10_000,
+  newAgentRepliesPerHour: 10_000,
+} as const;
 
 const generalCommunityId = "00000000-0000-4000-8000-000000000001";
 const semiconductorsCommunityId = "00000000-0000-4000-8000-000000004001";
@@ -47,7 +53,7 @@ const earningsCommunityId = "00000000-0000-4000-8000-000000004002";
 const amdSymbolId = "00000000-0000-4000-8000-000000001001";
 const semiconductorsTopicId = "00000000-0000-4000-8000-000000003001";
 
-function expectUuid(value: string | undefined): asserts value is string {
+function expectUuid(value: string | null | undefined): asserts value is string {
   expect(value).toMatch(
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
   );
@@ -94,6 +100,7 @@ describeResearchWrite("PostgresResearchWriteService", () => {
     agentConnectionOptions,
   );
   const service = new PostgresResearchWriteService(postgres.sql, {
+    agentContentRateLimits: fixtureAgentContentRateLimits,
     pendingActionKeyRing,
   });
   const ownerActionService = new PostgresOwnerPendingActionService(postgres.sql, {
@@ -101,6 +108,7 @@ describeResearchWrite("PostgresResearchWriteService", () => {
     pendingActionKeyRing,
   });
   const competingService = new PostgresResearchWriteService(competingPostgres.sql, {
+    agentContentRateLimits: fixtureAgentContentRateLimits,
     pendingActionKeyRing: {
       currentVersion: 1,
       keys: { 1: randomBytes(32) },
@@ -229,6 +237,117 @@ describeResearchWrite("PostgresResearchWriteService", () => {
       `;
       return repository.claimNext();
     });
+  }
+
+  async function createAutonomousUpdateFixture(options: {
+    communityId: string;
+    label: string;
+    references?: readonly {
+      relationType: "quote" | "reference";
+      targetContentId: string;
+    }[];
+    sourceLinks?: readonly {
+      description?: string;
+      title?: string;
+      url: string;
+    }[];
+    symbols?: readonly string[];
+    topics?: readonly string[];
+  }): Promise<{ contentId: string; revisionId: string }> {
+    const created = await service.createPost(
+      autonomousContext,
+      {
+        bodyMarkdown: `Initial editable research body for ${options.label}.`,
+        idempotencyKey: `update-fixture-${options.label}-${randomUUID()}`,
+        primaryCommunityId: options.communityId,
+        references: options.references,
+        sourceLinks: options.sourceLinks,
+        symbols: options.symbols,
+        title: `Editable research fixture ${options.label}`,
+        topics: options.topics,
+      },
+      { requestId: `req-${randomUUID()}` },
+    );
+    expect(created).toMatchObject({
+      decision: "allow",
+      operation: "create_post",
+      status: "succeeded",
+    });
+    const contentId = created.result?.contentId;
+    const revisionId = created.result?.revisionId;
+    expectUuid(contentId);
+    expectUuid(revisionId);
+    return { contentId, revisionId };
+  }
+
+  async function insertPublishedUpdateFixture(
+    actorId: string,
+    label: string,
+    publishedAt: Date = new Date(),
+  ): Promise<{ contentId: string; revisionId: string }> {
+    const contentId = randomUUID();
+    const revisionId = randomUUID();
+    const body = `Direct published update fixture ${label}.`;
+    await postgres.sql.begin(async (transaction) => {
+      await transaction`
+        insert into platform.content_items (
+          id,
+          kind,
+          author_actor_id,
+          primary_community_id,
+          root_id,
+          depth,
+          published_at,
+          created_at,
+          updated_at
+        )
+        values (
+          ${contentId},
+          'post',
+          ${actorId},
+          ${generalCommunityId},
+          ${contentId},
+          0,
+          ${publishedAt},
+          ${publishedAt},
+          ${publishedAt}
+        )
+      `;
+      await transaction`
+        insert into platform.content_revisions (
+          id,
+          content_id,
+          revision_number,
+          title,
+          body_markdown,
+          body_plain_text,
+          created_by_actor_id,
+          created_at,
+          source_version,
+          content_hash,
+          public_node_serialized_bytes
+        )
+        values (
+          ${revisionId},
+          ${contentId},
+          1,
+          ${`Direct update fixture ${label}`},
+          ${body},
+          ${body},
+          ${actorId},
+          ${publishedAt},
+          1,
+          ${randomBytes(32)},
+          512
+        )
+      `;
+      await transaction`
+        update platform.content_items
+        set current_revision_id = ${revisionId}
+        where id = ${contentId}
+      `;
+    });
+    return { contentId, revisionId };
   }
 
   beforeAll(async () => {
@@ -665,6 +784,777 @@ describeResearchWrite("PostgresResearchWriteService", () => {
     ]);
   });
 
+  it("updates authored prose, sources, and references as one immutable Revision", async () => {
+    const oldSourceUrl = `https://evidence.example.test/${marker}/update-old`;
+    const newSourceUrl = `https://evidence.example.test/${marker}/update-new`;
+    const newBody = "Updated research body after independently checking new evidence.";
+    const fixture = await createAutonomousUpdateFixture({
+      communityId: semiconductorsCommunityId,
+      label: `revision-${randomUUID()}`,
+      references: [{ relationType: "reference", targetContentId: referenceContentId }],
+      sourceLinks: [
+        {
+          description: "Evidence used by the original thesis.",
+          title: "Original evidence",
+          url: oldSourceUrl,
+        },
+      ],
+    });
+
+    const updated = await service.updateContent(
+      autonomousContext,
+      {
+        contentId: fixture.contentId,
+        editSummary: "Rechecked the thesis against newer primary evidence.",
+        expectedVersion: 1,
+        idempotencyKey: `update-revision-${randomUUID()}`,
+        patch: {
+          bodyMarkdown: newBody,
+          references: [{ relationType: "quote", targetContentId: referenceContentId }],
+          sourceLinks: [
+            {
+              description: "Replacement evidence supporting the revised analysis.",
+              title: "Updated evidence",
+              url: newSourceUrl,
+            },
+          ],
+        },
+      },
+      { channel: "mcp", requestId: `req-${randomUUID()}` },
+    );
+
+    expect(updated).toMatchObject({
+      decision: "allow",
+      error: null,
+      operation: "update_content",
+      pendingAction: null,
+      replayed: false,
+      result: {
+        contentId: fixture.contentId,
+        resourceVersion: 2,
+      },
+      status: "succeeded",
+    });
+    const revisionId = updated.result?.revisionId;
+    expectUuid(revisionId);
+    expect(revisionId).not.toBe(fixture.revisionId);
+
+    const content = await postgres.sql<
+      { current_revision_id: string; version: number }[]
+    >`
+      select current_revision_id, version::integer as version
+      from platform.content_items
+      where id = ${fixture.contentId}
+    `;
+    expect(content).toEqual([{ current_revision_id: revisionId, version: 2 }]);
+
+    const revisions = await postgres.sql<
+      {
+        body_markdown: string;
+        created_by_actor_id: string;
+        edit_summary: string | null;
+        id: string;
+        revision_number: number;
+        source_version: number;
+      }[]
+    >`
+      select
+        id,
+        revision_number::integer as revision_number,
+        body_markdown,
+        edit_summary,
+        created_by_actor_id,
+        source_version::integer as source_version
+      from platform.content_revisions
+      where content_id = ${fixture.contentId}
+      order by revision_number
+    `;
+    expect(revisions).toEqual([
+      {
+        body_markdown: expect.stringContaining("Initial editable research body"),
+        created_by_actor_id: autonomousContext.agent.actorId,
+        edit_summary: null,
+        id: fixture.revisionId,
+        revision_number: 1,
+        source_version: 1,
+      },
+      {
+        body_markdown: newBody,
+        created_by_actor_id: autonomousContext.agent.actorId,
+        edit_summary: "Rechecked the thesis against newer primary evidence.",
+        id: revisionId,
+        revision_number: 2,
+        source_version: 2,
+      },
+    ]);
+
+    const sources = await postgres.sql<
+      {
+        added_revision_id: string;
+        description: string | null;
+        removed_revision_id: string | null;
+        title: string | null;
+        url: string;
+      }[]
+    >`
+      select url, title, description, added_revision_id, removed_revision_id
+      from platform.source_links
+      where content_id = ${fixture.contentId}
+      order by added_at, id
+    `;
+    expect(sources).toEqual([
+      {
+        added_revision_id: fixture.revisionId,
+        description: "Evidence used by the original thesis.",
+        removed_revision_id: revisionId,
+        title: "Original evidence",
+        url: oldSourceUrl,
+      },
+      {
+        added_revision_id: revisionId,
+        description: "Replacement evidence supporting the revised analysis.",
+        removed_revision_id: null,
+        title: "Updated evidence",
+        url: newSourceUrl,
+      },
+    ]);
+
+    const references = await postgres.sql<
+      {
+        added_revision_id: string;
+        relation_type: string;
+        removed_revision_id: string | null;
+        to_content_id: string;
+      }[]
+    >`
+      select
+        to_content_id,
+        relation_type,
+        added_revision_id,
+        removed_revision_id
+      from platform.content_relations
+      where from_content_id = ${fixture.contentId}
+      order by created_at, id
+    `;
+    expect(references).toEqual([
+      {
+        added_revision_id: fixture.revisionId,
+        relation_type: "reference",
+        removed_revision_id: revisionId,
+        to_content_id: referenceContentId,
+      },
+      {
+        added_revision_id: revisionId,
+        relation_type: "quote",
+        removed_revision_id: null,
+        to_content_id: referenceContentId,
+      },
+    ]);
+
+    const revisedEvents = await postgres.sql<{ payload: unknown }[]>`
+      select payload
+      from system.outbox_events
+      where aggregate_type = 'content'
+        and aggregate_id = ${fixture.contentId}
+        and event_type = 'content.revised'
+    `;
+    expect(revisedEvents).toHaveLength(1);
+    expect(asRecord(revisedEvents[0]?.payload)).toEqual({
+      actor_id: autonomousContext.agent.actorId,
+      changed_groups: ["body_markdown", "source_links", "references"],
+      content_id: fixture.contentId,
+      resource_version: 2,
+      revision_id: revisionId,
+      root_content_id: fixture.contentId,
+    });
+    const operationalPayload = JSON.stringify(revisedEvents[0]?.payload);
+    expect(operationalPayload).not.toContain(newBody);
+    expect(operationalPayload).not.toContain(newSourceUrl);
+    expect(operationalPayload).not.toContain("Rechecked the thesis");
+  });
+
+  it("advances only the resource version for a classification-only update", async () => {
+    const fixture = await createAutonomousUpdateFixture({
+      communityId: earningsCommunityId,
+      label: `classification-${randomUUID()}`,
+      symbols: ["AMD"],
+    });
+
+    const updated = await service.updateContent(
+      autonomousContext,
+      {
+        contentId: fixture.contentId,
+        expectedVersion: 1,
+        idempotencyKey: `update-classification-${randomUUID()}`,
+        patch: { symbols: [] },
+      },
+      { requestId: `req-${randomUUID()}` },
+    );
+
+    expect(updated).toMatchObject({
+      decision: "allow",
+      error: null,
+      operation: "update_content",
+      result: {
+        contentId: fixture.contentId,
+        resourceVersion: 2,
+        revisionId: null,
+      },
+      status: "succeeded",
+    });
+
+    const persisted = await postgres.sql<
+      {
+        current_revision_id: string;
+        revision_count: number;
+        symbol_count: number;
+        version: number;
+      }[]
+    >`
+      select
+        content.current_revision_id,
+        content.version::integer as version,
+        (
+          select count(*)::integer
+          from platform.content_revisions as revision
+          where revision.content_id = content.id
+        ) as revision_count,
+        (
+          select count(*)::integer
+          from platform.content_symbols as symbol
+          where symbol.content_id = content.id
+        ) as symbol_count
+      from platform.content_items as content
+      where content.id = ${fixture.contentId}
+    `;
+    expect(persisted).toEqual([
+      {
+        current_revision_id: fixture.revisionId,
+        revision_count: 1,
+        symbol_count: 0,
+        version: 2,
+      },
+    ]);
+
+    const revisedEvents = await postgres.sql<{ payload: unknown }[]>`
+      select payload
+      from system.outbox_events
+      where aggregate_type = 'content'
+        and aggregate_id = ${fixture.contentId}
+        and event_type = 'content.revised'
+    `;
+    expect(revisedEvents).toHaveLength(1);
+    expect(asRecord(revisedEvents[0]?.payload)).toMatchObject({
+      changed_groups: ["symbols"],
+      content_id: fixture.contentId,
+      resource_version: 2,
+      revision_id: null,
+    });
+  });
+
+  it("persists a version conflict without orphaning any requested facts", async () => {
+    const oldSourceUrl = `https://evidence.example.test/${marker}/conflict-old`;
+    const newSourceUrl = `https://evidence.example.test/${marker}/conflict-new`;
+    const idempotencyKey = `update-conflict-${randomUUID()}`;
+    const fixture = await createAutonomousUpdateFixture({
+      communityId: semiconductorsCommunityId,
+      label: `conflict-${randomUUID()}`,
+      references: [{ relationType: "reference", targetContentId: referenceContentId }],
+      sourceLinks: [{ url: oldSourceUrl }],
+    });
+
+    const conflicted = await service.updateContent(
+      autonomousContext,
+      {
+        contentId: fixture.contentId,
+        expectedVersion: 2,
+        idempotencyKey,
+        patch: {
+          bodyMarkdown: "This stale update must not leave any public facts behind.",
+          references: [{ relationType: "quote", targetContentId: referenceContentId }],
+          sourceLinks: [{ url: newSourceUrl }],
+        },
+      },
+      { requestId: `req-${randomUUID()}` },
+    );
+
+    expect(conflicted).toMatchObject({
+      decision: "allow",
+      error: {
+        code: "VERSION_CONFLICT",
+        details: { current_version: 1, expected_version: 2 },
+        retryable: false,
+      },
+      operation: "update_content",
+      pendingAction: null,
+      result: null,
+      status: "failed",
+    });
+
+    const persisted = await postgres.sql<
+      {
+        active_reference_count: number;
+        active_source_count: number;
+        current_revision_id: string;
+        new_source_count: number;
+        revised_event_count: number;
+        revision_count: number;
+        version: number;
+      }[]
+    >`
+      select
+        content.current_revision_id,
+        content.version::integer as version,
+        (
+          select count(*)::integer
+          from platform.content_revisions as revision
+          where revision.content_id = content.id
+        ) as revision_count,
+        (
+          select count(*)::integer
+          from platform.source_links as source
+          where source.content_id = content.id
+            and source.removed_revision_id is null
+        ) as active_source_count,
+        (
+          select count(*)::integer
+          from platform.source_links as source
+          where source.content_id = content.id
+            and source.url = ${newSourceUrl}
+        ) as new_source_count,
+        (
+          select count(*)::integer
+          from platform.content_relations as relation
+          where relation.from_content_id = content.id
+            and relation.removed_revision_id is null
+        ) as active_reference_count,
+        (
+          select count(*)::integer
+          from system.outbox_events as event
+          where event.aggregate_type = 'content'
+            and event.aggregate_id = content.id::text
+            and event.event_type = 'content.revised'
+        ) as revised_event_count
+      from platform.content_items as content
+      where content.id = ${fixture.contentId}
+    `;
+    expect(persisted).toEqual([
+      {
+        active_reference_count: 1,
+        active_source_count: 1,
+        current_revision_id: fixture.revisionId,
+        new_source_count: 0,
+        revised_event_count: 0,
+        revision_count: 1,
+        version: 1,
+      },
+    ]);
+
+    const terminalFailure = await postgres.sql<
+      { resource_id: string | null; response_code: number; status: string }[]
+    >`
+      select resource_id, response_code, status
+      from platform.idempotency_records
+      where principal_scope_key = ${`credential:${autonomousContext.credential.id}`}
+        and operation = 'update_content'
+        and idempotency_key = ${idempotencyKey}
+    `;
+    expect(terminalFailure).toEqual([
+      { resource_id: null, response_code: 409, status: "failed" },
+    ]);
+  });
+
+  it("does not allow a different Agent to edit another Agent's content", async () => {
+    const fixture = await createAutonomousUpdateFixture({
+      communityId: earningsCommunityId,
+      label: `foreign-author-${randomUUID()}`,
+    });
+
+    const attempted = await service.updateContent(
+      assistedContext,
+      {
+        contentId: fixture.contentId,
+        expectedVersion: 1,
+        idempotencyKey: `update-foreign-author-${randomUUID()}`,
+        patch: { bodyMarkdown: "A different Agent must not replace this body." },
+      },
+      { requestId: `req-${randomUUID()}` },
+    );
+
+    expect(attempted).toMatchObject({
+      decision: "require_approval",
+      error: { code: "NOT_CONTENT_AUTHOR", retryable: false },
+      operation: "update_content",
+      pendingAction: null,
+      result: null,
+      status: "failed",
+    });
+
+    const persisted = await postgres.sql<
+      {
+        current_revision_id: string;
+        pending_count: number;
+        revised_event_count: number;
+        revision_count: number;
+        version: number;
+      }[]
+    >`
+      select
+        content.current_revision_id,
+        content.version::integer as version,
+        (
+          select count(*)::integer
+          from platform.content_revisions as revision
+          where revision.content_id = content.id
+        ) as revision_count,
+        (
+          select count(*)::integer
+          from platform.pending_actions as action
+          where action.target_id = content.id
+        ) as pending_count,
+        (
+          select count(*)::integer
+          from system.outbox_events as event
+          where event.aggregate_type = 'content'
+            and event.aggregate_id = content.id::text
+            and event.event_type = 'content.revised'
+        ) as revised_event_count
+      from platform.content_items as content
+      where content.id = ${fixture.contentId}
+    `;
+    expect(persisted).toEqual([
+      {
+        current_revision_id: fixture.revisionId,
+        pending_count: 0,
+        revised_event_count: 0,
+        revision_count: 1,
+        version: 1,
+      },
+    ]);
+  });
+
+  it("executes an Owner-approved Assisted content update", async () => {
+    const fixture = await insertPublishedUpdateFixture(
+      assistedContext.agent.actorId,
+      `assisted-approved-${randomUUID()}`,
+    );
+    const newBody = "Owner-approved Assisted Agent research revision.";
+    const pending = await service.updateContent(
+      assistedContext,
+      {
+        contentId: fixture.contentId,
+        editSummary: "Owner approved this material research change.",
+        expectedVersion: 1,
+        idempotencyKey: `assisted-update-approved-${randomUUID()}`,
+        patch: { bodyMarkdown: newBody },
+      },
+      { channel: "mcp", requestId: `req-${randomUUID()}` },
+    );
+
+    expect(pending).toMatchObject({
+      decision: "require_approval",
+      error: null,
+      operation: "update_content",
+      pendingAction: {
+        expectedVersion: 1,
+        operation: "update_content",
+        state: "pending_approval",
+      },
+      result: null,
+      status: "pending_approval",
+    });
+    const actionId = pending.pendingAction?.id;
+    expectUuid(actionId);
+
+    const beforeApproval = await postgres.sql<
+      {
+        current_revision_id: string;
+        expected_version: number;
+        revision_count: number;
+        version: number;
+      }[]
+    >`
+      select
+        content.current_revision_id,
+        content.version::integer as version,
+        action.expected_version::integer as expected_version,
+        (
+          select count(*)::integer
+          from platform.content_revisions as revision
+          where revision.content_id = content.id
+        ) as revision_count
+      from platform.content_items as content
+      join platform.pending_actions as action on action.target_id = content.id
+      where content.id = ${fixture.contentId}
+        and action.id = ${actionId}
+    `;
+    expect(beforeApproval).toEqual([
+      {
+        current_revision_id: fixture.revisionId,
+        expected_version: 1,
+        revision_count: 1,
+        version: 1,
+      },
+    ]);
+
+    const detail = await ownerActionService.getAction(
+      assistedContext.owner.id,
+      actionId,
+      { requestId: `req-${randomUUID()}` },
+    );
+    expect(detail).toMatchObject({
+      command: {
+        contentId: fixture.contentId,
+        editSummary: "Owner approved this material research change.",
+        expectedVersion: 1,
+        operation: "update_content",
+        patch: { bodyMarkdown: newBody },
+      },
+      id: actionId,
+      state: "pending_approval",
+      version: 1,
+    });
+    await ownerActionService.approveAction(assistedContext.owner.id, actionId, {
+      expectedVersion: detail.version,
+      reasonCode: "owner_approved",
+      requestId: `req-${randomUUID()}`,
+    });
+
+    const executionRepository = new PostgresPendingActionExecutionRepository(
+      postgres.sql,
+      {
+        leaseOwner: `approved-update-integration:${randomUUID()}`,
+        leaseSeconds: 30,
+      },
+    );
+    const claim = await claimIsolatedAction(executionRepository, actionId);
+    if (!claim) {
+      throw new Error("The approved update was not available to the worker");
+    }
+    expect(claim).toMatchObject({ actionId, operation: "update_content" });
+
+    const executed = await service.executeApprovedAction(executionRepository, claim);
+    const revisionId = executed.content.revisionId;
+    expectUuid(revisionId);
+    expect(executed.content).toEqual({
+      contentId: fixture.contentId,
+      resourceVersion: 2,
+      revisionId,
+    });
+    expect(executed.action).toMatchObject({
+      actionId,
+      error: null,
+      idempotencyStatus: "succeeded",
+      operation: "update_content",
+      resourceId: fixture.contentId,
+      state: "succeeded",
+    });
+
+    const persisted = await postgres.sql<
+      {
+        body_markdown: string;
+        current_revision_id: string;
+        event_count: number;
+        revision_count: number;
+        source_version: number;
+        version: number;
+      }[]
+    >`
+      select
+        content.current_revision_id,
+        content.version::integer as version,
+        revision.body_markdown,
+        revision.source_version::integer as source_version,
+        (
+          select count(*)::integer
+          from platform.content_revisions as history
+          where history.content_id = content.id
+        ) as revision_count,
+        (
+          select count(*)::integer
+          from system.outbox_events as event
+          where event.aggregate_type = 'content'
+            and event.aggregate_id = content.id::text
+            and event.event_type = 'content.revised'
+        ) as event_count
+      from platform.content_items as content
+      join platform.content_revisions as revision
+        on revision.id = content.current_revision_id
+      where content.id = ${fixture.contentId}
+    `;
+    expect(persisted).toEqual([
+      {
+        body_markdown: newBody,
+        current_revision_id: revisionId,
+        event_count: 1,
+        revision_count: 2,
+        source_version: 2,
+        version: 2,
+      },
+    ]);
+  });
+
+  it("invalidates an approved Assisted update when its version changes while waiting", async () => {
+    const fixture = await insertPublishedUpdateFixture(
+      assistedContext.agent.actorId,
+      `assisted-stale-${randomUUID()}`,
+    );
+    const staleBody = "This approved body must not overwrite a newer revision.";
+    const pending = await service.updateContent(
+      assistedContext,
+      {
+        contentId: fixture.contentId,
+        expectedVersion: 1,
+        idempotencyKey: `assisted-update-stale-${randomUUID()}`,
+        patch: { bodyMarkdown: staleBody },
+      },
+      { requestId: `req-${randomUUID()}` },
+    );
+    const actionId = pending.pendingAction?.id;
+    expectUuid(actionId);
+    expect(pending).toMatchObject({
+      decision: "require_approval",
+      operation: "update_content",
+      pendingAction: { expectedVersion: 1 },
+      status: "pending_approval",
+    });
+
+    const interveningRevisionId = randomUUID();
+    const interveningBody = "A newer accepted revision arrived before approval.";
+    await postgres.sql.begin(async (transaction) => {
+      await transaction`
+        insert into platform.content_revisions (
+          id,
+          content_id,
+          revision_number,
+          title,
+          body_markdown,
+          body_plain_text,
+          edit_summary,
+          created_by_actor_id,
+          source_version,
+          content_hash,
+          public_node_serialized_bytes
+        )
+        values (
+          ${interveningRevisionId},
+          ${fixture.contentId},
+          2,
+          'Intervening Assisted update fixture',
+          ${interveningBody},
+          ${interveningBody},
+          'Simulated concurrent accepted revision.',
+          ${assistedContext.agent.actorId},
+          2,
+          ${randomBytes(32)},
+          512
+        )
+      `;
+      await transaction`
+        update platform.content_items
+        set version = 2,
+            current_revision_id = ${interveningRevisionId}
+        where id = ${fixture.contentId}
+      `;
+    });
+
+    const detail = await ownerActionService.getAction(
+      assistedContext.owner.id,
+      actionId,
+      { requestId: `req-${randomUUID()}` },
+    );
+    await ownerActionService.approveAction(assistedContext.owner.id, actionId, {
+      expectedVersion: detail.version,
+      reasonCode: "owner_approved",
+      requestId: `req-${randomUUID()}`,
+    });
+
+    const executionRepository = new PostgresPendingActionExecutionRepository(
+      postgres.sql,
+      {
+        leaseOwner: `stale-update-integration:${randomUUID()}`,
+        leaseSeconds: 30,
+      },
+    );
+    const claim = await claimIsolatedAction(executionRepository, actionId);
+    if (!claim) {
+      throw new Error("The stale approved update was not available to the worker");
+    }
+    await expect(
+      service.executeApprovedAction(executionRepository, claim),
+    ).rejects.toMatchObject({
+      code: "APPROVED_ACTION_CONTEXT_INVALID",
+      disposition: "invalidate",
+    });
+    const invalidated = await executionRepository.markInvalidated(claim);
+    expect(invalidated).toMatchObject({
+      action: {
+        actionId,
+        error: {
+          code: "ACTION_INVALIDATED",
+          retryable: false,
+        },
+        idempotencyStatus: "failed",
+        resourceId: null,
+        state: "invalidated",
+      },
+      applied: true,
+    });
+
+    const persisted = await postgres.sql<
+      {
+        current_body: string;
+        current_revision_id: string;
+        revised_event_count: number;
+        revision_count: number;
+        stale_body_count: number;
+        state: string;
+        version: number;
+      }[]
+    >`
+      select
+        content.current_revision_id,
+        content.version::integer as version,
+        current_revision.body_markdown as current_body,
+        action.state,
+        (
+          select count(*)::integer
+          from platform.content_revisions as revision
+          where revision.content_id = content.id
+        ) as revision_count,
+        (
+          select count(*)::integer
+          from platform.content_revisions as revision
+          where revision.content_id = content.id
+            and revision.body_markdown = ${staleBody}
+        ) as stale_body_count,
+        (
+          select count(*)::integer
+          from system.outbox_events as event
+          where event.aggregate_type = 'content'
+            and event.aggregate_id = content.id::text
+            and event.event_type = 'content.revised'
+        ) as revised_event_count
+      from platform.content_items as content
+      join platform.content_revisions as current_revision
+        on current_revision.id = content.current_revision_id
+      join platform.pending_actions as action on action.target_id = content.id
+      where content.id = ${fixture.contentId}
+        and action.id = ${actionId}
+    `;
+    expect(persisted).toEqual([
+      {
+        current_body: interveningBody,
+        current_revision_id: interveningRevisionId,
+        revised_event_count: 0,
+        revision_count: 2,
+        stale_body_count: 0,
+        state: "invalidated",
+        version: 2,
+      },
+    ]);
+  });
+
   it("replays an exact key without duplicate effects and conflicts on new input", async () => {
     const idempotencyKey = `replay-${randomUUID()}`;
     const input = {
@@ -751,6 +1641,11 @@ describeResearchWrite("PostgresResearchWriteService", () => {
   it("stores an Assisted command only as encrypted PendingAction state", async () => {
     const privateMarker = `plaintext-must-not-appear-${randomUUID()}`;
     const idempotencyKey = `assisted-${randomUUID()}`;
+    const assistedContentBefore = await postgres.sql<{ count: number }[]>`
+      select count(*)::integer as count
+      from platform.content_items
+      where author_actor_id = ${assistedContext.agent.actorId}
+    `;
     const result = await service.createPost(
       assistedContext,
       {
@@ -829,7 +1724,7 @@ describeResearchWrite("PostgresResearchWriteService", () => {
       from platform.content_items
       where author_actor_id = ${assistedContext.agent.actorId}
     `;
-    expect(assistedContent).toEqual([{ count: 0 }]);
+    expect(assistedContent).toEqual(assistedContentBefore);
     const catalogCommunity = await postgres.sql<{ count: number }[]>`
       select count(*)::integer as count
       from platform.communities
@@ -1939,6 +2834,612 @@ describeResearchWrite("PostgresResearchWriteService", () => {
         ) as action_logs
     `;
     expect(stableEffects).toEqual([{ action_logs: 1, replies: 0 }]);
+  });
+
+  it("rolls back catalog Community materialization when later update facts are invalid", async () => {
+    const catalogMarker = randomUUID().replaceAll("-", "").slice(0, 10);
+    const catalogCommunityId = randomUUID();
+    const catalogSymbolId = randomUUID();
+    const catalogTicker = `Q${catalogMarker.slice(0, 8).toUpperCase()}`;
+    await postgres.sql`
+      insert into platform.symbols (
+        id,
+        community_candidate_id,
+        ticker,
+        exchange,
+        name
+      )
+      values (
+        ${catalogSymbolId},
+        ${catalogCommunityId},
+        ${catalogTicker},
+        'TEST',
+        'Failed update materialization integration symbol'
+      )
+    `;
+    const fixture = await insertPublishedUpdateFixture(
+      autonomousContext.agent.actorId,
+      `catalog-rollback-${randomUUID()}`,
+    );
+
+    const invalidTopic = `missing-topic-${catalogMarker}`;
+    const topicFailure = await service.updateContent(
+      autonomousContext,
+      {
+        contentId: fixture.contentId,
+        expectedVersion: 1,
+        idempotencyKey: `catalog-invalid-topic-${randomUUID()}`,
+        patch: {
+          additionalCommunityIds: [catalogCommunityId],
+          topics: [invalidTopic],
+        },
+      },
+      { requestId: `req-${randomUUID()}` },
+    );
+    expect(topicFailure).toMatchObject({
+      decision: "allow",
+      error: {
+        code: "VALIDATION_ERROR",
+        details: { field: "topics", topic: invalidTopic },
+      },
+      operation: "update_content",
+      result: null,
+      status: "failed",
+    });
+
+    const invalidReferenceId = randomUUID();
+    const referenceFailure = await service.updateContent(
+      autonomousContext,
+      {
+        contentId: fixture.contentId,
+        expectedVersion: 1,
+        idempotencyKey: `catalog-invalid-reference-${randomUUID()}`,
+        patch: {
+          additionalCommunityIds: [catalogCommunityId],
+          references: [
+            { relationType: "reference", targetContentId: invalidReferenceId },
+          ],
+        },
+      },
+      { requestId: `req-${randomUUID()}` },
+    );
+    expect(referenceFailure).toMatchObject({
+      decision: "allow",
+      error: { code: "CONTENT_NOT_FOUND" },
+      operation: "update_content",
+      result: null,
+      status: "failed",
+    });
+
+    const state = await postgres.sql<
+      {
+        additional_mapping_count: number;
+        catalog_community_count: number;
+        catalog_symbol_mapping_count: number;
+        current_revision_id: string;
+        revised_event_count: number;
+        revision_count: number;
+        version: number;
+      }[]
+    >`
+      select
+        content.current_revision_id,
+        content.version::integer as version,
+        (
+          select count(*)::integer
+          from platform.content_revisions as revision
+          where revision.content_id = content.id
+        ) as revision_count,
+        (
+          select count(*)::integer
+          from platform.communities as community
+          where community.id = ${catalogCommunityId}
+        ) as catalog_community_count,
+        (
+          select count(*)::integer
+          from platform.community_symbols as mapping
+          where mapping.community_id = ${catalogCommunityId}
+             or mapping.symbol_id = ${catalogSymbolId}
+        ) as catalog_symbol_mapping_count,
+        (
+          select count(*)::integer
+          from platform.content_additional_communities as additional
+          where additional.content_id = content.id
+            and additional.community_id = ${catalogCommunityId}
+        ) as additional_mapping_count,
+        (
+          select count(*)::integer
+          from system.outbox_events as event
+          where event.aggregate_type = 'content'
+            and event.aggregate_id = content.id::text
+            and event.event_type = 'content.revised'
+        ) as revised_event_count
+      from platform.content_items as content
+      where content.id = ${fixture.contentId}
+    `;
+    expect(state).toEqual([
+      {
+        additional_mapping_count: 0,
+        catalog_community_count: 0,
+        catalog_symbol_mapping_count: 0,
+        current_revision_id: fixture.revisionId,
+        revised_event_count: 0,
+        revision_count: 1,
+        version: 1,
+      },
+    ]);
+  });
+
+  it("counts a newly added Community from its admission time instead of the old post time", async () => {
+    const admissionMarker = randomUUID().replaceAll("-", "").slice(0, 10);
+    const admissionCommunityId = randomUUID();
+    const admissionTopicId = randomUUID();
+    await postgres.sql.begin(async (transaction) => {
+      await transaction`
+        insert into platform.topics (id, slug, name, description)
+        values (
+          ${admissionTopicId},
+          ${`admission-${admissionMarker}`},
+          'Additional placement admission fixture',
+          'Proves that an old post consumes quota when newly placed.'
+        )
+      `;
+      await transaction`
+        insert into platform.communities (
+          id,
+          slug,
+          name,
+          description,
+          kind,
+          posting_rules,
+          settings
+        )
+        values (
+          ${admissionCommunityId},
+          ${`admission-${admissionMarker}`},
+          'Additional placement quota Community',
+          'A one-admission-per-hour integration fixture.',
+          'topic',
+          ${transaction.json({
+            allowed_content: ["investment-research", "discussion"],
+            max_posts_per_hour: 1,
+            replies_open: true,
+            requires_sources: false,
+          })},
+          ${transaction.json({ integration_fixture: admissionMarker })}
+        )
+      `;
+      await transaction`
+        insert into platform.community_topics (community_id, topic_id, is_primary)
+        values (${admissionCommunityId}, ${admissionTopicId}, true)
+      `;
+    });
+
+    const publishedAt = new Date(Date.now() - 2 * 60 * 60 * 1_000);
+    const fixture = await insertPublishedUpdateFixture(
+      autonomousContext.agent.actorId,
+      `old-community-admission-${randomUUID()}`,
+      publishedAt,
+    );
+    const admitted = await service.updateContent(
+      autonomousContext,
+      {
+        contentId: fixture.contentId,
+        expectedVersion: 1,
+        idempotencyKey: `old-community-admission-${randomUUID()}`,
+        patch: { additionalCommunityIds: [admissionCommunityId] },
+      },
+      { requestId: `req-${randomUUID()}` },
+    );
+    expect(admitted).toMatchObject({
+      decision: "allow",
+      operation: "update_content",
+      result: {
+        contentId: fixture.contentId,
+        resourceVersion: 2,
+        revisionId: null,
+      },
+      status: "succeeded",
+    });
+
+    const rejectedKey = `recent-additional-admission-${randomUUID()}`;
+    const rejected = await service.createPost(
+      autonomousContext,
+      {
+        bodyMarkdown:
+          "This post must be rejected because the old post was admitted recently.",
+        idempotencyKey: rejectedKey,
+        primaryCommunityId: admissionCommunityId,
+        title: "Recent additional placement consumes Community quota",
+      },
+      { requestId: `req-${randomUUID()}` },
+    );
+    expect(rejected).toMatchObject({
+      decision: "deny",
+      error: {
+        code: "RATE_LIMITED",
+        details: { community_id: admissionCommunityId },
+        retryable: true,
+      },
+      pendingAction: null,
+      result: null,
+      status: "denied",
+    });
+    expect(rejected.error?.retryAfterMs).toBeGreaterThan(0);
+
+    const state = await postgres.sql<
+      {
+        admitted_after_publication_window: boolean;
+        idempotency_count: number;
+        mapping_count: number;
+        primary_post_count: number;
+        revision_count: number;
+        version: number;
+      }[]
+    >`
+      select
+        content.version::integer as version,
+        additional.created_at > content.published_at + interval '1 hour'
+          as admitted_after_publication_window,
+        (
+          select count(*)::integer
+          from platform.content_additional_communities as mapping
+          where mapping.content_id = content.id
+            and mapping.community_id = ${admissionCommunityId}
+        ) as mapping_count,
+        (
+          select count(*)::integer
+          from platform.content_revisions as revision
+          where revision.content_id = content.id
+        ) as revision_count,
+        (
+          select count(*)::integer
+          from platform.content_items as attempted
+          where attempted.author_actor_id = ${autonomousContext.agent.actorId}
+            and attempted.primary_community_id = ${admissionCommunityId}
+        ) as primary_post_count,
+        (
+          select count(*)::integer
+          from platform.idempotency_records as idempotency
+          where idempotency.principal_scope_key = ${`credential:${autonomousContext.credential.id}`}
+            and idempotency.operation = 'create_post'
+            and idempotency.idempotency_key = ${rejectedKey}
+        ) as idempotency_count
+      from platform.content_items as content
+      join platform.content_additional_communities as additional
+        on additional.content_id = content.id
+       and additional.community_id = ${admissionCommunityId}
+      where content.id = ${fixture.contentId}
+    `;
+    expect(state).toEqual([
+      {
+        admitted_after_publication_window: true,
+        idempotency_count: 0,
+        mapping_count: 1,
+        primary_post_count: 0,
+        revision_count: 1,
+        version: 2,
+      },
+    ]);
+  });
+
+  it("retries the same update idempotency key after its rate window clears", async () => {
+    // Keep the injected domain clock behind PostgreSQL's clock_timestamp():
+    // idempotency update triggers own updated_at and require chronological rows.
+    let rateClock = new Date(Date.now() - 2 * 60 * 60 * 1_000);
+    const rateService = new PostgresResearchWriteService(postgres.sql, {
+      clock: () => rateClock,
+      pendingActionKeyRing,
+    });
+    const fixture = await insertPublishedUpdateFixture(
+      autonomousContext.agent.actorId,
+      `update-rate-${randomUUID()}`,
+    );
+
+    for (let index = 0; index < 10; index += 1) {
+      const symbols = index % 2 === 0 ? ["AMD"] : [];
+      const updated = await rateService.updateContent(
+        autonomousContext,
+        {
+          contentId: fixture.contentId,
+          expectedVersion: index + 1,
+          idempotencyKey: `update-rate-primer-${index}-${randomUUID()}`,
+          patch: { symbols },
+        },
+        { requestId: `req-${randomUUID()}` },
+      );
+      expect(updated).toMatchObject({
+        decision: "allow",
+        result: {
+          contentId: fixture.contentId,
+          resourceVersion: index + 2,
+          revisionId: null,
+        },
+        status: "succeeded",
+      });
+    }
+
+    const idempotencyKey = `update-rate-retry-${randomUUID()}`;
+    const input = {
+      contentId: fixture.contentId,
+      expectedVersion: 11,
+      idempotencyKey,
+      patch: { symbols: ["AMD"] },
+    } as const;
+    const limited = await rateService.updateContent(autonomousContext, input, {
+      requestId: `req-${randomUUID()}`,
+    });
+    expect(limited).toMatchObject({
+      decision: "deny",
+      error: {
+        code: "RATE_LIMITED",
+        details: { limit: 10, limit_dimension: "content_updates" },
+        retryable: true,
+      },
+      operation: "update_content",
+      pendingAction: null,
+      replayed: false,
+      result: null,
+      status: "denied",
+    });
+    expect(limited.error?.retryAfterMs).toBeGreaterThan(0);
+
+    const limitedState = await postgres.sql<
+      {
+        idempotency_count: number;
+        rate_limited_log_count: number;
+        symbol_count: number;
+        succeeded_update_log_count: number;
+        version: number;
+      }[]
+    >`
+      select
+        content.version::integer as version,
+        (
+          select count(*)::integer
+          from platform.content_symbols as symbol
+          where symbol.content_id = content.id
+        ) as symbol_count,
+        (
+          select count(*)::integer
+          from platform.action_logs as log
+          where log.action = 'content.update_content'
+            and log.target_id = content.id::text
+            and log.outcome = 'succeeded'
+        ) as succeeded_update_log_count,
+        (
+          select count(*)::integer
+          from platform.action_logs as log
+          where log.action = 'content.update_content'
+            and log.target_id = content.id::text
+            and log.decision = 'deny'
+            and log.outcome = 'denied'
+            and log.error_code = 'RATE_LIMITED'
+        ) as rate_limited_log_count,
+        (
+          select count(*)::integer
+          from platform.idempotency_records as idempotency
+          where idempotency.principal_scope_key = ${`credential:${autonomousContext.credential.id}`}
+            and idempotency.operation = 'update_content'
+            and idempotency.idempotency_key = ${idempotencyKey}
+        ) as idempotency_count
+      from platform.content_items as content
+      where content.id = ${fixture.contentId}
+    `;
+    expect(limitedState).toEqual([
+      {
+        idempotency_count: 0,
+        rate_limited_log_count: 1,
+        symbol_count: 0,
+        succeeded_update_log_count: 10,
+        version: 11,
+      },
+    ]);
+
+    rateClock = new Date(rateClock.valueOf() + 61 * 60 * 1_000);
+    const retried = await rateService.updateContent(autonomousContext, input, {
+      requestId: `req-${randomUUID()}`,
+    });
+    expect(retried).toMatchObject({
+      decision: "allow",
+      error: null,
+      operation: "update_content",
+      pendingAction: null,
+      replayed: false,
+      result: {
+        contentId: fixture.contentId,
+        resourceVersion: 12,
+        revisionId: null,
+      },
+      status: "succeeded",
+    });
+
+    const terminal = await postgres.sql<
+      {
+        idempotency_count: number;
+        rate_limited_log_count: number;
+        resource_id: string;
+        response_code: number;
+        status: string;
+        symbol_count: number;
+        succeeded_update_log_count: number;
+        version: number;
+      }[]
+    >`
+      select
+        content.version::integer as version,
+        idempotency.status,
+        idempotency.response_code,
+        idempotency.resource_id,
+        (
+          select count(*)::integer
+          from platform.content_symbols as symbol
+          where symbol.content_id = content.id
+        ) as symbol_count,
+        (
+          select count(*)::integer
+          from platform.action_logs as log
+          where log.action = 'content.update_content'
+            and log.target_id = content.id::text
+            and log.outcome = 'succeeded'
+        ) as succeeded_update_log_count,
+        (
+          select count(*)::integer
+          from platform.action_logs as log
+          where log.action = 'content.update_content'
+            and log.target_id = content.id::text
+            and log.decision = 'deny'
+            and log.outcome = 'denied'
+            and log.error_code = 'RATE_LIMITED'
+        ) as rate_limited_log_count,
+        (
+          select count(*)::integer
+          from platform.idempotency_records as matching
+          where matching.principal_scope_key = ${`credential:${autonomousContext.credential.id}`}
+            and matching.operation = 'update_content'
+            and matching.idempotency_key = ${idempotencyKey}
+        ) as idempotency_count
+      from platform.content_items as content
+      join platform.idempotency_records as idempotency
+        on idempotency.resource_id = content.id
+       and idempotency.principal_scope_key = ${`credential:${autonomousContext.credential.id}`}
+       and idempotency.operation = 'update_content'
+       and idempotency.idempotency_key = ${idempotencyKey}
+      where content.id = ${fixture.contentId}
+    `;
+    expect(terminal).toEqual([
+      {
+        idempotency_count: 1,
+        rate_limited_log_count: 1,
+        resource_id: fixture.contentId,
+        response_code: 200,
+        status: "succeeded",
+        symbol_count: 1,
+        succeeded_update_log_count: 11,
+        version: 12,
+      },
+    ]);
+  });
+
+  it("enforces the default new-Agent post quota on real persisted writes", async () => {
+    const rateMarker = randomUUID().replaceAll("-", "").slice(0, 10);
+    const ownerId = await createVerifiedOwner(`agent-rate-${rateMarker}`);
+    const agent = await agentService.createAgent(
+      ownerId,
+      {
+        displayName: "Default Rate Integration Agent",
+        handle: `agent-rate-${rateMarker}`,
+      },
+      randomUUID(),
+    );
+    await activatePolicy(ownerId, agent.agent.id, "autonomous");
+    const credential = await agentService.createCredential(
+      ownerId,
+      agent.agent.id,
+      {
+        name: "Default Agent rate integration",
+        scopes: ["research:read", "content:write"],
+      },
+      randomUUID(),
+    );
+    const context = await agentService.authenticateStaticApiKey(credential.apiKey);
+    const rateService = new PostgresResearchWriteService(postgres.sql, {
+      pendingActionKeyRing,
+    });
+
+    for (let index = 1; index <= 2; index += 1) {
+      const accepted = await rateService.createPost(
+        context,
+        {
+          bodyMarkdown: `Default new-Agent quota accepted post ${index}.`,
+          idempotencyKey: `agent-rate-accepted-${index}-${randomUUID()}`,
+          primaryCommunityId: generalCommunityId,
+          title: `Accepted default Agent quota post ${index}`,
+        },
+        { requestId: `req-${randomUUID()}` },
+      );
+      expect(accepted).toMatchObject({
+        decision: "allow",
+        replayed: false,
+        status: "succeeded",
+      });
+    }
+
+    const rejectedKey = `agent-rate-rejected-${randomUUID()}`;
+    const rejected = await rateService.createPost(
+      context,
+      {
+        bodyMarkdown: "The third new-Agent post must remain outside the rolling window.",
+        idempotencyKey: rejectedKey,
+        primaryCommunityId: generalCommunityId,
+        title: "Rejected default Agent quota post",
+      },
+      { requestId: `req-${randomUUID()}` },
+    );
+    expect(rejected).toMatchObject({
+      decision: "deny",
+      error: {
+        code: "RATE_LIMITED",
+        details: {
+          limit: 2,
+          limit_dimension: "agent_post_hour",
+          new_agent_window: true,
+          rule_version: "agent-content-rate-v1",
+        },
+        retryable: true,
+      },
+      pendingAction: null,
+      replayed: false,
+      result: null,
+      status: "denied",
+    });
+
+    const state = await postgres.sql<
+      {
+        admitted_content: number;
+        rejected_idempotency: number;
+        rate_denials: number;
+        succeeded_actions: number;
+      }[]
+    >`
+      select
+        (
+          select count(*)::integer
+          from platform.content_items
+          where author_actor_id = ${context.agent.actorId}
+            and kind = 'post'
+        ) as admitted_content,
+        (
+          select count(*)::integer
+          from platform.idempotency_records
+          where principal_scope_key = ${`credential:${context.credential.id}`}
+            and operation = 'create_post'
+            and idempotency_key = ${rejectedKey}
+        ) as rejected_idempotency,
+        (
+          select count(*)::integer
+          from platform.action_logs
+          where agent_id = ${context.agent.id}
+            and action = 'content.create_post'
+            and outcome = 'denied'
+            and error_code = 'RATE_LIMITED'
+        ) as rate_denials,
+        (
+          select count(*)::integer
+          from platform.action_logs
+          where agent_id = ${context.agent.id}
+            and action = 'content.create_post'
+            and outcome = 'succeeded'
+        ) as succeeded_actions
+    `;
+    expect(state).toEqual([
+      {
+        admitted_content: 2,
+        rate_denials: 1,
+        rejected_idempotency: 0,
+        succeeded_actions: 2,
+      },
+    ]);
   });
 
   it("enforces the authoritative post quota before reserving idempotency", async () => {

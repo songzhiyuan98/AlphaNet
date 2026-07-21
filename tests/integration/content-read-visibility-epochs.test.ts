@@ -655,18 +655,19 @@ describeVisibilityEpochs("content read visibility epochs", () => {
     expect(frozenContentIds).not.toContain(backdatedContentId);
   });
 
-  it("advances content membership for existing placement and visibility changes", async () => {
+  it("keeps primary placement immutable and advances membership for visibility changes", async () => {
     const mutable = await createContent({});
 
-    await expectEpochDelta(
-      () => postgres.sql`
+    const beforeRejectedPlacement = await readEpochs();
+    await expect(
+      postgres.sql`
         update platform.content_items
         set version = version + 1,
             primary_community_id = ${alternatePrimaryCommunityId}
         where id = ${mutable.contentId}
       `,
-      { contentMembership: 1, publicCommunityVisibility: 0 },
-    );
+    ).rejects.toThrow(/primary Community/iu);
+    await expect(readEpochs()).resolves.toEqual(beforeRejectedPlacement);
     await expectEpochDelta(
       () => postgres.sql`
         update platform.content_items

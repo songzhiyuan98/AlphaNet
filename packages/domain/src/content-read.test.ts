@@ -25,6 +25,9 @@ const replyId = "30000000-0000-4000-8000-000000000002";
 const secondReplyId = "30000000-0000-4000-8000-000000000003";
 const revisionId = "40000000-0000-4000-8000-000000000001";
 const replyRevisionId = "40000000-0000-4000-8000-000000000002";
+const secondRevisionId = "40000000-0000-4000-8000-000000000003";
+const thirdRevisionId = "40000000-0000-4000-8000-000000000004";
+const fourthRevisionId = "40000000-0000-4000-8000-000000000005";
 const signingKey = Buffer.from("content-read-unit-signing-key-material-v1", "utf8");
 
 interface CapturedQuery {
@@ -121,6 +124,8 @@ function projectionRow(
     kind?: "post" | "reply";
     parentId?: string | null;
     revisionId?: string;
+    revisionNumber?: number;
+    title?: string;
   } = {},
 ) {
   const kind = options.kind ?? "post";
@@ -171,8 +176,12 @@ function projectionRow(
     revision_created_at: deleted ? null : new Date(now.valueOf() - 10_000),
     revision_created_by_actor_id: deleted ? null : actorId,
     revision_id: deleted ? null : selectedRevisionId,
-    revision_number: deleted ? null : 1,
-    revision_title: deleted ? null : kind === "post" ? "A valid research title" : null,
+    revision_number: deleted ? null : (options.revisionNumber ?? 1),
+    revision_title: deleted
+      ? null
+      : kind === "post"
+        ? (options.title ?? "A valid research title")
+        : null,
     root_id: rootId,
     source_links: [],
     source_version: deleted ? null : 1,
@@ -648,7 +657,12 @@ describe("PostgresContentReadService", () => {
       cursorSigningKey: signingKey,
     });
 
-    const detail = await service.getContent(null, { contentId: rootId });
+    const detail = await service.getContent(null, {
+      contentId: rootId,
+      includeRevisionHistory: true,
+      revisionId,
+      revisionLimit: 10,
+    });
     expect(detail).toMatchObject({
       content: {
         currentRevisionId: null,
@@ -659,7 +673,238 @@ describe("PostgresContentReadService", () => {
       },
       revision: null,
     });
+    expect(detail).not.toHaveProperty("revisionHistory");
     expect(JSON.stringify(detail)).not.toContain("Independent research body");
+    expect(
+      database.calls.some(
+        (query) =>
+          query.text.includes("as selected_revision") ||
+          query.text.includes("as history_revision"),
+      ),
+    ).toBe(false);
+  });
+
+  it("selects a historical revision without changing canonical current content", async () => {
+    const database = fakePostgres((query) => {
+      if (query.text.includes("set_config")) return [];
+      if (query.text.includes("transaction_timestamp()")) return [{ as_of: now }];
+      if (query.text.includes("select\n        content.id::text as id")) {
+        return [
+          projectionRow({
+            revisionId: thirdRevisionId,
+            revisionNumber: 3,
+            title: "Current canonical research title",
+          }),
+        ];
+      }
+      if (query.text.includes("as selected_revision")) {
+        return [
+          {
+            body_markdown: "Historical thesis with its original evidence.",
+            body_plain_text: "Historical thesis with its original evidence.",
+            content_hash: "b".repeat(64),
+            content_id: rootId,
+            content_kind: "post",
+            created_at: new Date(now.valueOf() - 20_000),
+            created_by_actor_id: actorId,
+            edit_summary: "Initial thesis",
+            id: revisionId,
+            mentions: [],
+            public_node_serialized_bytes: 512,
+            references: [{ relationType: "reference", targetContentId: replyId }],
+            revision_number: 1,
+            source_links: [
+              {
+                addedAt: new Date(now.valueOf() - 20_000).toISOString(),
+                addedByActorId: actorId,
+                addedRevisionId: revisionId,
+                description: null,
+                sourceLinkId: "50000000-0000-4000-8000-000000000001",
+                title: "Original filing",
+                url: "https://example.com/filing",
+              },
+            ],
+            source_version: 1,
+            title: "Original research title",
+          },
+        ];
+      }
+      return [];
+    });
+    const service = new PostgresContentReadService(database.sql, {
+      cursorSigningKey: signingKey,
+    });
+
+    const detail = await service.getContent(null, {
+      contentId: rootId,
+      revisionId,
+    });
+
+    expect(detail.content).toMatchObject({
+      currentRevisionId: thirdRevisionId,
+      title: "Current canonical research title",
+      version: 1,
+    });
+    expect(detail.revision).toMatchObject({
+      contentId: rootId,
+      id: revisionId,
+      references: [{ relationType: "reference", targetContentId: replyId }],
+      revisionNumber: 1,
+      sourceLinks: [expect.objectContaining({ title: "Original filing" })],
+      title: "Original research title",
+    });
+    const revisionQuery = database.calls.find((query) =>
+      query.text.includes("as selected_revision"),
+    );
+    expect(revisionQuery?.text).toContain("added_revision.revision_number <=");
+    expect(revisionQuery?.text).toContain("removed_revision.revision_number >");
+    expect(revisionQuery?.values).toEqual(expect.arrayContaining([rootId, revisionId]));
+  });
+
+  it("rejects a revision that does not belong to the visible content", async () => {
+    const database = fakePostgres((query) => {
+      if (query.text.includes("set_config")) return [];
+      if (query.text.includes("transaction_timestamp()")) return [{ as_of: now }];
+      if (query.text.includes("select\n        content.id::text as id"))
+        return [projectionRow()];
+      if (query.text.includes("as selected_revision")) return [];
+      return [];
+    });
+    const service = new PostgresContentReadService(database.sql, {
+      cursorSigningKey: signingKey,
+    });
+
+    await expect(
+      service.getContent(null, { contentId: rootId, revisionId: secondRevisionId }),
+    ).rejects.toMatchObject({ code: "REVISION_NOT_FOUND", statusCode: 404 });
+  });
+
+  it("paginates immutable revision metadata in descending order with a bound cursor", async () => {
+    let historyQueryCount = 0;
+    let currentRevisionId = thirdRevisionId;
+    let currentRevisionNumber = 3;
+    let visibilityEpoch = "1";
+    const database = fakePostgres((query) => {
+      if (query.text.includes("set_config")) return [];
+      if (query.text.includes("transaction_timestamp()")) return [{ as_of: now }];
+      if (query.text.includes("content_read_visibility_epochs")) {
+        return [
+          {
+            content_membership_epoch: visibilityEpoch,
+            public_community_visibility_epoch: visibilityEpoch,
+          },
+        ];
+      }
+      if (query.text.includes("select\n        content.id::text as id")) {
+        return [
+          projectionRow({
+            revisionId: currentRevisionId,
+            revisionNumber: currentRevisionNumber,
+          }),
+        ];
+      }
+      if (query.text.includes("as history_revision")) {
+        historyQueryCount += 1;
+        return historyQueryCount === 1
+          ? [
+              {
+                content_hash: "c".repeat(64),
+                content_id: rootId,
+                created_at: now,
+                created_by_actor_id: actorId,
+                edit_summary: "Third",
+                id: thirdRevisionId,
+                revision_number: 3,
+                source_version: 3,
+              },
+              {
+                content_hash: "b".repeat(64),
+                content_id: rootId,
+                created_at: new Date(now.valueOf() - 1_000),
+                created_by_actor_id: actorId,
+                edit_summary: "Second",
+                id: secondRevisionId,
+                revision_number: 2,
+                source_version: 2,
+              },
+            ]
+          : [
+              {
+                content_hash: "b".repeat(64),
+                content_id: rootId,
+                created_at: new Date(now.valueOf() - 1_000),
+                created_by_actor_id: actorId,
+                edit_summary: "Second",
+                id: secondRevisionId,
+                revision_number: 2,
+                source_version: 2,
+              },
+            ];
+      }
+      return [];
+    });
+    const service = new PostgresContentReadService(database.sql, {
+      clock: () => now,
+      cursorSigningKey: signingKey,
+    });
+
+    const first = await service.getContent(null, {
+      contentId: rootId,
+      includeRevisionHistory: true,
+      revisionLimit: 1,
+    });
+    expect(first.revisionHistory?.map((item) => item.revisionNumber)).toEqual([3]);
+    expect(first.revisionPage).toMatchObject({ hasMore: true, limit: 1 });
+    expect(first.revisionOrdering).toMatchObject({
+      asOf: now,
+      orderingVersion: "revision-history-desc-v1",
+    });
+
+    currentRevisionId = fourthRevisionId;
+    currentRevisionNumber = 4;
+    const second = await service.getContent(null, {
+      contentId: rootId,
+      includeRevisionHistory: true,
+      revisionCursor: first.revisionPage?.nextCursor,
+      revisionLimit: 1,
+    });
+    expect(second.content.currentRevisionId).toBe(fourthRevisionId);
+    expect(second.revisionHistory?.map((item) => item.revisionNumber)).toEqual([2]);
+    expect(second.revisionPage).toEqual({ hasMore: false, limit: 1, nextCursor: null });
+    expect(second.revisionOrdering?.snapshotId).toBe(first.revisionOrdering?.snapshotId);
+    const continuationQuery = database.calls.filter((query) =>
+      query.text.includes("as history_revision"),
+    )[1];
+    expect(continuationQuery?.values).toContain(3);
+    expect(continuationQuery?.values).not.toContain(4);
+
+    await expect(
+      service.getContent(viewer(["research:read"]), {
+        contentId: rootId,
+        includeRevisionHistory: true,
+        revisionCursor: first.revisionPage?.nextCursor,
+        revisionLimit: 1,
+      }),
+    ).rejects.toMatchObject({ code: "CURSOR_INVALID", statusCode: 400 });
+
+    visibilityEpoch = "2";
+    await expect(
+      service.getContent(null, {
+        contentId: rootId,
+        includeRevisionHistory: true,
+        revisionCursor: first.revisionPage?.nextCursor,
+        revisionLimit: 1,
+      }),
+    ).rejects.toMatchObject({ code: "SNAPSHOT_EXPIRED", statusCode: 410 });
+
+    await expect(
+      service.getContent(null, {
+        contentId: rootId,
+        includeRevisionHistory: true,
+        revisionCursor: first.revisionPage?.nextCursor,
+        revisionLimit: 2,
+      }),
+    ).rejects.toMatchObject({ code: "CURSOR_INVALID", statusCode: 400 });
   });
 
   it("returns a flat ordered discussion and truncates on the byte budget", async () => {

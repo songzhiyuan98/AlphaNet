@@ -37,10 +37,15 @@ function serializeAction(
   request: FastifyRequest,
   action: AgentPendingActionView,
 ): GetActionStatusResponse | null {
+  const expectedVersion =
+    action.operation === "update_content"
+      ? { expected_version: action.expectedVersion }
+      : {};
   const parsed = GetActionStatusResponseSchema.safeParse({
     action: {
       id: action.id,
       operation: action.operation,
+      ...expectedVersion,
       decision: action.decision,
       status: action.status,
       state: action.state,

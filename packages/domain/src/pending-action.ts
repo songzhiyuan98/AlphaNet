@@ -104,6 +104,7 @@ export interface AgentPendingActionView {
   expiresAt: Date;
   decidedAt: Date | null;
   executingAt: Date | null;
+  expectedVersion: number | null;
   completedAt: Date | null;
   terminalAt: Date | null;
   inputDigest: string;
@@ -166,6 +167,7 @@ interface PendingActionRow {
   expires_at: Date;
   decided_at: Date | null;
   executing_at: Date | null;
+  expected_version_text: string | null;
   completed_at: Date | null;
   terminal_at: Date | null;
   public_input_digest: string;
@@ -228,7 +230,29 @@ function isUuid(value: unknown): value is string {
 }
 
 function isPositiveInteger(value: unknown): value is number {
-  return typeof value === "number" && Number.isInteger(value) && value > 0;
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function parseExpectedVersion(
+  operation: PendingActionOperation,
+  value: string | null,
+): number | null {
+  const requiresExpectedVersion =
+    operation === "update_content" || operation === "delete_content";
+  if (value === null) {
+    if (requiresExpectedVersion) {
+      throw new PendingActionStatusError("ACTION_STATUS_UNAVAILABLE");
+    }
+    return null;
+  }
+  if (!requiresExpectedVersion || !/^[1-9][0-9]*$/u.test(value)) {
+    throw new PendingActionStatusError("ACTION_STATUS_UNAVAILABLE");
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new PendingActionStatusError("ACTION_STATUS_UNAVAILABLE");
+  }
+  return parsed;
 }
 
 function isNonnegativeInteger(value: unknown): value is number {
@@ -504,6 +528,7 @@ function mapPendingActionRow(
 
   const operation = row.operation as PendingActionOperation;
   const state = row.state as PendingActionState;
+  const expectedVersion = parseExpectedVersion(operation, row.expected_version_text);
   const ownerEvidencePresent =
     row.decided_at !== null &&
     row.approval_method === "owner_approval" &&
@@ -568,6 +593,7 @@ function mapPendingActionRow(
     policyVersion: row.public_policy_version,
     requestedAt: row.requested_at,
     expiresAt: row.expires_at,
+    expectedVersion,
     decidedAt: row.decided_at,
     executingAt: row.executing_at,
     completedAt: row.completed_at,
@@ -667,6 +693,7 @@ export class PostgresPendingActionStatusService implements PendingActionStatusSe
             expires_at,
             decided_at,
             executing_at,
+            expected_version::text as expected_version_text,
             completed_at,
             terminal_at,
             'sha256:' || encode(input_digest, 'hex') as public_input_digest,

@@ -950,16 +950,18 @@ describe("Agent Bearer and public routes", () => {
     expect(response.json<AgentContextResponse>().effective_capabilities).toMatchObject({
       create_post: { available: false, default_decision: "deny" },
       reply_to_content: { available: false, default_decision: "deny" },
+      update_content: { available: false, default_decision: "deny" },
       set_follow: { available: false, default_decision: "deny" },
       set_reaction: { available: false, default_decision: "deny" },
     });
   });
 
-  it("advertises post and reply capabilities only when the write service is wired", async () => {
+  it("advertises content write capabilities only when the write service is wired", async () => {
     const researchWriteService = {
       checkReady: vi.fn(() => Promise.resolve()),
       createPost: vi.fn(() => Promise.reject(new Error("not invoked"))),
       replyToContent: vi.fn(() => Promise.reject(new Error("not invoked"))),
+      updateContent: vi.fn(() => Promise.reject(new Error("not invoked"))),
     } satisfies NonNullable<ApiAppOptions["researchWriteService"]>;
     const { app } = await createApp({ researchWriteService });
 
@@ -976,9 +978,14 @@ describe("Agent Bearer and public routes", () => {
         available: true,
         default_decision: "require_approval",
       },
+      update_content: {
+        available: true,
+        default_decision: "require_approval",
+      },
     });
     expect(researchWriteService.createPost).not.toHaveBeenCalled();
     expect(researchWriteService.replyToContent).not.toHaveBeenCalled();
+    expect(researchWriteService.updateContent).not.toHaveBeenCalled();
   });
 
   it("advertises Follow read and write capabilities only when Follow is wired", async () => {

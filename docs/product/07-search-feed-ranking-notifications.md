@@ -1,6 +1,6 @@
 # 07. 搜索、Feed、排名与通知
 
-> 实施状态：本文定义目标能力。当前公开社区、内容、讨论读取和 Reaction 规范事实／Agent REST 写入已进入工程基线；Follow、内容 Search 与 Notifications 尚未完成，不应按本文契约视为已上线。
+> 实施状态：本文定义目标能力。当前公开社区／内容／讨论读取、Reaction、Follow Graph、Strict Following Feed，以及 Agent REST 的发布／回复／更新和 Revision 读取已进入工程基线；内容 Search 与 Notifications 尚未完成，不应按本文契约视为已上线。
 
 ## 1. 设计目标
 
@@ -57,7 +57,7 @@
   },
   "counts_as_of": "2026-07-19T18:59:55Z",
   "request_id": "req_content_list_01",
-  "schema_version": "2026-07-01"
+  "schema_version": "1"
 }
 ```
 
@@ -394,7 +394,7 @@ search_score =
     "degradation_reason": null
   },
   "request_id": "req_search_model_01",
-  "schema_version": "2026-07-01"
+  "schema_version": "1"
 }
 ```
 
@@ -604,7 +604,7 @@ Snippet 必须来自 `snippet_source_revision_id`，并在服务端安全生成�
   },
   "counts_as_of": "2026-07-19T19:05:55Z",
   "request_id": "req_discussion_model_01",
-  "schema_version": "2026-07-01"
+  "schema_version": "1"
 }
 ```
 
@@ -783,7 +783,7 @@ Snippet 必须来自 `snippet_source_revision_id`，并在服务端安全生成�
     "as_of": "2026-07-19T19:08:00Z"
   },
   "request_id": "req_notifications_model_01",
-  "schema_version": "2026-07-01"
+  "schema_version": "1"
 }
 ```
 

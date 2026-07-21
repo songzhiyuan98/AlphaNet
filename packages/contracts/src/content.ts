@@ -867,6 +867,9 @@ const GetContentResponseBaseSchema = z
     viewer_state: ViewerContentStateSchema,
     content_safety: ContentSafetySchema,
     counts_as_of: TimestampSchema,
+    revision_scope: z.enum(["current", "historical", "none"]),
+    classification_scope: z.literal("current"),
+    social_state_scope: z.literal("current"),
     resource_version: z.number().int().positive(),
     revision_history: z.array(RevisionHistoryItemSchema).optional(),
     revision_page: V1CursorPageSchema.optional(),
@@ -894,6 +897,16 @@ export const GetContentResponseSchema = GetContentResponseBaseSchema.superRefine
         message: "Published content must include its complete revision.",
       });
     }
+    if (
+      response.content.lifecycle_state === "published" &&
+      response.content.current_revision_id === null
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["content", "current_revision_id"],
+        message: "Published content must identify its current revision.",
+      });
+    }
     if (response.content.lifecycle_state === "deleted" && response.revision !== null) {
       context.addIssue({
         code: "custom",
@@ -901,17 +914,46 @@ export const GetContentResponseSchema = GetContentResponseBaseSchema.superRefine
         message: "Deleted content must not disclose a revision.",
       });
     }
-    if (
-      response.revision !== null &&
-      (response.revision.content_id !== response.content.id ||
-        response.revision.id !== response.content.current_revision_id ||
-        response.revision.title !== response.content.title)
-    ) {
+    if (response.revision !== null) {
+      if (response.revision.content_id !== response.content.id) {
+        context.addIssue({
+          code: "custom",
+          path: ["revision", "content_id"],
+          message: "The returned revision must belong to the selected content.",
+        });
+      }
+      if (
+        (response.content.kind === "post" && response.revision.title === null) ||
+        (response.content.kind === "reply" && response.revision.title !== null)
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["revision", "title"],
+          message: "The returned revision title must match the content kind.",
+        });
+      }
+      if (
+        response.revision.id === response.content.current_revision_id &&
+        response.revision.title !== response.content.title
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["revision", "title"],
+          message: "The current revision title must match the current content title.",
+        });
+      }
+    }
+    const expectedRevisionScope =
+      response.revision === null
+        ? "none"
+        : response.revision.id === response.content.current_revision_id
+          ? "current"
+          : "historical";
+    if (response.revision_scope !== expectedRevisionScope) {
       context.addIssue({
         code: "custom",
-        path: ["revision"],
-        message:
-          "The returned revision must be the selected content revision and match its title.",
+        path: ["revision_scope"],
+        message: "revision_scope must identify whether the selected revision is current.",
       });
     }
 
@@ -924,6 +966,13 @@ export const GetContentResponseSchema = GetContentResponseBaseSchema.superRefine
       context.addIssue({
         code: "custom",
         message: "Revision history, page, and ordering must be returned together.",
+      });
+    }
+    if (response.content.lifecycle_state === "deleted" && historyFieldCount !== 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["revision_history"],
+        message: "Deleted content must not disclose revision history.",
       });
     }
   },

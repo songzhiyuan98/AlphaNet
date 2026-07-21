@@ -160,20 +160,92 @@ function summary(view: OwnerPendingActionSummaryView): OwnerActionSummary | null
   return parsed.success ? parsed.data : null;
 }
 
-function preview(view: OwnerPendingActionDetailView) {
+function previewSourceLinks(
+  sourceLinks: readonly {
+    url: string;
+    title?: string | undefined;
+    description?: string | undefined;
+  }[],
+) {
+  return sourceLinks.map((source) => ({
+    url: source.url,
+    ...(source.title === undefined ? {} : { title: source.title }),
+    ...(source.description === undefined ? {} : { description: source.description }),
+  }));
+}
+
+function previewReferences(
+  references: readonly {
+    targetContentId: string;
+    relationType: "quote" | "reference";
+  }[],
+) {
+  return references.map((reference) => ({
+    target_content_id: reference.targetContentId,
+    relation_type: reference.relationType,
+  }));
+}
+
+function preview(view: OwnerPendingActionDetailView): unknown {
+  if (view.command.operation === "update_content") {
+    const command = view.command;
+    const baseline = command.frozenUpdateBaseline;
+    if (
+      view.expectedVersion !== command.expectedVersion ||
+      view.target.type !== "content" ||
+      view.target.id !== command.contentId ||
+      baseline === undefined ||
+      baseline.resourceVersion !== command.expectedVersion
+    ) {
+      return null;
+    }
+
+    return {
+      operation: command.operation,
+      content_id: command.contentId,
+      expected_version: command.expectedVersion,
+      baseline: {
+        content_kind: baseline.contentKind,
+        resource_version: baseline.resourceVersion,
+        revision_id: baseline.revisionId,
+        title: baseline.title,
+        body_markdown: baseline.bodyMarkdown,
+        primary_community_id: baseline.primaryCommunityId,
+        additional_community_ids: [...baseline.additionalCommunityIds],
+      },
+      patch: {
+        ...(command.patch.title === undefined ? {} : { title: command.patch.title }),
+        ...(command.patch.bodyMarkdown === undefined
+          ? {}
+          : { body_markdown: command.patch.bodyMarkdown }),
+        ...(command.patch.sourceLinks === undefined
+          ? {}
+          : { source_links: previewSourceLinks(command.patch.sourceLinks) }),
+        ...(command.patch.references === undefined
+          ? {}
+          : { references: previewReferences(command.patch.references) }),
+        ...(command.patch.additionalCommunityIds === undefined
+          ? {}
+          : {
+              additional_community_ids: [...command.patch.additionalCommunityIds],
+            }),
+        ...(command.patch.symbols === undefined
+          ? {}
+          : { symbols: [...command.patch.symbols] }),
+        ...(command.patch.topics === undefined
+          ? {}
+          : { topics: [...command.patch.topics] }),
+      },
+      ...(command.editSummary === undefined ? {} : { edit_summary: command.editSummary }),
+    };
+  }
+
   const common = {
     body_markdown: view.command.bodyMarkdown,
     symbols: view.command.symbols,
     topics: view.command.topics,
-    source_links: view.command.sourceLinks.map((source) => ({
-      url: source.url,
-      ...(source.title === undefined ? {} : { title: source.title }),
-      ...(source.description === undefined ? {} : { description: source.description }),
-    })),
-    references: view.command.references.map((reference) => ({
-      target_content_id: reference.targetContentId,
-      relation_type: reference.relationType,
-    })),
+    source_links: previewSourceLinks(view.command.sourceLinks),
+    references: previewReferences(view.command.references),
   };
   return view.command.operation === "create_post"
     ? {
@@ -192,11 +264,14 @@ function preview(view: OwnerPendingActionDetailView) {
 
 function detail(view: OwnerPendingActionDetailView): OwnerActionDetail | null {
   const serializedSummary = summary(view);
-  if (!serializedSummary) return null;
+  const serializedPreview = preview(view);
+  if (!serializedSummary || !serializedPreview) return null;
   const parsed = OwnerActionDetailResponseSchema.shape.action.safeParse({
     ...serializedSummary,
-    preview: preview(view),
+    preview: serializedPreview,
     input_digest: view.inputDigest,
+    idempotency_key_hint: view.idempotencyKeyHint,
+    approval_reason_category: view.approvalReasonCategory,
     decision_id: view.decisionId,
     policy_version: view.policyVersion,
     decided_at: view.decidedAt?.toISOString() ?? null,

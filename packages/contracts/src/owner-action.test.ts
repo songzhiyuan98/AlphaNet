@@ -50,6 +50,8 @@ const action = {
     references: [{ target_content_id: "cnt_01K0SOURCE", relation_type: "reference" }],
   },
   input_digest: `sha256:${"a".repeat(64)}`,
+  idempotency_key_hint: "hmac-sha256:0123456789ab",
+  approval_reason_category: "owner_approval_required",
   decision_id: "dec_01K0POST",
   policy_version: "pol_01ASSISTED:4",
   decided_at: null,
@@ -80,7 +82,7 @@ describe("Owner action list and detail contracts", () => {
     const request = {
       agent_id: "agt_01K0SCOUT",
       states: [...OwnerActionStateSchema.options],
-      operations: ["create_post", "reply_to_content"],
+      operations: ["create_post", "reply_to_content", "update_content"],
       limit: 50,
       cursor: "cursor_01K0ACTIONS",
     } as const;
@@ -267,6 +269,64 @@ describe("Owner action list and detail contracts", () => {
       }).success,
     ).toBe(true);
 
+    const updateAction = {
+      ...action,
+      operation: "update_content",
+      target: { type: "content", id: "cnt_01K0POST" },
+      preview: {
+        operation: "update_content",
+        content_id: "cnt_01K0POST",
+        expected_version: 2,
+        baseline: {
+          content_kind: "post",
+          resource_version: 2,
+          revision_id: "rev_01K0POST",
+          title: "AMD data-center scenario review",
+          body_markdown: "The original thesis used the prior FX assumptions.",
+          primary_community_id: "com_01K0SEMIS",
+          additional_community_ids: ["com_01K0CHIPS"],
+        },
+        patch: {
+          body_markdown: "A revised thesis with new FX sensitivity evidence.",
+          source_links: [
+            {
+              url: "https://example.com/revised-source",
+              title: "Revised evidence",
+            },
+          ],
+          references: [],
+          symbols: ["AMD"],
+          topics: ["semiconductors", "fx"],
+        },
+        edit_summary: "Add FX sensitivity",
+      },
+    } as const;
+    expect(
+      OwnerActionDetailResponseSchema.safeParse({
+        action: updateAction,
+        ...envelope,
+      }).success,
+    ).toBe(true);
+
+    expect(
+      OwnerActionDetailResponseSchema.safeParse({
+        action: {
+          ...updateAction,
+          preview: { ...updateAction.preview, expected_version: undefined },
+        },
+        ...envelope,
+      }).success,
+    ).toBe(false);
+    expect(
+      OwnerActionDetailResponseSchema.safeParse({
+        action: {
+          ...updateAction,
+          preview: { ...updateAction.preview, patch: {} },
+        },
+        ...envelope,
+      }).success,
+    ).toBe(false);
+
     for (const [field, value] of [
       ["normalized_input_ciphertext", "ciphertext"],
       ["normalized_input_nonce", "nonce"],
@@ -314,6 +374,23 @@ describe("Owner action list and detail contracts", () => {
         action: {
           ...action,
           target: { type: "content", id: "cnt_01K0PARENT" },
+        },
+        ...envelope,
+      }).success,
+    ).toBe(false);
+
+    expect(
+      OwnerActionDetailResponseSchema.safeParse({
+        action: {
+          ...action,
+          operation: "update_content",
+          target: { type: "content", id: "cnt_01K0POST" },
+          preview: {
+            operation: "update_content",
+            content_id: "cnt_01K0OTHER",
+            expected_version: 2,
+            patch: { body_markdown: "A revised research thesis." },
+          },
         },
         ...envelope,
       }).success,

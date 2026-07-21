@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 
 import type { PostgresClient } from "@alphanet/database";
 import { describe, expect, it, vi } from "vitest";
@@ -11,8 +11,10 @@ import {
 import {
   digestResearchCommand,
   digestResearchCommandBytes,
+  freezeUpdateContentBaseline,
   normalizeCreatePostCommand,
   normalizeReplyCommand,
+  normalizeUpdateContentCommand,
   type NormalizedResearchCommand,
 } from "./research-command.js";
 import {
@@ -29,8 +31,12 @@ import {
   type ApprovedResearchExecutionRepository,
   type CreatePostResearchWriteInput,
   type PostgresResearchWriteOptions,
+  type UpdateContentResearchWriteInput,
 } from "./research-write.js";
-import { PENDING_ACTION_EXECUTION_MIGRATION_CHECKSUM } from "./schema-migrations.js";
+import {
+  CONTENT_REVISION_WRITE_MIGRATION_CHECKSUM,
+  PENDING_ACTION_EXECUTION_MIGRATION_CHECKSUM,
+} from "./schema-migrations.js";
 
 const ownerId = "00000000-0000-4000-8000-000000000001";
 const actorId = "00000000-0000-4000-8000-000000000002";
@@ -44,6 +50,8 @@ const catalogSymbolId = "00000000-0000-4000-8000-000000000104";
 const parentContentId = "00000000-0000-4000-8000-000000000201";
 const rootContentId = "00000000-0000-4000-8000-000000000202";
 const referenceContentId = "00000000-0000-4000-8000-000000000203";
+const editableContentId = "00000000-0000-4000-8000-000000000204";
+const currentRevisionId = "00000000-0000-4000-8000-000000000205";
 const symbolId = "00000000-0000-4000-8000-000000000301";
 const topicId = "00000000-0000-4000-8000-000000000302";
 const mentionedActorId = "00000000-0000-4000-8000-000000000303";
@@ -134,6 +142,11 @@ interface FakeRootSql extends FakeTransaction {
 }
 
 interface HarnessOptions {
+  agentActivatedAt?: Date | null | undefined;
+  agentPostCount?: number | undefined;
+  agentPostCounts?: number[] | undefined;
+  agentReplyCount?: number | undefined;
+  agentReplyCounts?: number[] | undefined;
   allowedContent?: string[] | undefined;
   authTier?: AgentPolicyTier | undefined;
   catalogOnly?: boolean | undefined;
@@ -170,6 +183,18 @@ interface HarnessOptions {
   rateCountByCommunity?: Record<string, number> | undefined;
   repliesOpen?: boolean | undefined;
   requiresSources?: boolean | undefined;
+  updateTarget?:
+    | false
+    | {
+        actorId?: string | undefined;
+        bodyMarkdown?: string | undefined;
+        kind?: "post" | "reply" | undefined;
+        title?: string | null | undefined;
+        version?: number | undefined;
+      }
+    | undefined;
+  updateActorCount?: number | undefined;
+  updateContentCount?: number | undefined;
 }
 
 interface HarnessTransaction {
@@ -177,6 +202,7 @@ interface HarnessTransaction {
   quotaCommunityIds: Set<string>;
   queries: CapturedQuery[];
   releases: (() => void)[];
+  succeededContentActions: Set<string>;
 }
 
 class SqlHarness {
@@ -186,6 +212,7 @@ class SqlHarness {
   transactionCount = 0;
   #activePendingCount = 0;
   readonly #admittedCounts = new Map<string, number>();
+  readonly #agentSucceededCounts = new Map<string, number>();
   readonly #lockTails = new Map<string, Promise<void>>();
   #materialized = false;
   readonly #options: HarnessOptions;
@@ -205,6 +232,7 @@ class SqlHarness {
         quotaCommunityIds: new Set(),
         queries: [],
         releases: [],
+        succeededContentActions: new Set(),
       };
       this.transactionQueries.push(context.queries);
       try {
@@ -218,6 +246,12 @@ class SqlHarness {
         if (context.createdPendingAction) {
           this.#activePendingCount += 1;
           this.#protectedIntentCount += 1;
+        }
+        for (const action of context.succeededContentActions) {
+          this.#agentSucceededCounts.set(
+            action,
+            (this.#agentSucceededCounts.get(action) ?? 0) + 1,
+          );
         }
         return result;
       } finally {
@@ -277,6 +311,10 @@ class SqlHarness {
       return [
         {
           actor_id: actorId,
+          agent_activated_at:
+            this.#options.agentActivatedAt === undefined
+              ? new Date("2026-07-01T00:00:00.000Z")
+              : this.#options.agentActivatedAt,
           credential_scopes: ["content:write"],
           credential_policy_ceiling: "autonomous",
           credential_policy_ceiling_defaults_version: "agent-permission-defaults-v1",
@@ -322,6 +360,87 @@ class SqlHarness {
             },
           ]
         : [];
+    }
+    if (
+      text.includes("revision.revision_number::integer as current_revision_number") &&
+      text.includes("for update of content")
+    ) {
+      if (this.#options.updateTarget === false) return [];
+      const target = this.#options.updateTarget ?? {};
+      const queriedId = values[0];
+      const kind = target.kind ?? "post";
+      return [
+        {
+          author_actor_id: target.actorId ?? actorId,
+          body_markdown:
+            target.bodyMarkdown ?? "Base case revenue remains sensitive to product mix.",
+          current_revision_id: currentRevisionId,
+          current_revision_number: 2,
+          depth: kind === "post" ? 0 : 1,
+          distribution_state: "normal",
+          kind,
+          lifecycle_state: "published",
+          parent_id: kind === "post" ? null : parentContentId,
+          primary_community_id: kind === "post" ? communityId : null,
+          root_id: kind === "post" ? queriedId : rootContentId,
+          title:
+            target.title === undefined
+              ? kind === "post"
+                ? "AMD data-center scenario review"
+                : null
+              : target.title,
+          version: target.version ?? 2,
+        },
+      ];
+    }
+    if (
+      text.includes("from platform.content_symbols as content_symbol") &&
+      text.includes("order by content_symbol.position")
+    ) {
+      return [];
+    }
+    if (
+      text.includes("from platform.content_topics as content_topic") &&
+      text.includes("order by content_topic.position")
+    ) {
+      return [];
+    }
+    if (
+      text.includes("from platform.source_links as source") &&
+      text.includes("source.removed_revision_id is null")
+    ) {
+      return [];
+    }
+    if (
+      text.includes("from platform.content_relations as relation") &&
+      text.includes("relation.removed_revision_id is null")
+    ) {
+      return [];
+    }
+    if (
+      text.includes("from platform.mentions as mention") &&
+      text.includes("mention.revision_id")
+    ) {
+      return [];
+    }
+    if (
+      text.includes("from platform.action_logs as log") &&
+      text.includes("content.update_content")
+    ) {
+      return [
+        {
+          actor_count: this.#options.updateActorCount ?? 0,
+          actor_retry_at: new Date(now.valueOf() + 30 * 60 * 1_000),
+          content_count: this.#options.updateContentCount ?? 0,
+          content_retry_at: new Date(now.valueOf() + 30 * 60 * 1_000),
+        },
+      ];
+    }
+    if (
+      text.startsWith("update platform.content_items") &&
+      text.includes("returning id")
+    ) {
+      return [{ id: editableContentId }];
     }
     if (text.includes("from platform.communities as community")) {
       const queriedId = values[0];
@@ -418,6 +537,35 @@ class SqlHarness {
         },
       ];
     }
+    if (
+      text.includes("as succeeded_count") &&
+      text.includes("from platform.action_logs as log")
+    ) {
+      const action = values.find(
+        (value): value is string =>
+          value === "content.create_post" ||
+          value === "content.reply_to_content" ||
+          value === "content.update_content",
+      );
+      if (!action) throw new Error("Agent content quota query omitted its action.");
+      const sequence =
+        action === "content.create_post"
+          ? this.#options.agentPostCounts
+          : this.#options.agentReplyCounts;
+      const configured = sequence?.shift();
+      const base =
+        configured ??
+        (action === "content.create_post"
+          ? this.#options.agentPostCount
+          : this.#options.agentReplyCount) ??
+        0;
+      return [
+        {
+          retry_at: new Date(now.valueOf() + 30 * 60 * 1_000),
+          succeeded_count: base + (this.#agentSucceededCounts.get(action) ?? 0),
+        },
+      ];
+    }
     if (text.includes("from platform.content_items as parent")) {
       return [
         {
@@ -432,7 +580,12 @@ class SqlHarness {
       ];
     }
     if (text.includes("from platform.content_additional_communities")) {
-      return [{ community_id: additionalCommunityId }];
+      return [
+        {
+          community_id: additionalCommunityId,
+          created_at: new Date("2026-07-01T00:00:00.000Z"),
+        },
+      ];
     }
     if (
       text.includes("select symbol.id, symbol.ticker::text as value") &&
@@ -469,7 +622,53 @@ class SqlHarness {
       if (context) context.createdPendingAction = true;
       return [];
     }
-    if (text.startsWith("insert into") || text.startsWith("update platform")) {
+    if (text.startsWith("insert into platform.action_logs")) {
+      const afterState = values.find(
+        (value): value is Record<string, unknown> =>
+          isRecord(value) && "input_digest" in value && "idempotency_key_digest" in value,
+      );
+      if (
+        !afterState ||
+        typeof afterState.input_digest !== "string" ||
+        !/^sha256:[0-9a-f]{64}$/u.test(afterState.input_digest) ||
+        typeof afterState.idempotency_key_digest !== "string" ||
+        !/^hmac-sha256:v[1-9][0-9]*:[0-9a-f]{64}$/u.test(
+          afterState.idempotency_key_digest,
+        )
+      ) {
+        throw new Error("Research domain-write audit is missing safe input digests");
+      }
+      const action = values.find(
+        (value): value is string =>
+          value === "content.create_post" ||
+          value === "content.reply_to_content" ||
+          value === "content.update_content",
+      );
+      if (
+        action &&
+        values.includes("succeeded") &&
+        (typeof afterState.idempotency_record_id !== "string" ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
+            afterState.idempotency_record_id,
+          ))
+      ) {
+        throw new Error(
+          "A successful research domain-write audit must link its idempotency record",
+        );
+      }
+      if (context && action && values.includes("succeeded")) {
+        context.succeededContentActions.add(action);
+      }
+      return [];
+    }
+    if (text.startsWith("delete from platform.idempotency_records")) {
+      return [{ id: values[0] }];
+    }
+    if (
+      text.startsWith("insert into") ||
+      text.startsWith("update platform") ||
+      text.startsWith("delete from platform")
+    ) {
       return [];
     }
     throw new Error(`Unexpected SQL in test harness: ${text}`);
@@ -485,17 +684,20 @@ function service(
   harness: SqlHarness,
   options: Pick<
     PostgresResearchWriteOptions,
-    "activePendingActionsPerAgent" | "protectedActionIntentsPerHour"
-  > = {},
+    | "activePendingActionsPerAgent"
+    | "agentContentRateLimits"
+    | "protectedActionIntentsPerHour"
+  > & { pendingActionKeyRing?: PendingCommandKeyRing | undefined } = {},
 ): PostgresResearchWriteService {
+  const { pendingActionKeyRing, ...serviceOptions } = options;
   return new PostgresResearchWriteService(harness.sql, {
     clock: () => new Date(now.valueOf()),
     idFactory: idFactory(),
-    pendingActionKeyRing: {
+    pendingActionKeyRing: pendingActionKeyRing ?? {
       currentVersion: 1,
       keys: { 1: randomBytes(32) },
     },
-    ...options,
+    ...serviceOptions,
   });
 }
 
@@ -539,9 +741,12 @@ function approvedExecutionFixture(
       credentialId,
       decisionAuditId: "00000000-0000-4000-8000-000000000803",
       decisionId: "00000000-0000-4000-8000-000000000802",
-      expectedVersion: null,
+      expectedVersion:
+        command.operation === "update_content" ? command.expectedVersion : null,
       expiresAt: new Date(now.valueOf() + 60 * 60 * 1_000),
       failureCount: 0,
+      idempotencyKey: "approved-research-idempotency-key",
+      idempotencyRecordId: "00000000-0000-4000-8000-000000000804",
       inputDigest: digestResearchCommandBytes(command),
       normalizedInput: encrypted,
       operation: command.operation,
@@ -557,7 +762,9 @@ function approvedExecutionFixture(
       targetId:
         command.operation === "create_post"
           ? command.primaryCommunityId
-          : command.parentContentId,
+          : command.operation === "reply_to_content"
+            ? command.parentContentId
+            : command.contentId,
       targetType: command.operation === "create_post" ? "community" : "content",
       version: "3",
     },
@@ -617,6 +824,21 @@ function postInput(
   };
 }
 
+function updateInput(
+  overrides: Partial<UpdateContentResearchWriteInput> = {},
+): UpdateContentResearchWriteInput {
+  return {
+    contentId: editableContentId,
+    expectedVersion: 2,
+    patch: {
+      bodyMarkdown: "Base case revenue now includes the FX sensitivity range.",
+    },
+    editSummary: "Add FX sensitivity",
+    idempotencyKey: "update-amd-v3",
+    ...overrides,
+  };
+}
+
 function persistedPendingAction(
   command: NormalizedResearchCommand,
   state:
@@ -655,6 +877,18 @@ function sqlIndex(harness: SqlHarness, fragment: string): number {
   return harness.queries.findIndex((query) => query.text.includes(fragment));
 }
 
+function researchAuditAfterState(harness: SqlHarness): Record<string, unknown> {
+  const actionLog = harness.queries.find((query) =>
+    query.text.startsWith("insert into platform.action_logs"),
+  );
+  const afterState = actionLog?.values.find(
+    (value): value is Record<string, unknown> =>
+      isRecord(value) && "input_digest" in value && "idempotency_key_digest" in value,
+  );
+  if (!afterState) throw new Error("The research write has no ActionLog after_state.");
+  return afterState;
+}
+
 describe("PostgresResearchWriteService", () => {
   it("pins readiness to migrations 000006/000007 and the critical write schema", async () => {
     const harness = new SqlHarness();
@@ -665,9 +899,163 @@ describe("PostgresResearchWriteService", () => {
     );
     expect(readiness?.values).toContain(COMMUNITY_RESEARCH_MIGRATION_CHECKSUM);
     expect(readiness?.values).toContain(PENDING_ACTION_EXECUTION_MIGRATION_CHECKSUM);
+    expect(readiness?.values).toContain(CONTENT_REVISION_WRITE_MIGRATION_CHECKSUM);
     expect(readiness?.text).toContain("platform.content_items");
     expect(readiness?.text).toContain("platform.pending_actions");
     expect(readiness?.text).toContain("content_revisions_prevent_mutation");
+    expect(readiness?.text).toContain("content_revisions_validate_current_pointer");
+  });
+
+  it("validates the ActionLog HMAC key material at construction", () => {
+    const harness = new SqlHarness();
+    expect(
+      () =>
+        new PostgresResearchWriteService(harness.sql, {
+          pendingActionKeyRing: {
+            currentVersion: 1,
+            keys: { 1: Buffer.alloc(31) },
+          },
+        }),
+    ).toThrow("key-ring entry is invalid");
+    expect(
+      () =>
+        new PostgresResearchWriteService(harness.sql, {
+          pendingActionKeyRing: {
+            currentVersion: 2,
+            keys: { 1: Buffer.alloc(32) },
+          },
+        }),
+    ).toThrow("current key material is unavailable");
+  });
+
+  it("validates Agent content-rate overrides without weakening safe defaults", () => {
+    const harness = new SqlHarness();
+    const pendingActionKeyRing = {
+      currentVersion: 1,
+      keys: { 1: Buffer.alloc(32) },
+    } as const;
+    expect(
+      () =>
+        new PostgresResearchWriteService(harness.sql, {
+          agentContentRateLimits: {
+            establishedPostsPerHour: 6,
+            establishedRepliesPerHour: 30,
+            newAgentPostsPerHour: 7,
+            newAgentRepliesPerHour: 10,
+          },
+          pendingActionKeyRing,
+        }),
+    ).toThrow("new-Agent limits no greater than established-Agent limits");
+    expect(
+      () =>
+        new PostgresResearchWriteService(harness.sql, {
+          agentContentRateLimits: {
+            establishedPostsPerHour: 10_001,
+            establishedRepliesPerHour: 30,
+            newAgentPostsPerHour: 2,
+            newAgentRepliesPerHour: 10,
+          },
+          pendingActionKeyRing,
+        }),
+    ).toThrow("integers from one through ten thousand");
+  });
+
+  it("writes stable domain-separated audit digests without raw keys or research prose", async () => {
+    const keyMaterial = Buffer.alloc(32, 19);
+    const keyRing: PendingCommandKeyRing = {
+      currentVersion: 1,
+      keys: { 1: keyMaterial },
+    };
+    const rawIdempotencyKey = "same-key-same-key";
+    const firstBody = "Private research prose marker 8fd4 must not enter ActionLog.";
+    const secondBody = "A distinct normalized research body changes only input_digest.";
+    const firstHarness = new SqlHarness();
+    const secondHarness = new SqlHarness();
+
+    await service(firstHarness, { pendingActionKeyRing: keyRing }).createPost(
+      agentContext("autonomous"),
+      postInput({ bodyMarkdown: firstBody, idempotencyKey: rawIdempotencyKey }),
+      { requestId: "req-audit-digest-first" },
+    );
+    await service(secondHarness, { pendingActionKeyRing: keyRing }).createPost(
+      agentContext("autonomous"),
+      postInput({ bodyMarkdown: secondBody, idempotencyKey: rawIdempotencyKey }),
+      { requestId: "req-audit-digest-second" },
+    );
+
+    const firstAfter = researchAuditAfterState(firstHarness);
+    const secondAfter = researchAuditAfterState(secondHarness);
+    expect(firstAfter.input_digest).toBe(
+      digestResearchCommand(
+        normalizeCreatePostCommand(
+          postInput({ bodyMarkdown: firstBody, idempotencyKey: rawIdempotencyKey }),
+        ),
+      ),
+    );
+    expect(firstAfter.input_digest).not.toBe(secondAfter.input_digest);
+    expect(firstAfter.idempotency_key_digest).toBe(secondAfter.idempotency_key_digest);
+    expect(firstAfter.idempotency_key_digest).toMatch(/^hmac-sha256:v1:[0-9a-f]{64}$/u);
+    const undomainedDigest = `hmac-sha256:v1:${createHmac("sha256", keyMaterial)
+      .update(rawIdempotencyKey, "utf8")
+      .digest("hex")}`;
+    expect(firstAfter.idempotency_key_digest).not.toBe(undomainedDigest);
+    expect(firstAfter.idempotency_record_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+    );
+
+    const firstAuditValues = firstHarness.queries.find((query) =>
+      query.text.startsWith("insert into platform.action_logs"),
+    )?.values;
+    const serializedAudit = JSON.stringify(firstAuditValues);
+    expect(serializedAudit).not.toContain(rawIdempotencyKey);
+    expect(serializedAudit).not.toContain(firstBody);
+  });
+
+  it("fails closed when the direct authorization row has no activation timestamp", async () => {
+    const harness = new SqlHarness({ agentActivatedAt: null });
+
+    await expect(
+      service(harness).createPost(agentContext("autonomous"), postInput(), {
+        requestId: "req-missing-agent-activation",
+      }),
+    ).rejects.toMatchObject({ code: "AUTHORIZATION_CONTEXT_STALE" });
+    const authorizationQuery = harness.queries.find((query) =>
+      query.text.includes("from platform.credentials as credential"),
+    );
+    expect(authorizationQuery?.text).toContain(
+      "agent.activated_at as agent_activated_at",
+    );
+    expect(authorizationQuery?.text).toContain("agent.activated_at is not null");
+    expect(hasSql(harness, "insert into platform.content_items")).toBe(false);
+  });
+
+  it("fails closed when the approved authorization row has no activation timestamp", async () => {
+    const harness = new SqlHarness({ agentActivatedAt: null, authTier: "assisted" });
+    const keyRing: PendingCommandKeyRing = {
+      currentVersion: 1,
+      keys: { 1: randomBytes(32) },
+    };
+    const fixture = approvedExecutionFixture(keyRing);
+    const repository = approvedExecutionRepository(harness, fixture.frozenAction);
+    const writer = new PostgresResearchWriteService(harness.sql, {
+      idFactory: idFactory(),
+      pendingActionKeyRing: keyRing,
+    });
+
+    await expect(
+      writer.executeApprovedAction(repository, fixture.claim),
+    ).rejects.toMatchObject({
+      code: "APPROVED_ACTION_CONTEXT_INVALID",
+      disposition: "invalidate",
+    } satisfies Partial<ApprovedResearchExecutionError>);
+    const authorizationQuery = harness.queries.find((query) =>
+      query.text.includes("from platform.credentials as credential"),
+    );
+    expect(authorizationQuery?.text).toContain(
+      "agent.activated_at as agent_activated_at",
+    );
+    expect(authorizationQuery?.text).toContain("agent.activated_at is not null");
+    expect(repository.finalizeSucceeded).not.toHaveBeenCalled();
   });
 
   it("publishes an Owner-approved frozen post and finalizes the same fenced transaction", async () => {
@@ -734,6 +1122,49 @@ describe("PostgresResearchWriteService", () => {
         query.text.includes("from platform.credentials as credential"),
       )?.text,
     ).toContain("for share of credential, agent, actor, owner, policy");
+  });
+
+  it("keeps the pending and approved-worker key digest stable across key rotation", async () => {
+    const firstKey = Buffer.alloc(32, 31);
+    const creationKeyRing: PendingCommandKeyRing = {
+      currentVersion: 1,
+      keys: { 1: firstKey },
+    };
+    const executionKeyRing: PendingCommandKeyRing = {
+      currentVersion: 2,
+      keys: { 1: firstKey, 2: Buffer.alloc(32, 32) },
+    };
+    const fixture = approvedExecutionFixture(creationKeyRing);
+    const pendingHarness = new SqlHarness({ authTier: "assisted" });
+    await service(pendingHarness, {
+      pendingActionKeyRing: creationKeyRing,
+    }).createPost(
+      agentContext("assisted"),
+      postInput({ idempotencyKey: fixture.frozenAction.idempotencyKey }),
+      { requestId: "req-audit-pending-before-rotation" },
+    );
+
+    const executionHarness = new SqlHarness({ authTier: "autonomous" });
+    const repository = approvedExecutionRepository(
+      executionHarness,
+      fixture.frozenAction,
+    );
+    const writer = new PostgresResearchWriteService(executionHarness.sql, {
+      idFactory: idFactory(),
+      pendingActionKeyRing: executionKeyRing,
+    });
+    await writer.executeApprovedAction(repository, fixture.claim);
+
+    const pendingAfter = researchAuditAfterState(pendingHarness);
+    const approvedAfter = researchAuditAfterState(executionHarness);
+    expect(approvedAfter.input_digest).toBe(pendingAfter.input_digest);
+    expect(approvedAfter.idempotency_key_digest).toBe(
+      pendingAfter.idempotency_key_digest,
+    );
+    expect(approvedAfter.idempotency_key_digest).toMatch(/^hmac-sha256:v1:/u);
+    expect(approvedAfter.idempotency_record_id).toBe(
+      fixture.frozenAction.idempotencyRecordId,
+    );
   });
 
   it("invalidates an approved action when current authority no longer permits writes", async () => {
@@ -836,11 +1267,77 @@ describe("PostgresResearchWriteService", () => {
     ).toBeDefined();
   });
 
+  it("executes an Owner-approved update only against its frozen current baseline", async () => {
+    const harness = new SqlHarness({ authTier: "assisted" });
+    const keyRing: PendingCommandKeyRing = {
+      currentVersion: 1,
+      keys: { 1: randomBytes(32) },
+    };
+    const command = freezeUpdateContentBaseline(
+      normalizeUpdateContentCommand(updateInput()),
+      {
+        additionalCommunityIds: [additionalCommunityId],
+        bodyMarkdown: "Base case revenue remains sensitive to product mix.",
+        contentKind: "post",
+        primaryCommunityId: communityId,
+        resourceVersion: 2,
+        revisionId: currentRevisionId,
+        title: "AMD data-center scenario review",
+      },
+    );
+    const fixture = approvedExecutionFixture(keyRing, command);
+    const repository = approvedExecutionRepository(harness, fixture.frozenAction);
+    const writer = new PostgresResearchWriteService(harness.sql, {
+      idFactory: idFactory(),
+      pendingActionKeyRing: keyRing,
+    });
+
+    const result = await writer.executeApprovedAction(repository, fixture.claim);
+
+    expect(result.content).toMatchObject({ resourceVersion: 3 });
+    expect(hasSql(harness, "update platform.content_items")).toBe(true);
+    expect(repository.finalizeSucceeded).toHaveBeenCalledOnce();
+  });
+
+  it("invalidates an Owner-approved update whose frozen baseline differs from the locked content", async () => {
+    const harness = new SqlHarness({ authTier: "assisted" });
+    const keyRing: PendingCommandKeyRing = {
+      currentVersion: 1,
+      keys: { 1: randomBytes(32) },
+    };
+    const command = freezeUpdateContentBaseline(
+      normalizeUpdateContentCommand(updateInput()),
+      {
+        additionalCommunityIds: [additionalCommunityId],
+        bodyMarkdown: "A stale frozen body that is no longer current.",
+        contentKind: "post",
+        primaryCommunityId: communityId,
+        resourceVersion: 2,
+        revisionId: currentRevisionId,
+        title: "AMD data-center scenario review",
+      },
+    );
+    const fixture = approvedExecutionFixture(keyRing, command);
+    const repository = approvedExecutionRepository(harness, fixture.frozenAction);
+    const writer = new PostgresResearchWriteService(harness.sql, {
+      idFactory: idFactory(),
+      pendingActionKeyRing: keyRing,
+    });
+
+    await expect(
+      writer.executeApprovedAction(repository, fixture.claim),
+    ).rejects.toMatchObject({
+      code: "APPROVED_ACTION_CONTEXT_INVALID",
+      disposition: "invalidate",
+    } satisfies Partial<ApprovedResearchExecutionError>);
+    expect(hasSql(harness, "update platform.content_items")).toBe(false);
+    expect(repository.finalizeSucceeded).not.toHaveBeenCalled();
+  });
+
   it("returns a sanitized retry disposition when approved execution hits a live rate gate", async () => {
     const harness = new SqlHarness({
+      agentPostCount: 6,
       authTier: "assisted",
-      maxPostsPerHour: 6,
-      rateCount: 6,
     });
     const keyRing: PendingCommandKeyRing = {
       currentVersion: 1,
@@ -862,6 +1359,63 @@ describe("PostgresResearchWriteService", () => {
     } satisfies Partial<ApprovedResearchExecutionError>);
     expect(hasSql(harness, "insert into platform.content_items")).toBe(false);
     expect(repository.finalizeSucceeded).not.toHaveBeenCalled();
+    const denialAudit = harness.queries.find(
+      (query) =>
+        query.text.includes("insert into platform.action_logs") &&
+        query.values.includes("RATE_LIMITED"),
+    );
+    expect(denialAudit?.values).toContain("owner_approval_record");
+    expect(denialAudit?.values).toContain("denied");
+    expect(
+      denialAudit?.values.find(
+        (value) => isRecord(value) && "pending_action_id" in value,
+      ),
+    ).toMatchObject({ pending_action_id: fixture.frozenAction.actionId });
+    expect(hasSql(harness, "update platform.idempotency_records")).toBe(false);
+  });
+
+  it("rechecks the new-Agent reply quota in the approved worker without terminalizing the action", async () => {
+    const harness = new SqlHarness({
+      agentActivatedAt: new Date(now.valueOf() - 23 * 60 * 60 * 1_000),
+      agentReplyCount: 10,
+      authTier: "assisted",
+    });
+    const keyRing: PendingCommandKeyRing = {
+      currentVersion: 1,
+      keys: { 1: randomBytes(32) },
+    };
+    const fixture = approvedExecutionFixture(
+      keyRing,
+      normalizeReplyCommand({
+        bodyMarkdown: "A substantive counterpoint with a second source path.",
+        parentContentId,
+      }),
+    );
+    const repository = approvedExecutionRepository(harness, fixture.frozenAction);
+    const writer = new PostgresResearchWriteService(harness.sql, {
+      idFactory: idFactory(),
+      pendingActionKeyRing: keyRing,
+    });
+
+    await expect(
+      writer.executeApprovedAction(repository, fixture.claim),
+    ).rejects.toMatchObject({
+      code: "APPROVED_ACTION_RATE_LIMITED",
+      disposition: "retry",
+      retryAfterMs: 30 * 60 * 1_000,
+    } satisfies Partial<ApprovedResearchExecutionError>);
+    expect(repository.finalizeSucceeded).not.toHaveBeenCalled();
+    expect(hasSql(harness, "insert into platform.content_items")).toBe(false);
+    const quotaQuery = harness.queries.find((query) =>
+      query.text.includes("as succeeded_count"),
+    );
+    expect(quotaQuery?.values).toContain("content.reply_to_content");
+    const audit = harness.queries.find(
+      (query) =>
+        query.text.includes("insert into platform.action_logs") &&
+        query.values.includes("RATE_LIMITED"),
+    );
+    expect(audit?.values).toContain("denied");
   });
 
   it("freezes an Assisted post as ciphertext without creating content", async () => {
@@ -1006,6 +1560,287 @@ describe("PostgresResearchWriteService", () => {
     expect(audit).toBeLessThan(terminal);
   });
 
+  it("commits an authored update with OCC, one immutable Revision, and a minimal revised event", async () => {
+    const harness = new SqlHarness();
+    const marker = "Sensitive prose marker must stay out of operational records.";
+    const result = await service(harness).updateContent(
+      agentContext("autonomous"),
+      updateInput({
+        patch: {
+          bodyMarkdown: marker,
+          sourceLinks: [{ url: "https://example.test/new-source" }],
+          topics: ["semiconductors"],
+        },
+      }),
+      { requestId: "req-update-autonomous" },
+    );
+
+    expect(result).toMatchObject({
+      decision: "allow",
+      operation: "update_content",
+      status: "succeeded",
+      result: {
+        contentId: editableContentId,
+        resourceVersion: 3,
+      },
+    });
+    expect(result.result?.revisionId).toMatch(/^00000000-0000-4000-8000-/u);
+    expect(hasSql(harness, "for update of content")).toBe(true);
+    expect(hasSql(harness, "insert into platform.content_revisions")).toBe(true);
+    expect(hasSql(harness, "update platform.content_items")).toBe(true);
+    expect(hasSql(harness, "insert into platform.content_topics")).toBe(true);
+
+    const outbox = harness.queries.find((query) =>
+      query.text.startsWith("insert into system.outbox_events"),
+    );
+    expect(outbox?.values).toContain("content.revised");
+    expect(JSON.stringify(outbox?.values)).not.toContain(marker);
+    const audit = harness.queries.find((query) =>
+      query.text.startsWith("insert into platform.action_logs"),
+    );
+    expect(JSON.stringify(audit?.values)).not.toContain(marker);
+    const idempotencyTerminal = harness.queries.findLast((query) =>
+      query.text.startsWith("update platform.idempotency_records"),
+    );
+    expect(JSON.stringify(idempotencyTerminal?.values)).not.toContain(marker);
+  });
+
+  it("increments the resource version without creating an empty Revision for classification-only changes", async () => {
+    const harness = new SqlHarness();
+    const result = await service(harness).updateContent(
+      agentContext("autonomous"),
+      updateInput({
+        patch: { symbols: ["AMD"] },
+        editSummary: undefined,
+        idempotencyKey: "update-amd-symbols-v3",
+      }),
+      { requestId: "req-update-classification" },
+    );
+
+    expect(result).toMatchObject({
+      status: "succeeded",
+      result: {
+        contentId: editableContentId,
+        resourceVersion: 3,
+        revisionId: null,
+      },
+    });
+    expect(hasSql(harness, "insert into platform.content_revisions")).toBe(false);
+    expect(hasSql(harness, "insert into platform.content_symbols")).toBe(true);
+  });
+
+  it.each(["autonomous", "assisted"] as const)(
+    "rejects a %s update that would create a self-reference before persistence",
+    async (tier) => {
+      const harness = new SqlHarness();
+      const result = await service(harness).updateContent(
+        agentContext(tier),
+        updateInput({
+          idempotencyKey: `update-self-reference-${tier}-v3`,
+          patch: {
+            references: [
+              { relationType: "reference", targetContentId: editableContentId },
+            ],
+          },
+        }),
+        { requestId: "req-update-self-reference" },
+      );
+
+      expect(result).toMatchObject({
+        decision: "allow",
+        error: {
+          code: "VALIDATION_ERROR",
+          details: { field: "references", reason_code: "SELF_REFERENCE" },
+          retryable: false,
+        },
+        operation: "update_content",
+        status: "failed",
+      });
+      expect(hasSql(harness, "insert into platform.pending_actions")).toBe(false);
+      expect(hasSql(harness, "insert into platform.content_relations")).toBe(false);
+      expect(hasSql(harness, "update platform.content_items")).toBe(false);
+    },
+  );
+
+  it("rejects a newly added Community placement that is closed to new posts", async () => {
+    const harness = new SqlHarness({
+      communityRules: {
+        [catalogCommunityId]: { maxPostsPerHour: 0 },
+      },
+    });
+    const result = await service(harness).updateContent(
+      agentContext("autonomous"),
+      updateInput({
+        editSummary: undefined,
+        idempotencyKey: "update-community-closed-v3",
+        patch: {
+          additionalCommunityIds: [additionalCommunityId, catalogCommunityId],
+        },
+      }),
+      { requestId: "req-update-community-closed" },
+    );
+
+    expect(result).toMatchObject({
+      decision: "deny",
+      error: {
+        code: "COMMUNITY_RESTRICTED",
+        details: { community_id: catalogCommunityId },
+      },
+      operation: "update_content",
+      status: "denied",
+    });
+    expect(hasSql(harness, "update platform.content_items")).toBe(false);
+    expect(hasSql(harness, "insert into platform.pending_actions")).toBe(false);
+  });
+
+  it("meters a new Community placement by admission time and preserves retained admission time", async () => {
+    const harness = new SqlHarness();
+    const result = await service(harness).updateContent(
+      agentContext("autonomous"),
+      updateInput({
+        editSummary: undefined,
+        idempotencyKey: "update-community-admission-v3",
+        patch: {
+          additionalCommunityIds: [additionalCommunityId, catalogCommunityId],
+        },
+      }),
+      { requestId: "req-update-community-admission" },
+    );
+
+    expect(result).toMatchObject({ status: "succeeded" });
+    const quotaQuery = harness.queries.find(
+      (query) =>
+        query.text.includes("with admitted as") &&
+        query.values.includes(catalogCommunityId),
+    );
+    expect(quotaQuery?.text).toContain("additional.created_at as admitted_at");
+
+    const placements = harness.queries.filter((query) =>
+      query.text.startsWith("insert into platform.content_additional_communities"),
+    );
+    expect(placements).toHaveLength(2);
+    expect(placements[0]?.values).toEqual([
+      editableContentId,
+      additionalCommunityId,
+      1,
+      new Date("2026-07-01T00:00:00.000Z"),
+    ]);
+    expect(placements[1]?.values).toEqual([
+      editableContentId,
+      catalogCommunityId,
+      2,
+      now,
+    ]);
+  });
+
+  it("does not poison an update idempotency key with a temporary rate limit", async () => {
+    const input = updateInput({ idempotencyKey: "update-rate-retry-v3" });
+    const limitedHarness = new SqlHarness({ updateActorCount: 30 });
+    const limited = await service(limitedHarness).updateContent(
+      agentContext("autonomous"),
+      input,
+      { requestId: "req-update-rate-limited" },
+    );
+
+    expect(limited).toMatchObject({
+      decision: "deny",
+      error: { code: "RATE_LIMITED", retryable: true },
+      operation: "update_content",
+      status: "denied",
+    });
+    expect(
+      limitedHarness.queries.some((query) =>
+        query.text.startsWith("update platform.idempotency_records"),
+      ),
+    ).toBe(false);
+    expect(hasSql(limitedHarness, "update platform.content_items")).toBe(false);
+
+    const retryHarness = new SqlHarness();
+    const retried = await service(retryHarness).updateContent(
+      agentContext("autonomous"),
+      input,
+      { requestId: "req-update-rate-retried" },
+    );
+    expect(retried).toMatchObject({
+      decision: "allow",
+      operation: "update_content",
+      status: "succeeded",
+    });
+  });
+
+  it("freezes an Assisted update with the expected version and does not mutate content", async () => {
+    const harness = new SqlHarness({ authTier: "assisted" });
+    const input = updateInput();
+    const result = await service(harness).updateContent(agentContext("assisted"), input, {
+      requestId: "req-update-assisted",
+    });
+
+    expect(result).toMatchObject({
+      decision: "require_approval",
+      status: "pending_approval",
+      pendingAction: {
+        operation: "update_content",
+        expectedVersion: 2,
+      },
+    });
+    const pendingInsert = harness.queries.find((query) =>
+      query.text.startsWith("insert into platform.pending_actions"),
+    );
+    expect(pendingInsert?.text).toContain("expected_version");
+    expect(pendingInsert?.values).toContain(2);
+    expect(hasSql(harness, "update platform.content_items")).toBe(false);
+    expect(hasSql(harness, "insert into platform.content_revisions")).toBe(false);
+  });
+
+  it("stores a version conflict as a stable idempotent terminal failure", async () => {
+    const input = updateInput({ expectedVersion: 1 });
+    const command = normalizeUpdateContentCommand(input);
+    const firstHarness = new SqlHarness({ updateTarget: { version: 2 } });
+    const first = await service(firstHarness).updateContent(
+      agentContext("autonomous"),
+      input,
+      { requestId: "req-update-version-conflict" },
+    );
+    expect(first).toMatchObject({
+      status: "failed",
+      error: {
+        code: "VERSION_CONFLICT",
+        details: { current_version: 2, expected_version: 1 },
+      },
+    });
+    expect(hasSql(firstHarness, "insert into platform.idempotency_records")).toBe(true);
+    expect(hasSql(firstHarness, "update platform.idempotency_records")).toBe(true);
+
+    const replayHarness = new SqlHarness({
+      existingIdempotency: {
+        digest: digestResearchCommandBytes(command),
+        status: "failed",
+        response: {
+          version: 1,
+          operation: "update_content",
+          decision: "allow",
+          status: "failed",
+          result: null,
+          pending_action: null,
+          error: {
+            code: "VERSION_CONFLICT",
+            message: "The ContentItem changed after the requested base version.",
+            retryable: false,
+            details: { current_version: 2, expected_version: 1 },
+            retryAfterMs: null,
+          },
+        },
+      },
+    });
+    const replay = await service(replayHarness).updateContent(
+      agentContext("autonomous"),
+      input,
+      { requestId: "req-update-version-conflict-replay" },
+    );
+    expect(replay).toMatchObject({ replayed: true, status: "failed" });
+    expect(hasSql(replayHarness, "for update of content")).toBe(false);
+  });
+
   it("replays a matching terminal result before re-running Community admission", async () => {
     const command = normalizeCreatePostCommand(postInput());
     const harness = new SqlHarness({
@@ -1132,6 +1967,25 @@ describe("PostgresResearchWriteService", () => {
       },
       status: "succeeded" as const,
     },
+    {
+      code: "IDEMPOTENCY_RESULT_CORRUPT",
+      response: {
+        version: 1,
+        operation: "create_post",
+        decision: "deny",
+        status: "denied",
+        result: null,
+        pending_action: null,
+        error: {
+          code: "RATE_LIMITED",
+          message: "A temporary quota must never be a replayable terminal result.",
+          retryable: true,
+          details: null,
+          retryAfterMs: 60_000,
+        },
+      },
+      status: "denied" as const,
+    },
   ])("returns a unified $code failure for an unsafe replay", async (example) => {
     const command = normalizeCreatePostCommand(postInput());
     const harness = new SqlHarness({
@@ -1187,6 +2041,173 @@ describe("PostgresResearchWriteService", () => {
       ),
     ).toBe(true);
     expect(hasSql(harness, "insert into platform.idempotency_records")).toBe(false);
+  });
+
+  it("audits an established Agent post denial and lets the same key succeed after the rolling window moves", async () => {
+    const harness = new SqlHarness({ agentPostCounts: [6, 0] });
+    const writer = service(harness);
+    const input = postInput({ idempotencyKey: "agent-post-rate-retry" });
+
+    const denied = await writer.createPost(agentContext("autonomous"), input, {
+      requestId: "req-agent-post-rate-denied",
+    });
+    expect(denied).toMatchObject({
+      decision: "deny",
+      status: "denied",
+      error: {
+        code: "RATE_LIMITED",
+        details: {
+          limit: 6,
+          limit_dimension: "agent_post_hour",
+          new_agent_window: false,
+          rule_version: "agent-content-rate-v1",
+        },
+        retryAfterMs: 30 * 60 * 1_000,
+      },
+    });
+    expect(hasSql(harness, "insert into platform.content_items")).toBe(false);
+    expect(hasSql(harness, "insert into platform.idempotency_records")).toBe(false);
+    expect(hasSql(harness, "update platform.idempotency_records")).toBe(false);
+    const denialAudit = harness.queries.find(
+      (query) =>
+        query.text.includes("insert into platform.action_logs") &&
+        query.values.includes("RATE_LIMITED"),
+    );
+    expect(denialAudit?.values).toContain("denied");
+
+    const succeeded = await writer.createPost(agentContext("autonomous"), input, {
+      requestId: "req-agent-post-rate-retry",
+    });
+    expect(succeeded.status).toBe("succeeded");
+    expect(
+      harness.queries.filter((query) =>
+        query.text.includes("insert into platform.idempotency_records"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      harness.queries.filter((query) =>
+        query.text.includes("insert into platform.content_items"),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it.each([
+    {
+      activatedAt: new Date(now.valueOf() - 23 * 60 * 60 * 1_000),
+      count: 2,
+      expectedLimit: 2,
+      expectedNewWindow: true,
+      expectedStatus: "denied" as const,
+    },
+    {
+      activatedAt: new Date(now.valueOf() - 24 * 60 * 60 * 1_000),
+      count: 2,
+      expectedLimit: 6,
+      expectedNewWindow: false,
+      expectedStatus: "succeeded" as const,
+    },
+  ])(
+    "applies the post threshold at the 24-hour activation boundary ($expectedStatus)",
+    async (example) => {
+      const harness = new SqlHarness({
+        agentActivatedAt: example.activatedAt,
+        agentPostCount: example.count,
+      });
+      const result = await service(harness).createPost(
+        agentContext("autonomous"),
+        postInput({ idempotencyKey: `activation-boundary-${example.expectedStatus}` }),
+        { requestId: `req-activation-boundary-${example.expectedStatus}` },
+      );
+
+      expect(result.status).toBe(example.expectedStatus);
+      const quotaQuery = harness.queries.find((query) =>
+        query.text.includes("as succeeded_count"),
+      );
+      expect(quotaQuery?.text).toContain("log.agent_id");
+      expect(quotaQuery?.text).toContain("log.outcome = 'succeeded'");
+      if (example.expectedStatus === "denied") {
+        expect(result.error?.details).toMatchObject({
+          limit: example.expectedLimit,
+          new_agent_window: example.expectedNewWindow,
+        });
+      }
+    },
+  );
+
+  it.each([
+    {
+      activatedAt: new Date(now.valueOf() - 23 * 60 * 60 * 1_000),
+      count: 10,
+      expectedLimit: 10,
+      newAgent: true,
+    },
+    {
+      activatedAt: new Date(now.valueOf() - 25 * 60 * 60 * 1_000),
+      count: 30,
+      expectedLimit: 30,
+      newAgent: false,
+    },
+  ])("enforces the Agent reply limit (new=$newAgent)", async (example) => {
+    const harness = new SqlHarness({
+      agentActivatedAt: example.activatedAt,
+      agentReplyCount: example.count,
+    });
+    const result = await service(harness).replyToContent(
+      agentContext("autonomous"),
+      {
+        bodyMarkdown: "A substantive counterpoint.",
+        idempotencyKey: `reply-rate-${example.newAgent ? "new" : "established"}`,
+        parentContentId,
+      },
+      { requestId: `req-reply-rate-${example.newAgent ? "new" : "established"}` },
+    );
+
+    expect(result).toMatchObject({
+      decision: "deny",
+      status: "denied",
+      error: {
+        code: "RATE_LIMITED",
+        details: {
+          limit: example.expectedLimit,
+          limit_dimension: "agent_reply_hour",
+          new_agent_window: example.newAgent,
+        },
+      },
+    });
+    expect(hasSql(harness, "insert into platform.action_logs")).toBe(true);
+    expect(hasSql(harness, "insert into platform.idempotency_records")).toBe(false);
+    expect(hasSql(harness, "insert into platform.content_items")).toBe(false);
+  });
+
+  it("serializes concurrent Agent post admissions without exceeding the Agent quota", async () => {
+    const harness = new SqlHarness({ agentPostCount: 5 });
+    const writer = service(harness);
+    const results = await Promise.all([
+      writer.createPost(
+        agentContext("autonomous"),
+        postInput({ idempotencyKey: "agent-quota-concurrent-a" }),
+        { requestId: "req-agent-quota-concurrent-a" },
+      ),
+      writer.createPost(
+        agentContext("autonomous"),
+        postInput({ idempotencyKey: "agent-quota-concurrent-b" }),
+        { requestId: "req-agent-quota-concurrent-b" },
+      ),
+    ]);
+
+    expect(results.filter((result) => result.status === "succeeded")).toHaveLength(1);
+    expect(results.find((result) => result.status === "denied")).toMatchObject({
+      error: { code: "RATE_LIMITED", details: { limit_dimension: "agent_post_hour" } },
+    });
+    const lockKey = `alphanet:agent-content-rate:${agentId}:create_post`;
+    expect(
+      harness.queries.filter((query) => query.values.includes(lockKey)),
+    ).toHaveLength(2);
+    expect(
+      harness.queries.filter((query) =>
+        query.text.includes("insert into platform.content_items"),
+      ),
+    ).toHaveLength(1);
   });
 
   it.each(["autonomous", "assisted"] as const)(
@@ -1392,6 +2413,7 @@ describe("PostgresResearchWriteService", () => {
 
     expect(result.status).toBe("pending_approval");
     expect(hasSql(harness, "with admitted as")).toBe(false);
+    expect(hasSql(harness, "as succeeded_count")).toBe(false);
     expect(hasSql(harness, "insert into platform.pending_actions")).toBe(true);
   });
 

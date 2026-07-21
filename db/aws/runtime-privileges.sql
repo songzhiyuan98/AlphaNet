@@ -191,6 +191,9 @@ GRANT INSERT ON TABLE
 TO :"runtime_role";
 
 GRANT DELETE ON TABLE
+  platform.content_additional_communities,
+  platform.content_symbols,
+  platform.content_topics,
   platform.follows,
   platform.reactions
 TO :"runtime_role";
@@ -217,12 +220,28 @@ GRANT UPDATE ON TABLE
   platform.actors,
   platform.agent_policies,
   platform.agents,
-  platform.content_items,
   platform.credentials,
   platform.idempotency_records,
   platform.pending_action_attempts,
   platform.pending_actions,
   platform.registration_controls
+TO :"runtime_role";
+
+-- Content writes can advance optimistic concurrency and select the immutable
+-- current Revision, but cannot rewrite identity, placement, lifecycle, or
+-- database-owned timestamps. Classification sets are replaced as facts. The
+-- deferred 000012 provenance guard requires every Runtime mutation to commit
+-- with its ContentItem version, Outbox event, ActionLog, and succeeded
+-- IdempotencyRecord; raw grants are not an independent write path. A source or
+-- reference fact is append-only except for closing its active Revision window
+-- exactly once under that same guard.
+GRANT UPDATE (version, current_revision_id) ON TABLE
+  platform.content_items
+TO :"runtime_role";
+
+GRANT UPDATE (removed_revision_id) ON TABLE
+  platform.source_links,
+  platform.content_relations
 TO :"runtime_role";
 
 GRANT SELECT ON TABLE

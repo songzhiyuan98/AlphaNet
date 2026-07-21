@@ -124,17 +124,14 @@ const topicsSchema = z
   .refine(uniqueArray, "Topics must be unique.");
 const referencesSchema = z.array(ContentReferenceSchema).max(20);
 
-type ContentWriteRequest = {
-  body_markdown: string;
-  source_links?: readonly SourceLinkInput[] | undefined;
-};
-
 function validateWriteBudgets(
-  request: ContentWriteRequest,
+  request: unknown,
   context: z.RefinementCtx,
+  sourceLinks: readonly SourceLinkInput[] = [],
+  sourcePath: readonly (string | number)[] = ["source_links"],
 ): void {
   const sourcesByNormalizedUrl = new Map<string, string>();
-  for (const [index, source] of (request.source_links ?? []).entries()) {
+  for (const [index, source] of sourceLinks.entries()) {
     const parsedSourceUrl = parseUrl(source.url);
     if (parsedSourceUrl === null) continue;
     const normalizedUrl = parsedSourceUrl.toString();
@@ -146,7 +143,7 @@ function validateWriteBudgets(
     if (existingMetadata !== undefined && existingMetadata !== normalizedMetadata) {
       context.addIssue({
         code: "custom",
-        path: ["source_links", index],
+        path: [...sourcePath, index],
         message:
           "One normalized source URL cannot carry conflicting metadata in a revision.",
       });
@@ -155,12 +152,12 @@ function validateWriteBudgets(
   }
 
   if (
-    request.source_links !== undefined &&
-    utf8ByteLength(JSON.stringify(request.source_links)) > MAX_SOURCE_METADATA_BYTES
+    sourceLinks.length > 0 &&
+    utf8ByteLength(JSON.stringify(sourceLinks)) > MAX_SOURCE_METADATA_BYTES
   ) {
     context.addIssue({
       code: "custom",
-      path: ["source_links"],
+      path: [...sourcePath],
       message: `Source metadata must not exceed ${MAX_SOURCE_METADATA_BYTES} serialized UTF-8 bytes.`,
     });
   }
@@ -200,7 +197,7 @@ export const CreatePostRequestSchema = z
         message: "The primary community cannot also be an additional community.",
       });
     }
-    validateWriteBudgets(request, context);
+    validateWriteBudgets(request, context, request.source_links);
   });
 export type CreatePostRequest = z.infer<typeof CreatePostRequestSchema>;
 
@@ -215,8 +212,68 @@ export const ReplyToContentRequestSchema = z
     idempotency_key: IdempotencyKeySchema,
   })
   .strict()
-  .superRefine(validateWriteBudgets);
+  .superRefine((request, context) => {
+    validateWriteBudgets(request, context, request.source_links);
+  });
 export type ReplyToContentRequest = z.infer<typeof ReplyToContentRequestSchema>;
+
+export const EditSummarySchema = boundedUnicodeString(1, 500, "Edit summary").refine(
+  (value) => value.trim() === value && !/\p{Cc}/u.test(value),
+  {
+    message: "Edit summary must be trimmed and cannot contain control characters.",
+  },
+);
+
+export const UpdateContentPatchSchema = z
+  .object({
+    title: PostTitleSchema.optional(),
+    body_markdown: PostBodyMarkdownSchema.optional(),
+    source_links: sourceLinksSchema.optional(),
+    references: referencesSchema.optional(),
+    additional_community_ids: z
+      .array(OpaqueIdSchema)
+      .max(4)
+      .refine(uniqueArray, "Additional community IDs must be unique.")
+      .optional(),
+    symbols: symbolsSchema.optional(),
+    topics: topicsSchema.optional(),
+  })
+  .strict()
+  .refine((patch) => Object.keys(patch).length > 0, {
+    message: "An update patch must contain at least one mutable content field.",
+  });
+export type UpdateContentPatch = z.infer<typeof UpdateContentPatchSchema>;
+
+export const UpdateContentRequestSchema = z
+  .object({
+    content_id: OpaqueIdSchema,
+    expected_version: z.number().int().positive().safe(),
+    patch: UpdateContentPatchSchema,
+    edit_summary: EditSummarySchema.optional(),
+    idempotency_key: IdempotencyKeySchema,
+  })
+  .strict()
+  .superRefine((request, context) => {
+    if (
+      request.edit_summary !== undefined &&
+      request.patch.title === undefined &&
+      request.patch.body_markdown === undefined &&
+      request.patch.source_links === undefined &&
+      request.patch.references === undefined
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["edit_summary"],
+        message:
+          "An edit summary requires a title, body, source, or reference revision field.",
+      });
+    }
+    validateWriteBudgets(request, context, request.patch.source_links, [
+      "patch",
+      "source_links",
+    ]);
+  });
+export type UpdateContentRequest = z.infer<typeof UpdateContentRequestSchema>;
 
 export const ContentWriteOperationSchema = z.enum([
   "create_post",
@@ -245,11 +302,11 @@ const PendingActionSummaryShape = {
   id: OpaqueIdSchema,
   state: PendingActionStateSchema,
   expires_at: TimestampSchema,
-  input_digest: z.string().min(1),
-  requested_at: TimestampSchema.optional(),
-  decision_id: OpaqueIdSchema.optional(),
-  policy_version: z.string().min(1).optional(),
-  approval_summary: z.string().min(1).optional(),
+  input_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/u),
+  requested_at: TimestampSchema,
+  decision_id: OpaqueIdSchema,
+  policy_version: z.string().min(1),
+  approval_summary: z.string().min(1).max(2_000),
 } as const;
 
 export const CreatePostPendingActionSummarySchema = z
@@ -270,6 +327,17 @@ export const ReplyPendingActionSummarySchema = z
   .strict();
 export type ReplyPendingActionSummary = z.infer<typeof ReplyPendingActionSummarySchema>;
 
+export const UpdateContentPendingActionSummarySchema = z
+  .object({
+    ...PendingActionSummaryShape,
+    operation: z.literal("update_content"),
+    expected_version: z.number().int().positive().safe(),
+  })
+  .strict();
+export type UpdateContentPendingActionSummary = z.infer<
+  typeof UpdateContentPendingActionSummarySchema
+>;
+
 export const CreatePostResultSchema = z
   .object({
     content_id: OpaqueIdSchema,
@@ -289,11 +357,24 @@ export const ReplyToContentResultSchema = z
   .strict();
 export type ReplyToContentResult = z.infer<typeof ReplyToContentResultSchema>;
 
+export const UpdateContentResultSchema = z
+  .object({
+    content_id: OpaqueIdSchema,
+    revision_id: OpaqueIdSchema.nullable(),
+    resource_version: z.number().int().positive().safe(),
+  })
+  .strict();
+export type UpdateContentResult = z.infer<typeof UpdateContentResultSchema>;
+
 type WriteResultLike = {
   decision: z.infer<typeof PolicyDecisionSchema>;
   status: WriteStatus;
   result: object | null;
-  pending_action: CreatePostPendingActionSummary | ReplyPendingActionSummary | null;
+  pending_action:
+    | CreatePostPendingActionSummary
+    | ReplyPendingActionSummary
+    | UpdateContentPendingActionSummary
+    | null;
   error: z.infer<typeof V1ErrorDetailSchema> | null;
 };
 
@@ -405,9 +486,23 @@ export const ReplyToContentWriteResultSchema = z
   .superRefine(validateWriteResult);
 export type ReplyToContentWriteResult = z.infer<typeof ReplyToContentWriteResultSchema>;
 
+export const UpdateContentWriteResultSchema = z
+  .object({
+    decision: PolicyDecisionSchema,
+    status: WriteStatusSchema,
+    result: UpdateContentResultSchema.nullable(),
+    pending_action: UpdateContentPendingActionSummarySchema.nullable(),
+    error: V1ErrorDetailSchema.nullable(),
+    ...V1EnvelopeShape,
+  })
+  .strict()
+  .superRefine(validateWriteResult);
+export type UpdateContentWriteResult = z.infer<typeof UpdateContentWriteResultSchema>;
+
 export const PendingActionSummarySchema = z.union([
   CreatePostPendingActionSummarySchema,
   ReplyPendingActionSummarySchema,
+  UpdateContentPendingActionSummarySchema,
 ]);
 export type PendingActionSummary = z.infer<typeof PendingActionSummarySchema>;
 
@@ -452,6 +547,7 @@ export type SetReactionWriteResult = z.infer<typeof SetReactionWriteResultSchema
 export const UnifiedContentWriteResultSchema = z.union([
   CreatePostWriteResultSchema,
   ReplyToContentWriteResultSchema,
+  UpdateContentWriteResultSchema,
   SetReactionWriteResultSchema,
   SetFollowWriteResultSchema,
 ]);

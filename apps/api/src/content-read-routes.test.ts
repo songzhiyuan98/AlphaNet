@@ -552,7 +552,7 @@ describe("Agent Content read routes", () => {
     expect(service.browseContent).not.toHaveBeenCalled();
   });
 
-  it("explicitly rejects deferred browse, revision, and discussion capabilities", async () => {
+  it("explicitly rejects deferred browse and discussion capabilities", async () => {
     const { app, service } = createAgentApp();
     const headers = { authorization: `Bearer ${apiKey}` };
     const responses = await Promise.all([
@@ -565,11 +565,6 @@ describe("Agent Content read routes", () => {
         headers,
         method: "GET",
         url: "/v1/content?scope=global&sort=hot&window=24h",
-      }),
-      app.inject({
-        headers,
-        method: "GET",
-        url: `/v1/content/${ids.content}?include_revision_history=true`,
       }),
       app.inject({
         headers,
@@ -587,6 +582,80 @@ describe("Agent Content read routes", () => {
     expect(service.browseContent).not.toHaveBeenCalled();
     expect(service.getContent).not.toHaveBeenCalled();
     expect(service.getDiscussion).not.toHaveBeenCalled();
+  });
+
+  it("forwards revision selection and history pagination without replacing canonical content", async () => {
+    const historicalRevision: RevisionProjection = {
+      ...revision,
+      id: ids.replyRevision,
+      revisionNumber: 1,
+      title: "Original AMD data-center thesis",
+    };
+    const service = createService({
+      getContent: () =>
+        Promise.resolve({
+          ...contentDetail(),
+          revision: historicalRevision,
+          revisionHistory: [
+            {
+              contentHash: "sha256:content",
+              createdAt: now,
+              createdByActorId: ids.actor,
+              editSummary: null,
+              id: ids.revision,
+              revisionNumber: 2,
+              sourceVersion: 2,
+            },
+          ],
+          revisionOrdering: {
+            asOf: now,
+            orderingVersion: "revision-history-desc-v1",
+            snapshotId: ids.snapshot,
+          },
+          revisionPage: {
+            hasMore: true,
+            limit: 1,
+            nextCursor: "signed-revision-cursor",
+          },
+        }),
+    });
+    const { app } = createAgentApp({ service });
+
+    const response = await app.inject({
+      headers: { authorization: `Bearer ${apiKey}` },
+      method: "GET",
+      url:
+        `/v1/content/${ids.content}?revision_id=${ids.replyRevision}` +
+        "&include_revision_history=true&revision_limit=1" +
+        "&revision_cursor=signed-revision-cursor",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(GetContentResponseSchema.safeParse(response.json()).success).toBe(true);
+    expect(service.getContent).toHaveBeenCalledOnce();
+    expect(service.getContent.mock.calls[0]?.[0]?.agent.id).toBe(ids.agent);
+    expect(service.getContent.mock.calls[0]?.[1]).toEqual({
+      contentId: ids.content,
+      includeRevisionHistory: true,
+      revisionCursor: "signed-revision-cursor",
+      revisionId: ids.replyRevision,
+      revisionLimit: 1,
+    });
+    expect(response.json()).toMatchObject({
+      revision_scope: "historical",
+      classification_scope: "current",
+      social_state_scope: "current",
+      content: {
+        current_revision_id: ids.revision,
+        title: revision.title,
+      },
+      revision: {
+        id: ids.replyRevision,
+        title: "Original AMD data-center thesis",
+      },
+      revision_history: [{ id: ids.revision, revision_number: 2 }],
+      revision_page: { has_more: true, limit: 1 },
+    });
   });
 
   it("rejects malformed structural input before domain access", async () => {

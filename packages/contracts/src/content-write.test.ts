@@ -12,9 +12,18 @@ import {
   SetReactionResultSchema,
   SetReactionWriteResultSchema,
   UnifiedContentWriteResultSchema,
+  UpdateContentPatchSchema,
+  UpdateContentRequestSchema,
+  UpdateContentWriteResultSchema,
 } from "./content-write.ts";
 
 const timestamp = "2026-07-20T12:00:00.000Z";
+const pendingSummaryMetadata = {
+  requested_at: timestamp,
+  decision_id: "dec_pending_write",
+  policy_version: "1",
+  approval_summary: "Owner approval is required for this Agent write.",
+} as const;
 
 const createPost = {
   title: "AMD 数据中心情景",
@@ -59,6 +68,31 @@ const reply = {
   idempotency_key: "reply-amd-margin-20260720-v1",
 } as const;
 
+const update = {
+  content_id: "cnt_amd_thesis",
+  expected_version: 2,
+  patch: {
+    body_markdown: "## Revised case\n\nRevenue remains sensitive to product mix and FX.",
+    additional_community_ids: ["com_earnings"],
+    symbols: ["AMD"],
+    topics: ["data-center", "fx"],
+    source_links: [
+      {
+        url: "https://ir.amd.com/revised-example",
+        title: "AMD revised investor update",
+      },
+    ],
+    references: [
+      {
+        target_content_id: "cnt_source",
+        relation_type: "reference",
+      },
+    ],
+  },
+  edit_summary: "Add FX sensitivity",
+  idempotency_key: "edit-amd-scenarios-20260720-v2",
+} as const;
+
 const structuredError = {
   code: "POLICY_DENIED",
   message: "The current policy denies this write.",
@@ -82,6 +116,90 @@ describe("content write request contracts", () => {
       ReplyToContentRequestSchema.safeParse({
         ...reply,
         primary_community_id: "com_other",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("accepts a strict partial update and rejects empty or forged patches", () => {
+    expect(UpdateContentRequestSchema.parse(update)).toEqual(update);
+    expect(UpdateContentPatchSchema.parse({ symbols: [] })).toEqual({ symbols: [] });
+
+    expect(
+      UpdateContentRequestSchema.safeParse({
+        ...update,
+        patch: {},
+      }).success,
+    ).toBe(false);
+    expect(
+      UpdateContentRequestSchema.safeParse({
+        ...update,
+        patch: {
+          ...update.patch,
+          primary_community_id: "com_forbidden",
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      UpdateContentRequestSchema.safeParse({
+        ...update,
+        actor_id: "act_forged",
+      }).success,
+    ).toBe(false);
+    expect(
+      UpdateContentRequestSchema.safeParse({
+        ...update,
+        expected_version: 0,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("requires edit summaries to describe a revision-producing update", () => {
+    expect(
+      UpdateContentRequestSchema.safeParse({
+        ...update,
+        patch: { topics: ["fx"] },
+        edit_summary: "Classification only",
+      }).success,
+    ).toBe(false);
+    expect(
+      UpdateContentRequestSchema.safeParse({
+        ...update,
+        patch: { body_markdown: "A material body change." },
+        edit_summary: " Body change ",
+      }).success,
+    ).toBe(false);
+    expect(
+      UpdateContentRequestSchema.safeParse({
+        ...update,
+        patch: { body_markdown: "A material body change." },
+        edit_summary: "x".repeat(501),
+      }).success,
+    ).toBe(false);
+  });
+
+  it("applies source and decompressed request budgets inside update patches", () => {
+    expect(
+      UpdateContentRequestSchema.safeParse({
+        ...update,
+        patch: {
+          source_links: [
+            { url: "https://EXAMPLE.test:443/report", title: "First label" },
+            { url: "https://example.test/report", title: "Conflicting label" },
+          ],
+        },
+        edit_summary: "Replace evidence",
+      }).success,
+    ).toBe(false);
+    expect(
+      UpdateContentRequestSchema.safeParse({
+        ...update,
+        patch: {
+          body_markdown: "x".repeat(100_000),
+          topics: Array.from(
+            { length: 5 },
+            (_, index) => `${index}-${"t".repeat(190_000)}`,
+          ),
+        },
       }).success,
     ).toBe(false);
   });
@@ -304,7 +422,8 @@ describe("unified write and PendingAction contracts", () => {
         operation: "create_post",
         state: "pending_approval",
         expires_at: timestamp,
-        input_digest: "sha256:45891d",
+        input_digest: `sha256:${"a".repeat(64)}`,
+        ...pendingSummaryMetadata,
       },
       error: null,
       request_id: "req-post",
@@ -313,6 +432,25 @@ describe("unified write and PendingAction contracts", () => {
 
     expect(CreatePostWriteResultSchema.parse(pending)).toEqual(pending);
     expect(UnifiedContentWriteResultSchema.parse(pending)).toEqual(pending);
+    for (const field of [
+      "requested_at",
+      "decision_id",
+      "policy_version",
+      "approval_summary",
+    ] as const) {
+      expect(
+        CreatePostWriteResultSchema.safeParse({
+          ...pending,
+          pending_action: { ...pending.pending_action, [field]: undefined },
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      CreatePostWriteResultSchema.safeParse({
+        ...pending,
+        pending_action: { ...pending.pending_action, input_digest: "sha256:short" },
+      }).success,
+    ).toBe(false);
     expect(
       CreatePostWriteResultSchema.safeParse({
         ...pending,
@@ -332,6 +470,61 @@ describe("unified write and PendingAction contracts", () => {
         },
       }).success,
     ).toBe(false);
+  });
+
+  it("binds pending and successful updates to the expected resource version", () => {
+    const pending = {
+      decision: "require_approval",
+      status: "pending_approval",
+      result: null,
+      pending_action: {
+        id: "act_pending_update",
+        operation: "update_content",
+        state: "pending_approval",
+        expected_version: 2,
+        expires_at: timestamp,
+        input_digest: `sha256:${"b".repeat(64)}`,
+        ...pendingSummaryMetadata,
+      },
+      error: null,
+      request_id: "req-update-pending",
+      schema_version: "1",
+    } as const;
+    expect(UpdateContentWriteResultSchema.parse(pending)).toEqual(pending);
+    expect(UnifiedContentWriteResultSchema.parse(pending)).toEqual(pending);
+    expect(
+      UpdateContentWriteResultSchema.safeParse({
+        ...pending,
+        pending_action: {
+          ...pending.pending_action,
+          expected_version: undefined,
+        },
+      }).success,
+    ).toBe(false);
+
+    const revised = {
+      decision: "allow",
+      status: "succeeded",
+      result: {
+        content_id: update.content_id,
+        revision_id: "rev_amd_3",
+        resource_version: 3,
+      },
+      pending_action: null,
+      error: null,
+      request_id: "req-update-direct",
+      schema_version: "1",
+    } as const;
+    expect(UpdateContentWriteResultSchema.parse(revised)).toEqual(revised);
+    expect(UnifiedContentWriteResultSchema.parse(revised)).toEqual(revised);
+
+    const classificationOnly = {
+      ...revised,
+      result: { ...revised.result, revision_id: null },
+    } as const;
+    expect(UpdateContentWriteResultSchema.parse(classificationOnly)).toEqual(
+      classificationOnly,
+    );
   });
 
   it("accepts direct and approved success while rejecting illegal decision/status pairs", () => {
@@ -364,7 +557,8 @@ describe("unified write and PendingAction contracts", () => {
         operation: "create_post",
         state: "succeeded",
         expires_at: timestamp,
-        input_digest: "sha256:45891d",
+        input_digest: `sha256:${"c".repeat(64)}`,
+        ...pendingSummaryMetadata,
       },
       error: null,
       request_id: "req-post-approved",

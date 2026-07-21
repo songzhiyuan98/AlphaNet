@@ -7,9 +7,14 @@ import {
 
 import {
   digestResearchCommand,
+  freezeResearchCommandMentionActors,
+  freezeUpdateContentBaseline,
   normalizeCreatePostCommand,
   normalizeReplyCommand,
+  normalizeUpdateContentCommand,
   type NormalizedResearchCommand,
+  type FrozenUpdateContentBaseline,
+  type UpdateContentPatchInput,
 } from "./research-command.js";
 
 const ALGORITHM = "aes-256-gcm";
@@ -164,18 +169,107 @@ function parseReferences(value: unknown):
   return references;
 }
 
+function hasOwn(value: Readonly<Record<string, unknown>>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function parseUpdatePatch(value: unknown): UpdateContentPatchInput | null {
+  if (!isPlainRecord(value)) return null;
+  const allowedKeys = [
+    "title",
+    "bodyMarkdown",
+    "sourceLinks",
+    "references",
+    "additionalCommunityIds",
+    "symbols",
+    "topics",
+  ];
+  const keys = Object.keys(value);
+  if (keys.length === 0 || !keys.every((key) => allowedKeys.includes(key))) return null;
+
+  const patch: UpdateContentPatchInput = {};
+  if (hasOwn(value, "title")) {
+    if (typeof value.title !== "string") return null;
+    patch.title = value.title;
+  }
+  if (hasOwn(value, "bodyMarkdown")) {
+    if (typeof value.bodyMarkdown !== "string") return null;
+    patch.bodyMarkdown = value.bodyMarkdown;
+  }
+  if (hasOwn(value, "sourceLinks")) {
+    const sourceLinks = parseSourceLinks(value.sourceLinks);
+    if (sourceLinks === null) return null;
+    patch.sourceLinks = sourceLinks;
+  }
+  if (hasOwn(value, "references")) {
+    const references = parseReferences(value.references);
+    if (references === null) return null;
+    patch.references = references;
+  }
+  if (hasOwn(value, "additionalCommunityIds")) {
+    const additionalCommunityIds = parseStringArray(value.additionalCommunityIds);
+    if (additionalCommunityIds === null) return null;
+    patch.additionalCommunityIds = additionalCommunityIds;
+  }
+  if (hasOwn(value, "symbols")) {
+    const symbols = parseStringArray(value.symbols);
+    if (symbols === null) return null;
+    patch.symbols = symbols;
+  }
+  if (hasOwn(value, "topics")) {
+    const topics = parseStringArray(value.topics);
+    if (topics === null) return null;
+    patch.topics = topics;
+  }
+  return patch;
+}
+
+function parseFrozenUpdateBaseline(value: unknown): FrozenUpdateContentBaseline | null {
+  if (
+    !isPlainRecord(value) ||
+    Object.keys(value).sort().join(",") !==
+      "additionalCommunityIds,bodyMarkdown,contentKind,primaryCommunityId,resourceVersion,revisionId,title" ||
+    !Array.isArray(value.additionalCommunityIds) ||
+    !value.additionalCommunityIds.every(
+      (communityId): communityId is string => typeof communityId === "string",
+    ) ||
+    typeof value.bodyMarkdown !== "string" ||
+    (value.contentKind !== "post" && value.contentKind !== "reply") ||
+    typeof value.primaryCommunityId !== "string" ||
+    typeof value.resourceVersion !== "number" ||
+    typeof value.revisionId !== "string" ||
+    (value.title !== null && typeof value.title !== "string")
+  ) {
+    return null;
+  }
+  return {
+    additionalCommunityIds: value.additionalCommunityIds,
+    bodyMarkdown: value.bodyMarkdown,
+    contentKind: value.contentKind,
+    primaryCommunityId: value.primaryCommunityId,
+    resourceVersion: value.resourceVersion,
+    revisionId: value.revisionId,
+    title: value.title,
+  };
+}
+
 function parseNormalizedCommand(value: unknown): NormalizedResearchCommand {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new PendingCommandCodecError("PENDING_COMMAND_PAYLOAD_INVALID");
   }
   const command = value as Record<string, unknown>;
-  const symbols = parseStringArray(command.symbols);
-  const topics = parseStringArray(command.topics);
-  const sourceLinks = parseSourceLinks(command.sourceLinks);
-  const references = parseReferences(command.references);
-  if (!symbols || !topics || !sourceLinks || !references) {
+  const frozenMentionActorIds = hasOwn(command, "frozenMentionActorIds")
+    ? parseStringArray(command.frozenMentionActorIds)
+    : undefined;
+  if (frozenMentionActorIds === null) {
     throw new PendingCommandCodecError("PENDING_COMMAND_PAYLOAD_INVALID");
   }
+  const withFrozenMentions = (
+    parsed: NormalizedResearchCommand,
+  ): NormalizedResearchCommand =>
+    frozenMentionActorIds === undefined
+      ? parsed
+      : freezeResearchCommandMentionActors(parsed, frozenMentionActorIds);
 
   if (
     command.operation === "create_post" &&
@@ -190,6 +284,7 @@ function parseNormalizedCommand(value: unknown): NormalizedResearchCommand {
         "topics",
         "sourceLinks",
         "references",
+        "frozenMentionActorIds",
       ].includes(key),
     ) &&
     typeof command.title === "string" &&
@@ -197,17 +292,23 @@ function parseNormalizedCommand(value: unknown): NormalizedResearchCommand {
     typeof command.primaryCommunityId === "string"
   ) {
     const additionalCommunityIds = parseStringArray(command.additionalCommunityIds);
-    if (additionalCommunityIds) {
-      return normalizeCreatePostCommand({
-        title: command.title,
-        bodyMarkdown: command.bodyMarkdown,
-        primaryCommunityId: command.primaryCommunityId,
-        additionalCommunityIds,
-        symbols,
-        topics,
-        sourceLinks,
-        references,
-      });
+    const symbols = parseStringArray(command.symbols);
+    const topics = parseStringArray(command.topics);
+    const sourceLinks = parseSourceLinks(command.sourceLinks);
+    const references = parseReferences(command.references);
+    if (additionalCommunityIds && symbols && topics && sourceLinks && references) {
+      return withFrozenMentions(
+        normalizeCreatePostCommand({
+          title: command.title,
+          bodyMarkdown: command.bodyMarkdown,
+          primaryCommunityId: command.primaryCommunityId,
+          additionalCommunityIds,
+          symbols,
+          topics,
+          sourceLinks,
+          references,
+        }),
+      );
     }
   }
 
@@ -222,19 +323,64 @@ function parseNormalizedCommand(value: unknown): NormalizedResearchCommand {
         "topics",
         "sourceLinks",
         "references",
+        "frozenMentionActorIds",
       ].includes(key),
     ) &&
     typeof command.parentContentId === "string" &&
     typeof command.bodyMarkdown === "string"
   ) {
-    return normalizeReplyCommand({
-      parentContentId: command.parentContentId,
-      bodyMarkdown: command.bodyMarkdown,
-      symbols,
-      topics,
-      sourceLinks,
-      references,
-    });
+    const symbols = parseStringArray(command.symbols);
+    const topics = parseStringArray(command.topics);
+    const sourceLinks = parseSourceLinks(command.sourceLinks);
+    const references = parseReferences(command.references);
+    if (symbols && topics && sourceLinks && references) {
+      return withFrozenMentions(
+        normalizeReplyCommand({
+          parentContentId: command.parentContentId,
+          bodyMarkdown: command.bodyMarkdown,
+          symbols,
+          topics,
+          sourceLinks,
+          references,
+        }),
+      );
+    }
+  }
+
+  if (
+    command.operation === "update_content" &&
+    Object.keys(command).every((key) =>
+      [
+        "operation",
+        "contentId",
+        "expectedVersion",
+        "patch",
+        "editSummary",
+        "frozenMentionActorIds",
+        "frozenUpdateBaseline",
+      ].includes(key),
+    ) &&
+    typeof command.contentId === "string" &&
+    typeof command.expectedVersion === "number" &&
+    (command.editSummary === undefined || typeof command.editSummary === "string")
+  ) {
+    const patch = parseUpdatePatch(command.patch);
+    const baseline = parseFrozenUpdateBaseline(command.frozenUpdateBaseline);
+    if (patch !== null && baseline !== null) {
+      return withFrozenMentions(
+        freezeUpdateContentBaseline(
+          normalizeUpdateContentCommand({
+            contentId: command.contentId,
+            expectedVersion: command.expectedVersion,
+            patch,
+            ...(command.editSummary === undefined
+              ? {}
+              : { editSummary: command.editSummary }),
+          }),
+          baseline,
+        ),
+      );
+    }
   }
 
   throw new PendingCommandCodecError("PENDING_COMMAND_PAYLOAD_INVALID");

@@ -78,6 +78,7 @@ function pendingRow(overrides: Readonly<Record<string, unknown>> = {}) {
     terminal_at: null,
     public_input_digest: `sha256:${"a".repeat(64)}`,
     approval_summary: "Create one post in the Semiconductors community.",
+    expected_version_text: null,
     approval_method: null,
     decided_by_owner_id: null,
     result: null,
@@ -128,6 +129,7 @@ describe("PostgresPendingActionStatusService visibility boundary", () => {
       terminalAt: null,
       inputDigest: rawRow.public_input_digest,
       approvalSummary: rawRow.approval_summary,
+      expectedVersion: null,
       approvalOutcome: null,
       approvalMethod: null,
       decidedByOwnerId: null,
@@ -152,6 +154,7 @@ describe("PostgresPendingActionStatusService visibility boundary", () => {
     expect(query?.text).toMatch(
       /where id = \$value and owner_id = \$value and agent_id = \$value/u,
     );
+    expect(query?.text).toContain("expected_version::text as expected_version_text");
     for (const internalColumn of [
       "normalized_input_ciphertext",
       "normalized_input_nonce",
@@ -238,6 +241,56 @@ describe("PostgresPendingActionStatusService public state evidence", () => {
       state: "succeeded",
       status: "succeeded",
     });
+  });
+
+  it("projects update expected_version and a nullable revision result without frozen input", async () => {
+    const row = pendingRow({
+      operation: "update_content",
+      expected_version_text: "2",
+      state: "succeeded",
+      decided_at: decidedAt,
+      executing_at: decidedAt,
+      completed_at: completedAt,
+      terminal_at: completedAt,
+      approval_method: "owner_approval",
+      decided_by_owner_id: ownerId,
+      result: {
+        content_id: "70000000-0000-4000-8000-000000000001",
+        revision_id: null,
+        resource_version: 3,
+      },
+    });
+    const { sql } = createTestSql(() => [row]);
+
+    const action = await new PostgresPendingActionStatusService(sql).getActionStatus(
+      { ownerId, agentId },
+      actionId,
+    );
+
+    expect(action).toMatchObject({
+      expectedVersion: 2,
+      operation: "update_content",
+      result: row.result,
+      state: "succeeded",
+    });
+    expect(action).not.toHaveProperty("normalizedInput");
+    expect(JSON.stringify(action)).not.toContain("body_markdown");
+  });
+
+  it("fails closed when the expected version column contradicts the operation", async () => {
+    for (const row of [
+      pendingRow({ operation: "update_content", expected_version_text: null }),
+      pendingRow({ expected_version_text: "2" }),
+      pendingRow({ operation: "update_content", expected_version_text: "unsafe" }),
+    ]) {
+      const { sql } = createTestSql(() => [row]);
+      await expect(
+        new PostgresPendingActionStatusService(sql).getActionStatus(
+          { ownerId, agentId },
+          actionId,
+        ),
+      ).rejects.toMatchObject({ code: "ACTION_STATUS_UNAVAILABLE" });
+    }
   });
 
   it("projects a rejected action as denied with structured terminal evidence", async () => {

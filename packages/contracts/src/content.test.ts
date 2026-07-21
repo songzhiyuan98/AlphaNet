@@ -421,12 +421,79 @@ describe("content detail and discussion projections", () => {
       },
       content_safety: contentSafety,
       counts_as_of: timestamp,
+      revision_scope: "current",
+      classification_scope: "current",
+      social_state_scope: "current",
       resource_version: 2,
       request_id: "req-content",
       schema_version: "1",
     } as const;
 
     expect(GetContentResponseSchema.parse(response)).toEqual(response);
+
+    const historicalRevision = {
+      ...revision,
+      id: "rev_amd_1",
+      revision_number: 1,
+      source_version: 1,
+      title: "AMD 初始数据中心情景",
+      body_markdown: "## Initial case\n\nThe first version of the research thesis.",
+      body_plain_text: "Initial case The first version of the research thesis.",
+      edit_summary: null,
+      content_hash: "sha256:historical-content",
+    } as const;
+    const historicalResponse = {
+      ...response,
+      revision: historicalRevision,
+      revision_scope: "historical",
+      revision_history: [
+        {
+          id: revision.id,
+          revision_number: revision.revision_number,
+          source_version: revision.source_version,
+          edit_summary: revision.edit_summary,
+          created_by_actor_id: revision.created_by_actor_id,
+          created_at: revision.created_at,
+          content_hash: revision.content_hash,
+        },
+        {
+          id: historicalRevision.id,
+          revision_number: historicalRevision.revision_number,
+          source_version: historicalRevision.source_version,
+          edit_summary: historicalRevision.edit_summary,
+          created_by_actor_id: historicalRevision.created_by_actor_id,
+          created_at: historicalRevision.created_at,
+          content_hash: historicalRevision.content_hash,
+        },
+      ],
+      revision_page: { next_cursor: null, has_more: false, limit: 25 },
+      revision_ordering: {
+        snapshot_id: "snap_revision_history",
+        ordering_version: "revisions-number-desc-v1",
+        as_of: timestamp,
+      },
+    } as const;
+    expect(GetContentResponseSchema.parse(historicalResponse)).toEqual(
+      historicalResponse,
+    );
+    expect(
+      GetContentResponseSchema.safeParse({
+        ...historicalResponse,
+        revision_scope: "current",
+      }).success,
+    ).toBe(false);
+    expect(
+      GetContentResponseSchema.safeParse({
+        ...response,
+        revision: { ...revision, title: "A mismatched current title" },
+      }).success,
+    ).toBe(false);
+    expect(
+      GetContentResponseSchema.safeParse({
+        ...historicalResponse,
+        revision: { ...historicalRevision, content_id: "cnt_other" },
+      }).success,
+    ).toBe(false);
     expect(
       GetContentResponseSchema.safeParse({
         ...response,
@@ -437,6 +504,36 @@ describe("content detail and discussion projections", () => {
       GetContentResponseSchema.safeParse({
         ...response,
         revision_history: [],
+      }).success,
+    ).toBe(false);
+
+    const deletedResponse = {
+      ...response,
+      content: {
+        ...response.content,
+        title: null,
+        current_revision_id: null,
+        lifecycle_state: "deleted",
+        primary_community_id: null,
+        additional_community_ids: [],
+        symbols: [],
+        topics: [],
+      },
+      revision: null,
+      revision_scope: "none",
+      effective_community_ids: [],
+    } as const;
+    expect(GetContentResponseSchema.parse(deletedResponse)).toEqual(deletedResponse);
+    expect(
+      GetContentResponseSchema.safeParse({
+        ...deletedResponse,
+        revision_history: [],
+        revision_page: { next_cursor: null, has_more: false, limit: 25 },
+        revision_ordering: {
+          snapshot_id: "snap_deleted_history",
+          ordering_version: "revisions-number-desc-v1",
+          as_of: timestamp,
+        },
       }).success,
     ).toBe(false);
   });

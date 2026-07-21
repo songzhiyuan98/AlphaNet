@@ -76,6 +76,9 @@ FROM (
 
 INSERT INTO expected_table_privileges (schema_name, table_name, privilege)
 VALUES
+  ('platform', 'content_additional_communities', 'DELETE'),
+  ('platform', 'content_symbols', 'DELETE'),
+  ('platform', 'content_topics', 'DELETE'),
   ('platform', 'follows', 'DELETE'),
   ('platform', 'reactions', 'DELETE');
 
@@ -86,7 +89,6 @@ FROM (
     ('actors'::name),
     ('agent_policies'::name),
     ('agents'::name),
-    ('content_items'::name),
     ('credentials'::name),
     ('idempotency_records'::name),
     ('pending_action_attempts'::name),
@@ -131,7 +133,11 @@ VALUES
   ('platform', 'follows', 'target_topic_id', 'INSERT'),
   ('platform', 'follows', 'target_content_id', 'INSERT'),
   ('platform', 'follows', 'notification_level', 'INSERT'),
-  ('platform', 'follows', 'notification_level', 'UPDATE');
+  ('platform', 'follows', 'notification_level', 'UPDATE'),
+  ('platform', 'content_items', 'version', 'UPDATE'),
+  ('platform', 'content_items', 'current_revision_id', 'UPDATE'),
+  ('platform', 'source_links', 'removed_revision_id', 'UPDATE'),
+  ('platform', 'content_relations', 'removed_revision_id', 'UPDATE');
 
 INSERT INTO expected_table_privileges (schema_name, table_name, privilege)
 SELECT 'system', table_name, 'INSERT'
@@ -783,6 +789,95 @@ BEGIN
      OR NOT has_function_privilege(runtime_role_oid, routine.oid, 'EXECUTE');
   IF violation IS NOT NULL THEN
     RAISE EXCEPTION 'Runtime is missing approved function privileges: %', violation;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_proc AS routine
+    JOIN pg_catalog.pg_namespace AS namespace
+      ON namespace.oid = routine.pronamespace
+    WHERE namespace.nspname = 'platform'
+      AND routine.proname = 'validate_runtime_content_write_provenance'
+      AND routine.pronargs = 0
+      AND pg_catalog.pg_get_function_identity_arguments(routine.oid) = ''
+      AND NOT routine.prosecdef
+      AND 'search_path=pg_catalog' = ANY (routine.proconfig)
+  ) THEN
+    RAISE EXCEPTION
+      'Runtime content provenance guard is missing or not SECURITY INVOKER';
+  END IF;
+
+  SELECT string_agg(
+    format('%I.%I[%s]', expected.table_name, expected.trigger_name, expected.tgtype),
+    ', ' ORDER BY expected.table_name, expected.trigger_name
+  )
+  INTO violation
+  FROM (
+    VALUES
+      (
+        'content_items'::name,
+        'content_items_validate_runtime_provenance'::name,
+        21::smallint
+      ),
+      (
+        'content_additional_communities'::name,
+        'content_additional_communities_validate_runtime_provenance'::name,
+        29::smallint
+      ),
+      (
+        'content_symbols'::name,
+        'content_symbols_validate_runtime_provenance'::name,
+        29::smallint
+      ),
+      (
+        'content_topics'::name,
+        'content_topics_validate_runtime_provenance'::name,
+        29::smallint
+      ),
+      (
+        'source_links'::name,
+        'source_links_validate_runtime_provenance'::name,
+        21::smallint
+      ),
+      (
+        'content_relations'::name,
+        'content_relations_validate_runtime_provenance'::name,
+        21::smallint
+      ),
+      (
+        'mentions'::name,
+        'mentions_validate_runtime_provenance'::name,
+        5::smallint
+      )
+  ) AS expected(table_name, trigger_name, tgtype)
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_trigger AS trigger
+    JOIN pg_catalog.pg_class AS relation ON relation.oid = trigger.tgrelid
+    JOIN pg_catalog.pg_namespace AS namespace
+      ON namespace.oid = relation.relnamespace
+    JOIN pg_catalog.pg_proc AS routine ON routine.oid = trigger.tgfoid
+    JOIN pg_catalog.pg_namespace AS routine_namespace
+      ON routine_namespace.oid = routine.pronamespace
+    WHERE namespace.nspname = 'platform'
+      AND relation.relname = expected.table_name
+      AND trigger.tgname = expected.trigger_name
+      AND NOT trigger.tgisinternal
+      AND trigger.tgconstraint <> 0
+      AND trigger.tgdeferrable
+      AND trigger.tginitdeferred
+      AND trigger.tgenabled IN ('O', 'A')
+      AND trigger.tgtype = expected.tgtype
+      AND trigger.tgfoid =
+        'platform.validate_runtime_content_write_provenance()'::regprocedure
+      AND routine_namespace.nspname = 'platform'
+      AND routine.proname = 'validate_runtime_content_write_provenance'
+      AND routine.pronargs = 0
+      AND pg_catalog.pg_get_function_identity_arguments(routine.oid) = ''
+  );
+  IF violation IS NOT NULL THEN
+    RAISE EXCEPTION
+      'Runtime content provenance trigger coverage is incomplete: %', violation;
   END IF;
 
   SELECT string_agg(extension_name, ', ' ORDER BY extension_name)
