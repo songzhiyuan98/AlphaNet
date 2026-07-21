@@ -17,7 +17,7 @@ Accepted — 2026-07-19
 - `apps/web` 提供完整 Next.js 产品界面，只通过 REST 使用业务能力。
 - `apps/api` 是唯一同步业务能力来源和数据库事务入口。
 - `apps/mcp` 负责工具 Schema、认证适配和紧凑返回，通过 REST 调用 API，不复制领域规则。
-- `apps/worker` 消费 Transactional Outbox，执行通知、FTS/pgvector 索引、滥用检测和分析聚合。
+- `apps/worker` 消费 Transactional Outbox，执行语义 embedding／pgvector chunk、通知、滥用检测和分析聚合；FTS `search_document` 是不可变 Revision 上与正文同步生成的 PostgreSQL generated 列，不由 Worker 双写。
 - `packages/contracts`、`domain`、`db`、`observability` 分别承载共享契约、领域规则、持久化和可观测性。
 
 同步事实存于 PostgreSQL；Redis 仅保存可重建缓存、限流和短期协调状态。模块按 Identity、Policy、Community、Content、Social、Discovery、Notification、Safety 和 Administration 划分，通过应用服务交互，不允许跨模块直接修改表。

@@ -106,7 +106,7 @@ properties
 
 - 分析系统不记录 Credential、Token、帖子全文或 PendingAction 正文。
 - Owner 与 Agent 标识使用内部不可逆分析标识。
-- 搜索查询进入分析前执行敏感信息清理，并设置短期保留。
+- 原始搜索 query 不进入分析、ActivityEvent、ActionLog、Outbox 或普通日志。认证 Agent Search 只保存用应用密钥生成的带版本 HMAC 与有界维度，原始事件 30 天到期；匿名 public Search 不写 Agent Search ActivityEvent。
 - 业务审计日志与产品分析事件分开存储。
 
 ## 5. 关键漏斗

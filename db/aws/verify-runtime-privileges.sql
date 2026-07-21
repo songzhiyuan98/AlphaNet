@@ -24,6 +24,7 @@ SELECT 'platform', table_name, 'SELECT'
 FROM (
   VALUES
     ('action_logs'::name),
+    ('agent_search_activity_events'::name),
     ('actors'::name),
     ('agent_policies'::name),
     ('agents'::name),
@@ -31,6 +32,7 @@ FROM (
     ('community_symbols'::name),
     ('community_topics'::name),
     ('content_additional_communities'::name),
+    ('content_embedding_chunks'::name),
     ('content_items'::name),
     ('content_relations'::name),
     ('content_revisions'::name),
@@ -101,6 +103,8 @@ SELECT 'system', table_name, 'SELECT'
 FROM (
   VALUES
     ('actor_follow_epochs'::name),
+    ('content_embedding_jobs'::name),
+    ('content_search_candidate_snapshots'::name),
     ('content_read_visibility_epochs'::name),
     ('outbox_aggregate_heads'::name),
     ('outbox_consumer_deliveries'::name),
@@ -138,6 +142,75 @@ VALUES
   ('platform', 'content_items', 'current_revision_id', 'UPDATE'),
   ('platform', 'source_links', 'removed_revision_id', 'UPDATE'),
   ('platform', 'content_relations', 'removed_revision_id', 'UPDATE');
+
+INSERT INTO expected_column_privileges (
+  schema_name,
+  table_name,
+  column_name,
+  privilege
+)
+SELECT
+  'platform',
+  'content_embedding_chunks',
+  column_name,
+  'INSERT'
+FROM (
+  VALUES
+    ('revision_id'::name),
+    ('embedding_model'::name),
+    ('chunk_index'::name),
+    ('source_start_offset'::name),
+    ('source_end_offset'::name),
+    ('source_text_hash'::name),
+    ('token_count'::name),
+    ('embedding'::name)
+) AS embedding_insert_column(column_name);
+
+INSERT INTO expected_column_privileges (
+  schema_name,
+  table_name,
+  column_name,
+  privilege
+)
+SELECT
+  'platform',
+  'agent_search_activity_events',
+  column_name,
+  'INSERT'
+FROM (
+  VALUES
+    ('id'::name),
+    ('request_id'::name),
+    ('agent_id'::name),
+    ('actor_id'::name),
+    ('credential_id'::name),
+    ('query_hmac'::name),
+    ('query_key_version'::name),
+    ('surface'::name),
+    ('search_mode'::name),
+    ('community_id'::name),
+    ('symbol_id'::name),
+    ('topic_id'::name)
+) AS search_insert_column(column_name);
+
+INSERT INTO expected_column_privileges (
+  schema_name,
+  table_name,
+  column_name,
+  privilege
+)
+SELECT
+  'platform',
+  'agent_search_activity_events',
+  column_name,
+  'UPDATE'
+FROM (
+  VALUES
+    ('outcome'::name),
+    ('result_count'::name),
+    ('latency_ms'::name),
+    ('fallback_reason_code'::name)
+) AS search_finalize_column(column_name);
 
 INSERT INTO expected_table_privileges (schema_name, table_name, privilege)
 SELECT 'system', table_name, 'INSERT'
@@ -178,7 +251,15 @@ VALUES
   ('platform', 'canonical_discovery_tags_are_valid', 'candidate text[]'),
   ('platform', 'community_posting_rules_are_valid', 'candidate jsonb'),
   ('platform', 'discovery_tags_are_valid', 'candidate text[]'),
-  ('platform', 'text_array_has_unique_values', 'candidate text[]');
+  ('platform', 'purge_expired_agent_search_activity_events', 'candidate_batch_size integer'),
+  ('platform', 'text_array_has_unique_values', 'candidate text[]'),
+  ('system', 'claim_content_embedding_jobs', 'candidate_lease_owner text, candidate_lease_token_digest bytea, candidate_batch_size integer, candidate_lease_seconds integer'),
+  ('system', 'complete_content_embedding_job', 'candidate_job_id uuid, candidate_lease_owner text, candidate_lease_token_digest bytea'),
+  ('system', 'enqueue_content_embedding_job', 'candidate_revision_id uuid, candidate_embedding_model text, candidate_priority smallint'),
+  ('system', 'purge_expired_content_search_candidate_snapshots', 'candidate_batch_size integer'),
+  ('system', 'renew_content_embedding_job_lease', 'candidate_job_id uuid, candidate_lease_owner text, candidate_lease_token_digest bytea, candidate_lease_seconds integer'),
+  ('system', 'retry_content_embedding_job', 'candidate_job_id uuid, candidate_lease_owner text, candidate_lease_token_digest bytea, candidate_error_code text, candidate_retry_seconds integer'),
+  ('system', 'store_content_search_candidate_snapshot', 'candidate_snapshot_id text, candidate_binding_hmac bytea, candidate_candidates jsonb, candidate_expires_at timestamp with time zone');
 
 SELECT set_config('alphanet.verify.migration_role', :'migration_role', false);
 SELECT set_config('alphanet.verify.runtime_role', :'runtime_role', false);
@@ -696,6 +777,68 @@ BEGIN
       'Runtime can override database-owned Follow timestamps';
   END IF;
 
+  IF has_column_privilege(
+       runtime_role_oid,
+       'platform.agent_search_activity_events',
+       'occurred_at',
+       'INSERT'
+     )
+     OR has_column_privilege(
+       runtime_role_oid,
+       'platform.agent_search_activity_events',
+       'expires_at',
+       'INSERT'
+     )
+     OR has_column_privilege(
+       runtime_role_oid,
+       'platform.agent_search_activity_events',
+       'finalized_at',
+       'UPDATE'
+     ) THEN
+    RAISE EXCEPTION
+      'Runtime can override database-owned Agent Search retention timestamps';
+  END IF;
+
+  IF has_column_privilege(
+       runtime_role_oid,
+       'platform.content_embedding_chunks',
+       'id',
+       'INSERT'
+     )
+     OR has_column_privilege(
+       runtime_role_oid,
+       'platform.content_embedding_chunks',
+       'search_index_created_xid',
+       'INSERT'
+     )
+     OR has_column_privilege(
+       runtime_role_oid,
+       'platform.content_embedding_chunks',
+       'created_at',
+       'INSERT'
+     ) THEN
+    RAISE EXCEPTION
+      'Runtime can override database-owned embedding chunk identity';
+  END IF;
+
+  IF has_function_privilege(
+       runtime_role_oid,
+       'system.redrive_content_embedding_job(uuid)',
+       'EXECUTE'
+     ) THEN
+    RAISE EXCEPTION
+      'Runtime can execute the migration/ops-only embedding redrive function';
+  END IF;
+
+  IF has_function_privilege(
+       runtime_role_oid,
+       'system.enqueue_content_embedding_job_from_revision()',
+       'EXECUTE'
+     ) THEN
+    RAISE EXCEPTION
+      'Runtime can directly execute the Revision embedding enqueue trigger';
+  END IF;
+
   SELECT string_agg(
     format(
       '%I.%I(%I):%s',
@@ -878,6 +1021,10 @@ BEGIN
   IF violation IS NOT NULL THEN
     RAISE EXCEPTION
       'Runtime content provenance trigger coverage is incomplete: %', violation;
+  END IF;
+
+  IF current_setting('server_version_num')::integer < 170000 THEN
+    RAISE EXCEPTION 'AlphaNet runtime requires PostgreSQL 17 or newer';
   END IF;
 
   SELECT string_agg(extension_name, ', ' ORDER BY extension_name)

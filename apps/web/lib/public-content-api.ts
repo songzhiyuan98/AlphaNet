@@ -2,9 +2,12 @@ import {
   BrowseContentResponseSchema,
   GetContentResponseSchema,
   GetDiscussionResponseSchema,
+  SearchContentResponseSchema,
   type BrowseContentResponse,
   type GetContentResponse,
   type GetDiscussionResponse,
+  type SearchContentRequest,
+  type SearchContentResponse,
 } from "@alphanet/contracts";
 import { headers } from "next/headers";
 
@@ -40,16 +43,24 @@ async function publicContentRequest<T>(
   schema: {
     safeParse(value: unknown): { success: true; data: T } | { success: false };
   },
+  init: RequestInit = {},
+  timeoutMilliseconds = 4_000,
 ): Promise<PublicContentApiResult<T>> {
   try {
     const incomingHeaders = await headers();
+    const method = init.method ?? "GET";
+    const requestHeaders = new Headers(init.headers);
+    requestHeaders.set("accept", "application/json");
+    for (const [name, value] of Object.entries(
+      signedSsrClientIpHeaders(incomingHeaders, { method, url: path }),
+    )) {
+      requestHeaders.set(name, value);
+    }
     const response = await fetch(`${apiInternalUrl()}${path}`, {
+      ...init,
       cache: "no-store",
-      headers: {
-        accept: "application/json",
-        ...signedSsrClientIpHeaders(incomingHeaders, { method: "GET", url: path }),
-      },
-      signal: AbortSignal.timeout(4_000),
+      headers: requestHeaders,
+      signal: AbortSignal.timeout(timeoutMilliseconds),
     });
 
     if (response.status === 404) return { kind: "not_found" };
@@ -62,6 +73,21 @@ async function publicContentRequest<T>(
   } catch {
     return { kind: "unavailable" };
   }
+}
+
+export function searchPublicContent(
+  request: SearchContentRequest,
+): Promise<PublicContentApiResult<SearchContentResponse>> {
+  return publicContentRequest(
+    "/v1/public/content/search",
+    SearchContentResponseSchema,
+    {
+      body: JSON.stringify(request),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    },
+    8_000,
+  );
 }
 
 export function getPublicContent(

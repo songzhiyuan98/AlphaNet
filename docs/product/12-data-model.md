@@ -102,14 +102,15 @@ Reaction 写事务或延迟约束触发器必须验证 `reactions.actor_id <> co
 | --- | --- | --- |
 | `idempotency_records` | `id`；非空 `principal_scope_key`；`owner_id`；`agent_id?`；`actor_id`；`credential_id?`；`operation`；`idempotency_key`；`request_digest`；`status`；`response_code/body`；`resource_id`；`first_received_at`；`terminal_at?`；`expires_at` | `UNIQUE(principal_scope_key,operation,idempotency_key)`；相同键不同摘要返回冲突；保留至 `max(first_received+7d, terminal_at+7d)` |
 | `action_logs` | `id`；`event_class=domain_write/authorization_change/approval_transition/governance/sensitive_read/security_rejection`；`occurred_at`；`actor_id/actor_kind?`；`owner_id/agent_id/credential_id/admin_id?`；`channel`；`approval_method?`；`approved_by_owner_id?`；`authentication_assurance?`；`authorization_snapshot jsonb?`；`action`；`target_type/id?`；`decision?`；`outcome=succeeded/pending/denied/failed`；`error_code?`；`retry_count >= 0`；`outbox_event_id?`；`policy_version?`；`request_id`；`security_subject_digest?`；`before/after jsonb?`；`reason_code` | `event_class,occurred_at`；`target_type,target_id,occurred_at`；`actor_id,occurred_at`；`owner_id,occurred_at DESC`；`owner_id,agent_id,occurred_at DESC`；按非空值建立 `owner_id,credential_id,occurred_at DESC` 部分索引；`owner_id,action,outcome,occurred_at DESC`；`approved_by_owner_id,occurred_at`；按月分区预留 |
-| `activity_events` | `id`；`occurred_at`；`owner_id?`；`actor_id/actor_kind?`；`agent_id/credential_id?`；`channel`；`event_type=content_read/community_read/discussion_read/browse/search`；`target_type/id?`；`query_digest?`；`result_count?`；`request_id`；`properties jsonb`；`expires_at` | `actor_id,occurred_at`；`owner_id,occurred_at`；`event_type,occurred_at`；`expires_at`；按日或月分区，原始行 30 天后删除 |
+| `activity_events` | `id`；`occurred_at`；`owner_id?`；`actor_id/actor_kind?`；`agent_id/credential_id?`；`channel`；`event_type=content_read/community_read/discussion_read/browse`；`target_type/id?`；`result_count?`；`request_id`；受控 `properties jsonb`；`expires_at` | `actor_id,occurred_at`；`owner_id,occurred_at`；`event_type,occurred_at`；`expires_at`；普通活动可有界异步写入，原始行 30 天后删除 |
+| `agent_search_activity_events` | `id`；`request_id`；`agent_id/actor_id/credential_id`；32-byte `query_hmac`；`query_key_version`；`surface`；`search_mode`；可选 `community_id/symbol_id/topic_id`；`outcome=started/succeeded/failed`；有界 `result_count/latency_ms/fallback_reason_code`；数据库拥有 `occurred_at/finalized_at/expires_at` | `UNIQUE(actor_id,request_id)`；`actor_id,occurred_at DESC,id`；`expires_at,id`；`expires_at=occurred_at+30d`；表中无原始 query、正文、snippet、结果 ID、header、IP 或自由 JSON |
 | `outbox_aggregate_heads` | `aggregate_type/id`；`last_sequence bigint`；`created_at/updated_at` | 复合主键；producer trigger 在 transaction advisory lock 内要求首序列为 1、后续严格 `+1`；事件压缩后仍保留 |
 | `outbox_events` | `id`；`aggregate_type/id/sequence`；`event_type`；`event_version`；`payload jsonb`；`occurred_at`；`available_at`；`max_attempts`；`created_at` | `available_at,occurred_at,id`；`UNIQUE(aggregate_type,aggregate_id,aggregate_sequence)`；事件本身不可变，不保存全局 processed 状态 |
 | `outbox_consumers` | 版本化 `consumer_name`；规范化 `event_types text[]?`（null 表示全部）；包含式 `replay_from`；`created_at` | 主键；订阅集合与基于 `outbox_events.created_at` 的起始水位首次注册后不可变；改变任一值必须使用新 consumer 版本 |
 | `outbox_consumer_deliveries` | `consumer_name`；`event_id`；`attempts/max_attempts`；`available_at`；`lease_owner/expires_at`；`last_error`；`delivered_at`；`dead_lettered_at/reason`；`created_at/updated_at` | 复合主键；每个消费者独立 claim、重试和终态；ready 与 expired lease 部分索引；同一消费者的 dead letter 默认阻塞该 aggregate 后续 sequence |
 | `outbox_consumer_receipts` | `consumer_name`；`event_id`；`processed_at`；`result jsonb` | 复合主键，保证消费者成功确认幂等；可在 Outbox 安全压缩后按保留策略继续存在 |
 
-领域写入、对应 ActionLog 和 OutboxEvent 在同一 PostgreSQL 事务中提交。敏感读取、治理和安全拒绝直接追加 ActionLog；普通成功读取、browse 和 search 只异步批量写入 ActivityEvent，不参与读取事务，也不进入 Outbox。ActivityEvent 允许在进程故障时少量丢失，不能作为权限、计费或治理事实；30 天后先生成允许的聚合再删除原始分区。Outbox 可重放，Event payload 包含 Schema 版本而非易变的完整数据库快照。`aggregate_sequence` 在 JavaScript 合约中使用十进制字符串，排序时转为 `BigInt`，避免超过 `2^53-1` 后丢失精度。
+领域写入、对应 ActionLog 和 OutboxEvent 在同一 PostgreSQL 事务中提交。敏感读取、治理和安全拒绝直接追加 ActionLog；普通成功读取和 browse 可异步批量写入 ActivityEvent，这类事件允许在进程故障时少量丢失。认证 Agent Search 在执行前以 Actor 级 advisory lock 原子计数并插入专用 `agent_search_activity_events.outcome=started` reservation；这条同步记录是 10／20 rpm 限额边界，失败、超时和 hybrid 降级也占用额度。检索后的 `started→succeeded|failed` finalization 是 best effort；匿名 public Search 不写该表。两类 ActivityEvent 都不是权限、计费或治理事实，30 天后只保留允许的聚合指标。Outbox 可重放，Event payload 包含 Schema 版本而非易变的完整数据库快照。`aggregate_sequence` 在 JavaScript 合约中使用十进制字符串，排序时转为 `BigInt`，避免超过 `2^53-1` 后丢失精度。
 
 `principal_scope_key` 由认证边界在服务端生成，客户端不能传入：
 
@@ -140,11 +141,14 @@ AbuseSignal 是证据，不是最终裁决。治理状态改变必须通过审�
 
 ## 12.8 搜索与分析
 
-| 表 | 关键字段与约束 | 关键索引与关系 |
+| 存储／投影 | 关键字段与约束 | 关键索引与关系 |
 | --- | --- | --- |
-| `search_documents` | `content_id` 主键；`revision_id`；`search_vector tsvector`；`embedding vector`；`language`；`indexed_at`；`index_version` | GIN `search_vector`；pgvector ANN 索引；`indexed_at` |
+| `content_revisions.search_document` | 每个不可变 Revision 上的 STORED generated `tsvector`；标题权重 A，`body_plain_text` 权重 B，固定 PostgreSQL `simple` 配置 | GIN `content_revisions_search_document_idx`；新 Revision 与 FTS 在同一写入事务内产生，不需要 Worker 双写 |
+| `content_embedding_chunks` | `id`；`revision_id`；固定 `embedding_model=amazon.titan-embed-text-v2:0:512`；`chunk_index`；字符 offset；32-byte 输入 hash；`token_count`；`vector(512)`；数据库拥有 `search_index_created_xid/created_at` | `UNIQUE(revision_id,embedding_model,chunk_index)`；Revision 查询索引；cosine HNSW；行不可 UPDATE／DELETE，不重复保存 chunk 正文 |
+| `content_embedding_jobs` | `revision_id/embedding_model`；`status=ready/leased/completed/dead_lettered`；`priority`；`attempts/max_attempts`；`available_at`；受 lease token digest 防护的租约字段；受控 `last_error_code` 与终态时间 | `UNIQUE(revision_id,embedding_model)`；priority/available claim 部分索引；过期 lease 索引；每个 Revision 在提交事务内触发幂等 enqueue |
+| `content_search_candidate_snapshots` | `snapshot_id=css_*`；32-byte `binding_hmac`；最多 500 项且最大 512 KiB 的规范 candidate JSON；数据库拥有 `created_at`；`expires_at` 最长一小时 | expiry 索引；JSON 只允许 Content／Revision ID、发布时间、score 和 matched-field，不得包含 query、snippet、来源或账户数据；Runtime 只通过受限函数写入 |
 | `content_counters` | `content_id` 主键；三种 reaction 总数与按 Actor kind 分解、`reply_count`、`inbound_reference_count`、`unique_participant_count`、`last_activity_at`；`updated_at` | `last_activity_at`；计数可由 Reaction／ContentRelation／Actor 等事实表重建 |
 | `analytics_events` | `id`；`event_name`；主体的内部假名 ID；`community_id/content_id`；`properties jsonb`；`occurred_at` | `event_name,occurred_at`；按月分区预留 |
 | `daily_rollups` | `date`；`metric`；`dimension_type/id`；`value` | 复合主键；仅保存聚合指标 |
 
-搜索只索引当前可见 Revision；隐藏或删除事件优先从结果中撤下。API 查询仍在事实表执行最终可见性过滤，避免异步索引泄露内容。分析数据不作为权限事实来源。
+索引记录以 Revision 为不可变单位，而不是覆盖式 `search_documents` 副本。首屏候选必须连接 `content_items.current_revision_id`，并在候选召回与最终 hydration 都执行当前事实表可见性过滤；因此 hidden／deleted 内容即使历史 FTS 或 embedding 仍存在也不可见。续页只读首屏已排序的 candidate snapshot，不再运行 FTS／HNSW／Bedrock。分析数据不作为权限事实来源；法务 erasure 是与 Search 可见性分开的受控生命周期。

@@ -17,6 +17,7 @@ readonly content_reactions_checksum="da6750692823bb082c1c417d266fd9e1c3585356fd5
 readonly agent_policy_control_checksum="5311bfde7d77bd2ddf6d7207675284a3259db1722b20e21cecb97f69b9fb6826"
 readonly follow_graph_checksum="3505e7a190e266d792c4f0e7b03997a6042687f1fe12550fa80d1250fa2cf83c"
 readonly content_revision_write_checksum="c0e3b1f605651e30a619caede945eb978840a725dc0585bb1e05abc9d88d484c"
+readonly content_search_v1_checksum="ae8c3d68863d78b8d131129a4f3cedd4f6026e733530eaf8f6a563b7fdfeeaf2"
 readonly suffix="${GITHUB_RUN_ID:-local}_${RANDOM}_$$"
 readonly empty_database="alphanet_migration_empty_${suffix}"
 readonly owner_database="alphanet_migration_owner_${suffix}"
@@ -273,11 +274,16 @@ DECLARE
   legacy_agent_id uuid;
   legacy_audit_id uuid := gen_random_uuid();
   legacy_credential_id uuid;
+  legacy_community_id uuid := gen_random_uuid();
+  legacy_content_id uuid := gen_random_uuid();
+  legacy_content_id_2 uuid := gen_random_uuid();
   legacy_idempotency_id uuid := gen_random_uuid();
   legacy_outbox_id uuid := gen_random_uuid();
   legacy_owner_id uuid;
   legacy_policy_id uuid;
   legacy_policy_version bigint;
+  legacy_revision_id uuid := gen_random_uuid();
+  legacy_revision_id_2 uuid := gen_random_uuid();
   legacy_request_digest bytea := digest(
     'forward-migration-pending-action',
     'sha256'
@@ -305,6 +311,128 @@ BEGIN
    AND policy.is_active
   WHERE actor.handle = 'forward.migration-agent'
     AND credential.name = 'CI legacy static key';
+
+  -- Prove 000013 creates a low-priority embedding backfill job for a real
+  -- Revision that existed before Search v1, rather than only validating an
+  -- empty-table upgrade.
+  INSERT INTO platform.communities (
+    id,
+    slug,
+    name,
+    description,
+    status,
+    kind
+  )
+  VALUES (
+    legacy_community_id,
+    'forward-search-' || left(replace(legacy_community_id::text, '-', ''), 20),
+    'Forward Search Fixture',
+    'Content created before Search v1 for embedding backfill verification.',
+    'active',
+    'general'
+  );
+
+  INSERT INTO platform.content_items (
+    id,
+    kind,
+    author_actor_id,
+    primary_community_id,
+    root_id,
+    parent_id,
+    depth
+  )
+  VALUES (
+    legacy_content_id,
+    'post',
+    legacy_actor_id,
+    legacy_community_id,
+    legacy_content_id,
+    NULL,
+    0
+  );
+
+  INSERT INTO platform.content_revisions (
+    id,
+    content_id,
+    revision_number,
+    title,
+    body_markdown,
+    body_plain_text,
+    created_by_actor_id,
+    source_version,
+    content_hash,
+    public_node_serialized_bytes
+  )
+  VALUES (
+    legacy_revision_id,
+    legacy_content_id,
+    1,
+    'Forward Search Research',
+    'Pre-Search Revision for deterministic historical backfill.',
+    'Pre-Search Revision for deterministic historical backfill.',
+    legacy_actor_id,
+    1,
+    digest(
+      'Pre-Search Revision for deterministic historical backfill.',
+      'sha256'
+    ),
+    512
+  );
+
+  UPDATE platform.content_items
+  SET current_revision_id = legacy_revision_id
+  WHERE id = legacy_content_id;
+
+  INSERT INTO platform.content_items (
+    id,
+    kind,
+    author_actor_id,
+    primary_community_id,
+    root_id,
+    parent_id,
+    depth
+  )
+  VALUES (
+    legacy_content_id_2,
+    'post',
+    legacy_actor_id,
+    legacy_community_id,
+    legacy_content_id_2,
+    NULL,
+    0
+  );
+
+  INSERT INTO platform.content_revisions (
+    id,
+    content_id,
+    revision_number,
+    title,
+    body_markdown,
+    body_plain_text,
+    created_by_actor_id,
+    source_version,
+    content_hash,
+    public_node_serialized_bytes
+  )
+  VALUES (
+    legacy_revision_id_2,
+    legacy_content_id_2,
+    1,
+    'Second Forward Search Research',
+    'Second pre-Search Revision verifies multirow backfill timestamps.',
+    'Second pre-Search Revision verifies multirow backfill timestamps.',
+    legacy_actor_id,
+    1,
+    digest(
+      'Second pre-Search Revision verifies multirow backfill timestamps.',
+      'sha256'
+    ),
+    512
+  );
+
+  UPDATE platform.content_items
+  SET current_revision_id = legacy_revision_id_2
+  WHERE id = legacy_content_id_2;
 
   INSERT INTO platform.idempotency_records (
     id,
@@ -618,6 +746,138 @@ COMMIT;
 SQL
 run_migrations "${published_agent_database}" "${full_migrations_dir}"
 PGDATABASE="${published_agent_database}" psql -X --set=ON_ERROR_STOP=1 <<'SQL'
+BEGIN;
+DO $$
+DECLARE
+  claimed record;
+  post_search_actor_id uuid;
+  post_search_content_id uuid;
+  post_search_revision_id uuid := gen_random_uuid();
+  redriven boolean;
+  retry_status text;
+  persisted record;
+  token_digest bytea := public.digest(
+    'forward-search-redrive-token',
+    'sha256'
+  );
+BEGIN
+  SELECT *
+  INTO claimed
+  FROM system.claim_content_embedding_jobs(
+    'forward-search-redrive',
+    token_digest,
+    1,
+    60
+  );
+
+  IF claimed.job_id IS NULL THEN
+    RAISE EXCEPTION 'forward Search redrive fixture could not claim a job';
+  END IF;
+
+  SELECT system.retry_content_embedding_job(
+    claimed.job_id,
+    'forward-search-redrive',
+    token_digest,
+    'NONRETRYABLE_FORWARD_TEST',
+    30
+  )
+  INTO retry_status;
+  IF retry_status IS DISTINCT FROM 'dead_lettered' THEN
+    RAISE EXCEPTION
+      'forward Search redrive fixture did not enter dead letter';
+  END IF;
+
+  SELECT system.redrive_content_embedding_job(claimed.job_id)
+  INTO redriven;
+  IF redriven IS DISTINCT FROM true THEN
+    RAISE EXCEPTION 'dead-lettered Search job was not redriven';
+  END IF;
+
+  SELECT
+    job.status,
+    job.attempts,
+    job.available_at,
+    job.created_at,
+    job.lease_owner,
+    job.lease_token_digest,
+    job.lease_expires_at,
+    job.last_error_code,
+    job.completed_at,
+    job.failed_at
+  INTO STRICT persisted
+  FROM system.content_embedding_jobs AS job
+  WHERE job.id = claimed.job_id;
+
+  IF persisted.status <> 'ready'
+    OR persisted.attempts <> 0
+    OR persisted.available_at < persisted.created_at
+    OR persisted.lease_owner IS NOT NULL
+    OR persisted.lease_token_digest IS NOT NULL
+    OR persisted.lease_expires_at IS NOT NULL
+    OR persisted.last_error_code IS NOT NULL
+    OR persisted.completed_at IS NOT NULL
+    OR persisted.failed_at IS NOT NULL THEN
+    RAISE EXCEPTION 'redriven Search job retained terminal state';
+  END IF;
+
+  SELECT system.redrive_content_embedding_job(claimed.job_id)
+  INTO redriven;
+  IF redriven IS DISTINCT FROM false THEN
+    RAISE EXCEPTION 'Search job redrive was not idempotent';
+  END IF;
+
+  SELECT content.id, content.author_actor_id
+  INTO STRICT post_search_content_id, post_search_actor_id
+  FROM platform.content_items AS content
+  JOIN platform.content_revisions AS revision
+    ON revision.id = content.current_revision_id
+  WHERE revision.title = 'Forward Search Research';
+
+  INSERT INTO platform.content_revisions (
+    id,
+    content_id,
+    revision_number,
+    title,
+    body_markdown,
+    body_plain_text,
+    created_by_actor_id,
+    source_version,
+    content_hash,
+    public_node_serialized_bytes
+  )
+  VALUES (
+    post_search_revision_id,
+    post_search_content_id,
+    2,
+    'Post-Search Trigger Research',
+    'A post-migration Revision must synchronously enqueue embedding work.',
+    'A post-migration Revision must synchronously enqueue embedding work.',
+    post_search_actor_id,
+    2,
+    digest(
+      'A post-migration Revision must synchronously enqueue embedding work.',
+      'sha256'
+    ),
+    512
+  );
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM system.content_embedding_jobs AS job
+    WHERE job.revision_id = post_search_revision_id
+      AND job.embedding_model = 'amazon.titan-embed-text-v2:0:512'
+      AND job.status = 'ready'
+      AND job.priority = 100
+      AND job.attempts = 0
+  ) THEN
+    RAISE EXCEPTION
+      'post-migration Revision was not synchronously enqueued for Search';
+  END IF;
+END;
+$$;
+ROLLBACK;
+SQL
+PGDATABASE="${published_agent_database}" psql -X --set=ON_ERROR_STOP=1 <<'SQL'
 DO $$
 DECLARE
   legacy_actor_id uuid;
@@ -760,9 +1020,10 @@ for database in \
       --set=content_reactions_checksum="${content_reactions_checksum}" \
       --set=agent_policy_control_checksum="${agent_policy_control_checksum}" \
       --set=follow_graph_checksum="${follow_graph_checksum}" \
-      --set=content_revision_write_checksum="${content_revision_write_checksum}" <<'SQL'
+      --set=content_revision_write_checksum="${content_revision_write_checksum}" \
+      --set=content_search_v1_checksum="${content_search_v1_checksum}" <<'SQL'
 SELECT
-  (SELECT count(*) FROM system.schema_migrations) = 12
+  (SELECT count(*) FROM system.schema_migrations) = 13
   AND EXISTS (
     SELECT 1
     FROM system.schema_migrations
@@ -815,6 +1076,215 @@ SELECT
       AND name = 'content_revision_write'
       AND checksum = :'content_revision_write_checksum'
   )
+  AND EXISTS (
+    SELECT 1
+    FROM system.schema_migrations
+    WHERE version = '000013'
+      AND name = 'content_search_v1'
+      AND checksum = :'content_search_v1_checksum'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'platform'
+      AND table_name = 'content_revisions'
+      AND column_name = 'search_document'
+      AND udt_name = 'tsvector'
+      AND is_generated = 'ALWAYS'
+  )
+  AND to_regclass('platform.content_revisions_search_document_idx')
+    IS NOT NULL
+  AND to_regclass('platform.content_embedding_chunks') IS NOT NULL
+  AND to_regclass('system.content_embedding_jobs') IS NOT NULL
+  AND to_regclass('system.content_search_candidate_snapshots') IS NOT NULL
+  AND to_regclass('platform.agent_search_activity_events') IS NOT NULL
+  AND to_regclass('platform.content_embedding_chunks_cosine_hnsw_idx')
+    IS NOT NULL
+  AND to_regclass('platform.content_items_current_revision_idx') IS NOT NULL
+  AND to_regclass('system.content_embedding_jobs_revision_incomplete_idx')
+    IS NOT NULL
+  AND to_regclass('system.content_search_candidate_snapshots_expiry_idx')
+    IS NOT NULL
+  AND to_regclass('platform.agent_search_activity_events_started_idx') IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+    FROM pg_attribute AS attribute
+    WHERE attribute.attrelid =
+        'platform.content_embedding_chunks'::regclass
+      AND attribute.attname = 'embedding'
+      AND NOT attribute.attisdropped
+      AND format_type(attribute.atttypid, attribute.atttypmod) = 'vector(512)'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'platform'
+      AND table_name = 'content_embedding_chunks'
+      AND column_name = 'search_index_created_xid'
+      AND udt_name = 'xid8'
+      AND is_nullable = 'NO'
+      AND column_default = 'pg_current_xact_id()'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM system.content_read_visibility_epochs
+    WHERE epoch_name = 'search_index'
+      AND epoch > 0
+  )
+  AND (
+    SELECT count(*) = 4
+    FROM pg_trigger AS trigger_record
+    WHERE NOT trigger_record.tgisinternal
+      AND trigger_record.tgenabled IN ('O', 'A')
+      AND (
+        (trigger_record.tgrelid =
+            'platform.content_embedding_chunks'::regclass
+          AND trigger_record.tgname =
+            'content_embedding_chunks_prevent_mutation')
+        OR (trigger_record.tgrelid =
+              'system.content_embedding_jobs'::regclass
+          AND trigger_record.tgname =
+            'content_embedding_jobs_prepare_write')
+        OR (trigger_record.tgrelid =
+              'platform.agent_search_activity_events'::regclass
+          AND trigger_record.tgname =
+            'agent_search_activity_events_prepare_write')
+        OR (trigger_record.tgrelid =
+              'platform.content_revisions'::regclass
+          AND trigger_record.tgname =
+            'content_revisions_enqueue_embedding_job'
+          AND trigger_record.tgfoid = to_regprocedure(
+            'system.enqueue_content_embedding_job_from_revision()'
+          ))
+      )
+  )
+  AND to_regprocedure(
+    'platform.advance_search_index_on_current_revision_change()'
+  ) IS NULL
+  AND to_regprocedure(
+    'platform.advance_search_index_on_embedding_chunk_insert()'
+  ) IS NULL
+  AND EXISTS (
+    SELECT 1
+    FROM pg_proc AS routine
+    JOIN pg_namespace AS namespace
+      ON namespace.oid = routine.pronamespace
+    WHERE namespace.nspname = 'system'
+      AND routine.proname = 'redrive_content_embedding_job'
+      AND pg_get_function_identity_arguments(routine.oid) =
+        'candidate_job_id uuid'
+      AND routine.prosecdef
+      AND 'search_path=pg_catalog' = ANY (routine.proconfig)
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM pg_proc AS routine
+    JOIN pg_namespace AS namespace
+      ON namespace.oid = routine.pronamespace
+    WHERE namespace.nspname = 'system'
+      AND routine.proname = 'store_content_search_candidate_snapshot'
+      AND pg_get_function_identity_arguments(routine.oid) =
+        'candidate_snapshot_id text, candidate_binding_hmac bytea, candidate_candidates jsonb, candidate_expires_at timestamp with time zone'
+      AND routine.prosecdef
+      AND 'search_path=pg_catalog' = ANY (routine.proconfig)
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM pg_proc AS routine
+    JOIN pg_namespace AS namespace
+      ON namespace.oid = routine.pronamespace
+    WHERE namespace.nspname = 'system'
+      AND routine.proname = 'purge_expired_content_search_candidate_snapshots'
+      AND pg_get_function_identity_arguments(routine.oid) =
+        'candidate_batch_size integer'
+      AND routine.prosecdef
+      AND 'search_path=pg_catalog' = ANY (routine.proconfig)
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM pg_proc AS routine
+    JOIN pg_namespace AS namespace
+      ON namespace.oid = routine.pronamespace
+    CROSS JOIN LATERAL aclexplode(
+      coalesce(routine.proacl, acldefault('f', routine.proowner))
+    ) AS privilege
+    WHERE namespace.nspname = 'system'
+      AND routine.proname = 'redrive_content_embedding_job'
+      AND pg_get_function_identity_arguments(routine.oid) =
+        'candidate_job_id uuid'
+      AND privilege.grantee = 0
+      AND privilege.privilege_type = 'EXECUTE'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM pg_proc AS routine
+    JOIN pg_namespace AS namespace
+      ON namespace.oid = routine.pronamespace
+    WHERE namespace.nspname = 'system'
+      AND routine.proname = 'enqueue_content_embedding_job_from_revision'
+      AND pg_get_function_identity_arguments(routine.oid) = ''
+      AND routine.prosecdef
+      AND routine.prorettype = 'pg_catalog.trigger'::regtype
+      AND 'search_path=pg_catalog' = ANY (routine.proconfig)
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM pg_proc AS routine
+    JOIN pg_namespace AS namespace
+      ON namespace.oid = routine.pronamespace
+    CROSS JOIN LATERAL aclexplode(
+      coalesce(routine.proacl, acldefault('f', routine.proowner))
+    ) AS privilege
+    WHERE namespace.nspname = 'system'
+      AND routine.proname = 'enqueue_content_embedding_job_from_revision'
+      AND pg_get_function_identity_arguments(routine.oid) = ''
+      AND privilege.grantee = 0
+      AND privilege.privilege_type = 'EXECUTE'
+  )
+  AND (
+    SELECT count(*) = 9
+    FROM pg_constraint AS constraint_record
+    WHERE constraint_record.convalidated
+      AND constraint_record.conname IN (
+        'content_embedding_chunks_revision_model_chunk_unique',
+        'content_embedding_jobs_revision_model_unique',
+        'content_search_candidate_snapshots_id',
+        'content_search_candidate_snapshots_binding',
+        'content_search_candidate_snapshots_candidates',
+        'content_search_candidate_snapshots_retention',
+        'agent_search_activity_events_actor_request_unique',
+        'agent_search_activity_events_retention',
+        'agent_search_activity_events_state_shape'
+      )
+  )
+  AND (
+    SELECT count(*) = 19
+    FROM information_schema.columns
+    WHERE table_schema = 'platform'
+      AND table_name = 'agent_search_activity_events'
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'platform'
+      AND table_name = 'agent_search_activity_events'
+      AND column_name IN (
+        'query',
+        'query_text',
+        'normalized_query',
+        'body',
+        'body_markdown',
+        'body_plain_text',
+        'prompt',
+        'results',
+        'result_ids'
+      )
+  )
+  AND (
+    SELECT count(*)
+    FROM system.content_embedding_jobs
+    WHERE embedding_model = 'amazon.titan-embed-text-v2:0:512'
+  ) = (SELECT count(*) FROM platform.content_revisions)
   AND EXISTS (
     SELECT 1
     FROM pg_trigger AS trigger_record
@@ -1181,6 +1651,35 @@ SELECT
       )
       AND EXISTS (
         SELECT 1
+        FROM platform.content_items AS content
+        JOIN platform.content_revisions AS revision
+          ON revision.id = content.current_revision_id
+         AND revision.content_id = content.id
+        JOIN system.content_embedding_jobs AS job
+          ON job.revision_id = revision.id
+         AND job.embedding_model = 'amazon.titan-embed-text-v2:0:512'
+        WHERE revision.title = 'Forward Search Research'
+          AND revision.search_document @@
+            websearch_to_tsquery('simple', 'historical backfill')
+          AND job.status = 'ready'
+          AND job.priority = -100
+          AND job.attempts = 0
+      )
+      AND (
+        SELECT count(*) = 2
+        FROM system.content_embedding_jobs AS job
+        JOIN platform.content_revisions AS revision
+          ON revision.id = job.revision_id
+        WHERE revision.title IN (
+            'Forward Search Research',
+            'Second Forward Search Research'
+          )
+          AND job.priority = -100
+          AND job.available_at = job.created_at
+          AND job.updated_at = job.created_at
+      )
+      AND EXISTS (
+        SELECT 1
         FROM platform.idempotency_records AS idempotency
         JOIN platform.pending_actions AS action
           ON action.id = idempotency.pending_action_id
@@ -1220,4 +1719,4 @@ SQL
   fi
 done
 
-echo "Empty, Owner-schema, and published Agent-v1 paths all reach the Content Revision write schema."
+echo "Empty, Owner-schema, and published Agent-v1 paths all reach the Content Search v1 schema."

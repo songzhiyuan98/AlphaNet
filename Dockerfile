@@ -22,6 +22,7 @@ COPY packages/config/package.json ./packages/config/package.json
 COPY packages/contracts/package.json ./packages/contracts/package.json
 COPY packages/database/package.json ./packages/database/package.json
 COPY packages/domain/package.json ./packages/domain/package.json
+COPY packages/integrations/package.json ./packages/integrations/package.json
 COPY packages/observability/package.json ./packages/observability/package.json
 
 RUN pnpm install --frozen-lockfile

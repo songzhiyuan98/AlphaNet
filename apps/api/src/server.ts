@@ -15,17 +15,21 @@ import {
 } from "@alphanet/database";
 import {
   PostgresAgentConnectionService,
+  BedrockTitanV2EmbeddingProvider,
   PostgresCommunityDirectoryService,
   PostgresContentReadService,
+  PostgresContentSearchService,
   PostgresFollowService,
   PostgresOwnerPendingActionService,
   PostgresPendingActionStatusService,
   PostgresReactionWriteService,
   PostgresResearchWriteService,
 } from "@alphanet/domain";
+import { AwsBedrockInvokeModelTransport } from "@alphanet/integrations";
 import { createLogger } from "@alphanet/observability";
 
 import { createApiApp } from "./app.js";
+import { createSearchIndexContractDependency } from "./search-readiness.js";
 
 async function start(): Promise<void> {
   const environment = loadApiEnvironment();
@@ -37,6 +41,35 @@ async function start(): Promise<void> {
   const postgres = createPostgresDependency(environment.DATABASE_URL);
   const redis = createRedisDependency(environment.REDIS_URL, { critical: true });
   const dependencies: HealthDependency[] = [postgres, redis];
+  dependencies.push(
+    createSearchIndexContractDependency(
+      postgres.sql,
+      `${environment.SEARCH_EMBEDDING_MODEL_ID}:${environment.SEARCH_EMBEDDING_DIMENSIONS}`,
+    ),
+  );
+  const bedrockTransport =
+    environment.SEARCH_EMBEDDING_PROVIDER === "bedrock"
+      ? new AwsBedrockInvokeModelTransport()
+      : null;
+  if (bedrockTransport) {
+    dependencies.push({
+      critical: false,
+      name: "bedrock-runtime-client",
+      check: () => Promise.resolve(),
+      close: () => {
+        bedrockTransport.destroy();
+        return Promise.resolve();
+      },
+    });
+  }
+  const searchEmbeddingProvider = bedrockTransport
+    ? new BedrockTitanV2EmbeddingProvider(bedrockTransport, {
+        dimensions: environment.SEARCH_EMBEDDING_DIMENSIONS,
+        modelId: environment.SEARCH_EMBEDDING_MODEL_ID,
+        normalize: true,
+        timeoutMilliseconds: environment.SEARCH_EMBEDDING_TIMEOUT_MS,
+      })
+    : null;
   const agentConnectionService = new PostgresAgentConnectionService(postgres.sql, {
     activeCredentialsPerAgent: environment.AGENT_CREDENTIAL_ACTIVE_PER_AGENT,
     activeCredentialsPerOwner: environment.AGENT_CREDENTIAL_ACTIVE_PER_OWNER,
@@ -62,6 +95,23 @@ async function start(): Promise<void> {
     )
       .update("alphanet.content-read.cursor.v1", "utf8")
       .digest(),
+  });
+  const contentSearchService = new PostgresContentSearchService(postgres.sql, {
+    activityDigestKey: createHmac(
+      "sha256",
+      Buffer.from(environment.COMMUNITY_CURSOR_SIGNING_KEY, "utf8"),
+    )
+      .update("alphanet.content-search.activity-digest.v1", "utf8")
+      .digest(),
+    cursorSigningKey: createHmac(
+      "sha256",
+      Buffer.from(environment.COMMUNITY_CURSOR_SIGNING_KEY, "utf8"),
+    )
+      .update("alphanet.content-search.cursor.v1", "utf8")
+      .digest(),
+    embeddingModel: `${environment.SEARCH_EMBEDDING_MODEL_ID}:${environment.SEARCH_EMBEDDING_DIMENSIONS}`,
+    embeddingProvider: searchEmbeddingProvider,
+    queryTimeoutMilliseconds: Math.min(environment.SEARCH_EMBEDDING_TIMEOUT_MS, 10_000),
   });
   const followService = new PostgresFollowService(postgres.sql, {
     cursorSigningKey: createHmac(
@@ -160,6 +210,7 @@ async function start(): Promise<void> {
       authRuntime,
       communityDirectoryService,
       contentReadService,
+      contentSearchService,
       followService,
       dependencies,
       environment: environment.NODE_ENV,

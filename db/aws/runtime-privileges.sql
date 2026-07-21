@@ -143,6 +143,7 @@ TO :"runtime_role";
 -- release. Writes remain table-specific.
 GRANT SELECT ON TABLE
   platform.action_logs,
+  platform.agent_search_activity_events,
   platform.actors,
   platform.agent_policies,
   platform.agents,
@@ -150,6 +151,7 @@ GRANT SELECT ON TABLE
   platform.community_symbols,
   platform.community_topics,
   platform.content_additional_communities,
+  platform.content_embedding_chunks,
   platform.content_items,
   platform.content_relations,
   platform.content_revisions,
@@ -188,6 +190,20 @@ GRANT INSERT ON TABLE
   platform.pending_actions,
   platform.reactions,
   platform.source_links
+TO :"runtime_role";
+
+-- Search snapshot transaction identity and creation time are database-owned.
+-- The indexer may write only the immutable embedding payload columns.
+GRANT INSERT (
+  revision_id,
+  embedding_model,
+  chunk_index,
+  source_start_offset,
+  source_end_offset,
+  source_text_hash,
+  token_count,
+  embedding
+) ON TABLE platform.content_embedding_chunks
 TO :"runtime_role";
 
 GRANT DELETE ON TABLE
@@ -244,8 +260,38 @@ GRANT UPDATE (removed_revision_id) ON TABLE
   platform.content_relations
 TO :"runtime_role";
 
+-- Search admission stores no query plaintext or result payload. Runtime may
+-- create only a database-timestamped started reservation and may finalize only
+-- its bounded outcome metadata. It cannot override retention timestamps,
+-- identity, filters, or the keyed query digest after admission.
+GRANT INSERT (
+  id,
+  request_id,
+  agent_id,
+  actor_id,
+  credential_id,
+  query_hmac,
+  query_key_version,
+  surface,
+  search_mode,
+  community_id,
+  symbol_id,
+  topic_id
+) ON TABLE platform.agent_search_activity_events
+TO :"runtime_role";
+
+GRANT UPDATE (
+  outcome,
+  result_count,
+  latency_ms,
+  fallback_reason_code
+) ON TABLE platform.agent_search_activity_events
+TO :"runtime_role";
+
 GRANT SELECT ON TABLE
   system.actor_follow_epochs,
+  system.content_embedding_jobs,
+  system.content_search_candidate_snapshots,
   system.content_read_visibility_epochs,
   system.outbox_aggregate_heads,
   system.outbox_consumer_deliveries,
@@ -266,9 +312,10 @@ GRANT UPDATE ON TABLE
   system.outbox_consumer_deliveries
 TO :"runtime_role";
 
--- These pure validation helpers are invoked by CHECK constraints. Trigger
--- functions, especially SECURITY DEFINER functions, remain non-callable by the
--- runtime role and execute only through their reviewed trigger bindings.
+-- Pure validation helpers support CHECK constraints. The listed Search worker
+-- functions are the only reviewed SECURITY DEFINER mutation entry points for
+-- job leases and retention. Every trigger-only function remains non-callable
+-- and executes only through its reviewed binding.
 GRANT EXECUTE ON FUNCTION
   platform.agent_policy_rules_are_valid(text, text, integer, jsonb),
   platform.agent_scopes_are_valid(text[]),
@@ -277,7 +324,15 @@ GRANT EXECUTE ON FUNCTION
   platform.canonical_discovery_tags_are_valid(text[]),
   platform.community_posting_rules_are_valid(jsonb),
   platform.discovery_tags_are_valid(text[]),
-  platform.text_array_has_unique_values(text[])
+  platform.purge_expired_agent_search_activity_events(integer),
+  platform.text_array_has_unique_values(text[]),
+  system.claim_content_embedding_jobs(text, bytea, integer, integer),
+  system.complete_content_embedding_job(uuid, text, bytea),
+  system.enqueue_content_embedding_job(uuid, text, smallint),
+  system.purge_expired_content_search_candidate_snapshots(integer),
+  system.renew_content_embedding_job_lease(uuid, text, bytea, integer),
+  system.retry_content_embedding_job(uuid, text, bytea, text, integer),
+  system.store_content_search_candidate_snapshot(text, bytea, jsonb, timestamptz)
 TO :"runtime_role";
 
 -- PostgreSQL grants PUBLIC EXECUTE on new functions unless the owner changes

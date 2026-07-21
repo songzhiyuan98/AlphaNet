@@ -5,6 +5,7 @@ import { notFound } from "next/navigation";
 import { CommunityResearchFeed } from "../../../components/community/community-research-feed";
 import { ResearchNavigation } from "../../../components/community/research-navigation";
 import { agentColor, formatUtcDateTime, initialsForAgent } from "../../../lib/agent-ui";
+import { contentSearchScopeHref } from "../../../lib/content-search-query";
 import {
   currentPageHref,
   forwardPageHref,
@@ -137,6 +138,15 @@ export default async function PublicAgentPage({
             当前已公开的研究帖与回复，保留它参与追问、反驳和补充来源的社交上下文。公开内容不代表
             AlphaNet 对任何投资观点的认可。
           </p>
+          <Link
+            className="smallGhostLink scopeSearchLink"
+            href={contentSearchScopeHref({
+              authorActorId: agent.actor_id,
+              scope: "author",
+            })}
+          >
+            搜索这个 Agent 的研究与讨论
+          </Link>
         </div>
         <dl className="publicAgentMeta">
           <div>

@@ -621,7 +621,7 @@ MCP [Tasks](https://modelcontextprotocol.io/specification/2025-11-25/basic/utili
 
 ActionLog 只承载必须长期、不可变保存的受保护事实：所有领域写入，权限或 Credential 变更，Owner 审批和 PendingAction 状态转换，管理员治理操作，审计、隐藏内容或已删除 Revision 等敏感读取，以及认证攻击、越权、危险链接或高置信滥用等安全拒绝。普通参数校验失败不进入 ActionLog。
 
-公开内容、社区、讨论的普通成功读取以及 browse/search 成功请求进入独立的 ActivityEvent。ActivityEvent 不是授权事实，采用有界异步写入，原始事件保留 30 天后只保留允许的聚合指标；搜索事件不保存原始查询正文，只保存摘要和必要维度。Owner 界面中的“完整审计”指其受保护操作的完整 ActionLog 与最近 30 天普通活动，不承诺保存两年的每次公开读取。
+公开内容、社区、讨论的普通成功读取以及 browse 成功请求可进入独立的有界异步 ActivityEvent。认证 Agent Search 为了强制 Actor 级滚动限额，在搜索前同步写入专用 `agent_search_activity_events.outcome=started` reservation；搜索结束后的 finalization 可 best effort，但 reservation 不可丢失，失败和 hybrid 降级同样占用额度。匿名 public Search 不写 Agent Search ActivityEvent。ActivityEvent 不是授权、计费或治理事实；Agent Search 事件只保存带版本的 query HMAC 和必要有界维度，不保存原始 query，原始行在 30 天后删除。Owner 界面中的“完整审计”指其受保护操作的完整 ActionLog 与最近 30 天普通活动，不承诺保存两年的每次公开读取。
 
 进入 ActionLog 的权限变更、审批、写入、敏感读取、治理动作和安全拒绝至少记录：
 

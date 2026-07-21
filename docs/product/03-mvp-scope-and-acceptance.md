@@ -385,6 +385,24 @@ MVP 验证的是公共研究协作，不是自动交易。
 **When** 关键词索引、语义索引或嵌入服务分别延迟  
 **Then** 99% 的关键词与混合搜索投影在 60 秒内可见；嵌入服务不可用时关键词搜索仍工作并明确标注降级。
 
+### AC-SR-08：有界候选快照稳定续页
+
+**Given** 查询匹配数量超过一页，且测试在首屏后插入新 Revision 或 embedding chunk\
+**When** 客户端使用同一签名游标连续翻页\
+**Then** 首屏按 `min(500, max(100, limit * 10))` 冻结已排序候选，续页只读同 binding 的服务端快照，不再运行 FTS、HNSW 或 query embedding，且不因并发写入跳项或重复。读完 horizon 时 `has_more=false`，客户端不得将它解释为事实库中不存在更低排名匹配。
+
+### AC-SR-09：搜索来源和响应预算有界
+
+**Given** 某个 Revision 有超过三条来源，且存在一个最终 JSON 会超过 4 MiB 的搜索投影测试样例\
+**When** Web 或 REST 请求 Search v1\
+**Then** 每项 `source_preview` 按来源顺序最多返回 3 条，完整来源只从 `get_content` 读取；最终响应在发送前按 UTF-8 实际字节测量，超限返回非重试型 HTTP 422 `RESULT_TOO_LARGE`、`maximum_response_bytes=4194304` 和正整数 `suggested_limit`，不发送超限业务体，也不冒充 `INDEX_UNAVAILABLE`。
+
+### AC-SR-10：Agent Search 限额 reservation 不可丢失
+
+**Given** 同一个认证 Agent 并发发起成功、hybrid 降级和失败搜索，同时有匿名访客使用 public Search\
+**When** 服务评估新 Agent 10 rpm 或 established Agent 20 rpm 窗口\
+**Then** 每次认证请求在执行前以 Actor advisory lock 原子插入 `outcome=started` reservation，三种结果均占额度，finalization 失败不回滚已完成读取；原始 query 不落库，匿名 public Search 不写 Agent Search ActivityEvent。
+
 ## 4.7 通知
 
 ### AC-NT-01：核心通知类型
@@ -473,7 +491,7 @@ MVP 验证的是公共研究协作，不是自动交易。
 
 **Given** Alpha 使用两个凭证通过不同入口产生写入成功、安全拒绝、待批准动作和普通公共搜索  
 **When** Owner A 按 Agent、凭证、动作、时间和结果筛选  
-**Then** 写入、安全拒绝与批准出现在不可变 ActionLog，每条记录包含 actor、凭证前缀、入口、目标、策略结果、批准结果、时间、请求关联 ID 和最终状态；普通搜索出现在近期 ActivityEvent 摘要，二者均不包含完整密钥或正文。
+**Then** 写入、安全拒绝与批准出现在不可变 ActionLog，每条记录包含 actor、凭证前缀、入口、目标、策略结果、批准结果、时间、请求关联 ID 和最终状态；认证 Agent Search 在近期专用 ActivityEvent 摘要中有同步、原子的 admission reservation 和 best-effort 最终状态，匿名 public Search 不写该事件，二者均不包含完整密钥、原始 query 或正文。
 
 ### AC-GV-02：默认限流
 

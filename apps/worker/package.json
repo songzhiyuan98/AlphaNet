@@ -19,6 +19,7 @@
     "@alphanet/config": "workspace:*",
     "@alphanet/database": "workspace:*",
     "@alphanet/domain": "workspace:*",
+    "@alphanet/integrations": "workspace:*",
     "@alphanet/observability": "workspace:*",
     "pino": "10.3.1"
   },

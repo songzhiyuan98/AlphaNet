@@ -4,6 +4,8 @@ import { isIP } from "node:net";
 
 const port = Number(process.env.PORT ?? 49_999);
 const host = process.env.HOSTNAME ?? "127.0.0.1";
+const webPort = Number(process.env.E2E_WEB_PORT ?? 3_000);
+const expectedBrowserOrigin = `http://127.0.0.1:${webPort}`;
 const ssrInternalRequestSecret = process.env.SSR_INTERNAL_REQUEST_SECRET?.trim();
 const expectedForwardedFor = "198.51.100.25";
 const signatureMaximumAgeMilliseconds = 60_000;
@@ -365,6 +367,71 @@ function browseResponse(items, nextCursor = null) {
   };
 }
 
+const contentSearchResponse = {
+  counts_as_of: now,
+  items: [
+    {
+      author: scoutAuthor,
+      community_ids: [ids.community],
+      content_id: ids.content,
+      content_safety: contentSafety,
+      content_version: 1,
+      context_title: postTitle,
+      created_at: now,
+      current_revision_id: ids.revision,
+      depth: 0,
+      kind: "post",
+      matched_fields: ["title", "body", "symbols"],
+      parent_content_id: null,
+      primary_community_id: ids.community,
+      reaction_counts: primaryReactions,
+      reaction_counts_by_actor_kind: primaryReactionsByActorKind,
+      references: [],
+      reply_count: 2,
+      root_content_id: ids.content,
+      score: 0.91,
+      snippet_markdown: primaryRevision.body_markdown,
+      snippet_plain_text: primaryRevision.body_plain_text,
+      snippet_source_revision_id: ids.revision,
+      source_preview: [
+        {
+          description: "仅用于验证来源链接展示的虚构 E2E 材料。",
+          title: "E2EFIX fictional E2E source",
+          url: "https://research.example.test/e2efix-fixture",
+        },
+      ],
+      symbols: ["E2EFIX"],
+      title: postTitle,
+      topics: ["semiconductors"],
+      updated_at: now,
+      viewer_state: viewerState,
+    },
+  ],
+  page: {
+    has_more: false,
+    limit: 20,
+    next_cursor: null,
+  },
+  ranking: {
+    as_of: now,
+    expires_at: expiresAt,
+    index_as_of: now,
+    ranking_version: "content-search-v1",
+    snapshot_id: "e2e-content-search-snapshot",
+  },
+  search_execution: {
+    degraded: false,
+    degradation_reason: null,
+    effective_mode: "hybrid",
+    requested_mode: "hybrid",
+  },
+  semantic_index_coverage: {
+    complete: true,
+    unindexed_candidate_count: 0,
+  },
+  ...envelope("req-e2e-content-search"),
+};
+
 const contentDetail = {
   content: {
     additional_community_ids: [],
@@ -559,10 +626,11 @@ const publicAgentProfile = {
   ...envelope("req-e2e-public-agent"),
 };
 
-function sendJson(response, status, body) {
+function sendJson(response, status, body, headers = {}) {
   response.writeHead(status, {
     "cache-control": "no-store",
     "content-type": "application/json; charset=utf-8",
+    ...headers,
   });
   response.end(JSON.stringify(body));
 }
@@ -703,6 +771,69 @@ const server = createServer(async (request, response) => {
         return rejectUnexpectedRequest(response, "health");
       }
       return sendJson(response, 200, healthResponse());
+    }
+
+    if (url.pathname === "/v1/public/content/search" && method === "OPTIONS") {
+      const origin = singleHeader(request.headers.origin);
+      const requestedHeaders = new Set(
+        (singleHeader(request.headers["access-control-request-headers"]) ?? "")
+          .split(",")
+          .map((header) => header.trim().toLowerCase())
+          .filter(Boolean),
+      );
+      if (
+        origin !== expectedBrowserOrigin ||
+        singleHeader(request.headers["access-control-request-method"]) !== "POST" ||
+        requestedHeaders.size !== 2 ||
+        !requestedHeaders.has("content-type") ||
+        !requestedHeaders.has("x-forwarded-for")
+      ) {
+        response.writeHead(403, { "cache-control": "no-store" });
+        return response.end();
+      }
+      response.writeHead(204, {
+        // Playwright's trusted-ingress fixture adds X-Forwarded-For to the
+        // browser context. Accept only that known test header plus Content-Type.
+        "access-control-allow-headers": "content-type,x-forwarded-for",
+        "access-control-allow-methods": "POST",
+        "access-control-allow-origin": expectedBrowserOrigin,
+        "cache-control": "no-store",
+        vary: "Origin",
+      });
+      return response.end();
+    }
+
+    // Public browser Search intentionally has no trusted SSR signature. It is
+    // accepted only from the isolated Web origin and must carry no Owner or
+    // Agent credentials; the real API applies its independent public-IP limit.
+    if (url.pathname === "/v1/public/content/search" && method === "POST") {
+      if (
+        !hasExactQuery(url, {}) ||
+        singleHeader(request.headers.origin) !== expectedBrowserOrigin ||
+        singleHeader(request.headers["content-type"]) !== "application/json" ||
+        singleHeader(request.headers["x-forwarded-for"]) !== expectedForwardedFor ||
+        singleHeader(request.headers.authorization) !== null ||
+        singleHeader(request.headers.cookie) !== null ||
+        singleHeader(request.headers.referer) !== null
+      ) {
+        return rejectUnexpectedRequest(response, "public Content Search");
+      }
+      const body = await readJson(request);
+      if (
+        !hasExactJsonObject(body, {
+          limit: 20,
+          query: "E2EFIX 利润率假设有哪些反方证据?",
+          scope: "global",
+          search_mode: "hybrid",
+          sort: "relevance",
+        })
+      ) {
+        return rejectUnexpectedRequest(response, "public Content Search");
+      }
+      return sendJson(response, 200, contentSearchResponse, {
+        "access-control-allow-origin": expectedBrowserOrigin,
+        vary: "Origin",
+      });
     }
 
     if (url.pathname.startsWith("/v1/") && !hasValidSsrSignature(request)) {

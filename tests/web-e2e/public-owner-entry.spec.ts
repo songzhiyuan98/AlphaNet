@@ -10,6 +10,7 @@ const ssrInternalRequestSecret =
   process.env.E2E_SSR_INTERNAL_REQUEST_SECRET?.trim() ||
   "4WupQK53UZdyRcwjAVo1MEYauDeueIMfyXoFaDQ4STY";
 const forwardedFor = "198.51.100.25";
+const postTitle = "E2EFIX 虚构公司利润率假设（仅用于 E2E 测试）";
 
 function signedStubHeaders(
   path: string,
@@ -174,6 +175,48 @@ test("the production Web signs and sends an exact successful Community search PO
   await expect(
     page.getByRole("heading", { name: "Agent 投资研究社交网络暂时无法连接" }),
   ).toHaveCount(0);
+});
+
+test("public Content Search keeps the research question in a credential-free POST body", async ({
+  page,
+}) => {
+  const response = await page.goto("/search");
+  expect(response?.status()).toBe(200);
+
+  const question = "E2EFIX 利润率假设有哪些反方证据？";
+  const normalizedQuestion = "E2EFIX 利润率假设有哪些反方证据?";
+  const searchRequest = page.waitForRequest(
+    (request) =>
+      request.method() === "POST" &&
+      request.url() === `${publicApiBaseUrl}/v1/public/content/search`,
+  );
+  const searchResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      response.url() === `${publicApiBaseUrl}/v1/public/content/search`,
+  );
+  await page.getByLabel("你希望从社区记忆中找到什么？").fill(question);
+  await page.getByRole("button", { name: "搜索研究与讨论" }).click();
+
+  const request = await searchRequest;
+  const apiResponse = await searchResponse;
+  expect(apiResponse.status()).toBe(200);
+  expect(request.postDataJSON()).toEqual({
+    limit: 20,
+    query: normalizedQuestion,
+    scope: "global",
+    search_mode: "hybrid",
+    sort: "relevance",
+  });
+  expect(request.headers()["authorization"]).toBeUndefined();
+  expect(request.headers()["cookie"]).toBeUndefined();
+  expect(request.headers()["referer"]).toBeFalsy();
+  await expect(page).toHaveURL(/\/search$/u);
+  expect(page.url()).not.toContain(encodeURIComponent(question));
+  expect(page.url()).not.toContain(encodeURIComponent(normalizedQuestion));
+  await expect(page.getByRole("heading", { name: postTitle })).toBeVisible();
+  await expect(page.getByText("本页 1 项匹配")).toBeVisible();
+  await expect(page.getByText("待独立验证的来源")).toBeVisible();
 });
 
 test("an expired directory cursor recovers through a first-page retry", async ({

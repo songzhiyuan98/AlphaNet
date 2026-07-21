@@ -3,6 +3,7 @@ locals {
 
   common_service_environment = [
     { name = "APP_VERSION", value = var.app_version },
+    { name = "AWS_REGION", value = var.aws_region },
     { name = "LOG_LEVEL", value = var.log_level },
     { name = "NODE_ENV", value = "production" },
     { name = "TZ", value = "UTC" },
@@ -32,6 +33,10 @@ locals {
     { name = "AGENT_CREDENTIAL_MAX_TTL_DAYS", value = "365" },
     { name = "PENDING_ACTION_ENCRYPTION_KEY_VERSION", value = "1" },
     { name = "PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS", value = "{}" },
+    { name = "SEARCH_EMBEDDING_PROVIDER", value = "bedrock" },
+    { name = "SEARCH_EMBEDDING_MODEL_ID", value = var.search_embedding_model_id },
+    { name = "SEARCH_EMBEDDING_DIMENSIONS", value = "512" },
+    { name = "SEARCH_EMBEDDING_TIMEOUT_MS", value = "5000" },
   ])
 
   web_environment = concat(local.common_service_environment, [
@@ -58,6 +63,12 @@ locals {
     { name = "RUN_ONCE", value = "false" },
     { name = "PENDING_ACTION_ENCRYPTION_KEY_VERSION", value = "1" },
     { name = "PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS", value = "{}" },
+    { name = "SEARCH_EMBEDDING_PROVIDER", value = "bedrock" },
+    { name = "SEARCH_EMBEDDING_MODEL_ID", value = var.search_embedding_model_id },
+    { name = "SEARCH_EMBEDDING_DIMENSIONS", value = "512" },
+    { name = "SEARCH_EMBEDDING_TIMEOUT_MS", value = "10000" },
+    { name = "SEARCH_INDEX_BATCH_SIZE", value = "10" },
+    { name = "SEARCH_INDEX_LEASE_SECONDS", value = "60" },
   ])
 
   task_environment = {
@@ -216,7 +227,7 @@ resource "aws_ecs_task_definition" "service" {
   cpu                      = tostring(var.task_cpu[each.key])
   memory                   = tostring(var.task_memory[each.key])
   execution_role_arn       = aws_iam_role.task_execution.arn
-  task_role_arn            = aws_iam_role.task.arn
+  task_role_arn            = contains(["api", "worker"], each.key) ? aws_iam_role.search_task.arn : aws_iam_role.task.arn
 
   runtime_platform {
     cpu_architecture        = var.cpu_architecture
@@ -280,7 +291,11 @@ resource "aws_ecs_task_definition" "service" {
     }
   }
 
-  depends_on = [aws_iam_role_policy.task_execution]
+  depends_on = [
+    aws_iam_role_policy.search_embedding,
+    aws_iam_role_policy.search_task_exec,
+    aws_iam_role_policy.task_execution,
+  ]
 }
 
 resource "aws_ecs_task_definition" "database_job" {

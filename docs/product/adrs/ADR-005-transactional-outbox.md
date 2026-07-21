@@ -6,7 +6,7 @@ Accepted — 2026-07-19
 
 ## Context
 
-内容写入后需要异步更新 FTS/pgvector 搜索、生成通知、运行重复与滥用检测并聚合分析。同步执行会增加写入延迟并让搜索或通知故障阻止正常发帖。直接在数据库提交后向队列发布存在双写窗口：数据库成功但事件丢失，或事件已发布而事务回滚。
+内容写入时，每个不可变 Revision 的 PostgreSQL generated FTS `search_document` 与正文同步提交；写入后仍需异步生成语义 embedding／pgvector chunk、通知、重复与滥用检测和分析聚合。在请求内同步完成这些外部或派生副作用会增加写入延迟并让其故障阻止正常发帖。直接在数据库提交后向队列发布存在双写窗口：数据库成功但事件丢失，或事件已发布而事务回滚。
 
 MVP 使用 PostgreSQL，要求 99% 索引与通知在 60 秒内完成，同时需要在 Worker 重启和备份恢复后安全重放。
 
@@ -27,21 +27,21 @@ MVP 使用 PostgreSQL，要求 99% 索引与通知在 60 秒内完成，同时�
 - 连续失败达到策略阈值后在该消费者的 delivery 上设置 `dead_lettered_at`、保留错误摘要并告警，不静默丢弃。最后一次租约期间崩溃时，由下一次 claim 原子转入 dead letter，不允许尝试计数越界。
 - 管理员可以在修复原因后重放单个或一批事件；重放不改变原事件内容。
 
-搜索、通知、检测和分析使用独立消费者进度。同一消费者只可 claim 每个 `(aggregate_type,aggregate_id)` 最早尚未成功的 sequence；dead letter 默认阻塞该 aggregate 的后续事件，直到管理员作出受审计的 redrive 或 skip 决策。`aggregate_sequence` 是 PostgreSQL `bigint`，进入 JavaScript 后保持十进制字符串并用 `BigInt` 比较，禁止转换为 `number`。删除或隐藏事件获得更高消费优先级，API 查询仍以事实表做最终可见性校验。
+语义索引、通知、检测和分析使用独立消费者进度。同一消费者只可 claim 每个 `(aggregate_type,aggregate_id)` 最早尚未成功的 sequence；dead letter 默认阻塞该 aggregate 的后续事件，直到管理员作出受审计的 redrive 或 skip 决策。`aggregate_sequence` 是 PostgreSQL `bigint`，进入 JavaScript 后保持十进制字符串并用 `BigInt` 比较，禁止转换为 `number`。删除或隐藏事件获得更高消费优先级，API 查询仍以事实表做最终可见性校验。
 
 ## Consequences
 
 正面结果：
 
 - 消除数据库与消息发布之间的双写丢失窗口。
-- 搜索、通知或检测故障不阻止内容事务。
+- 语义索引、通知或检测故障不阻止内容事务；generated FTS 随 Revision 事务同步可用。
 - Worker 可水平扩展、重启和安全重放。
 - 事件积压、重试和 dead-letter 状态可直接查询与告警。
 - 初期无需运行独立消息代理，降低运维复杂度。
 
 代价与约束：
 
-- 异步结果最终一致，客户端需要接受短暂索引和通知延迟。
+- 异步结果最终一致，客户端需要接受短暂的语义索引和通知延迟；FTS 不属于该异步窗口。
 - Worker 与每个消费者必须真正幂等，不能假设只处理一次。
 - 同 aggregate 的生产者会串行等待；约束失败时必须重试完整领域事务，不能只补写 OutboxEvent。
 - Outbox 会持续增长，需要归档、索引维护和分区计划。
