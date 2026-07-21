@@ -3,6 +3,7 @@ export * from "./agent-policy.js";
 export * from "./api-key.js";
 export * from "./community-directory.js";
 export * from "./content-read.js";
+export * from "./follow.js";
 export * from "./owner-pending-action.js";
 export * from "./pending-action.js";
 export * from "./pending-action-execution.js";

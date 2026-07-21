@@ -4,11 +4,10 @@ import { PolicyDecisionSchema, TimestampSchema, V1EnvelopeShape } from "./agent.
 import { OpaqueIdSchema } from "./community.ts";
 import {
   ContentLifecycleStateSchema,
-  FollowNotificationLevelSchema,
-  FollowTargetTypeSchema,
   ReactionCountsSchema,
   ViewerContentStateSchema,
 } from "./content.ts";
+import { SetFollowResultSchema } from "./follow.ts";
 import {
   ContentWriteOperationSchema,
   CreatePostResultSchema,
@@ -97,15 +96,7 @@ export const SetReactionActionResultSchema = z
   .strict();
 export type SetReactionActionResult = z.infer<typeof SetReactionActionResultSchema>;
 
-export const SetFollowActionResultSchema = z
-  .object({
-    target_type: FollowTargetTypeSchema,
-    target_id: OpaqueIdSchema,
-    active: z.boolean(),
-    notification_level: FollowNotificationLevelSchema.nullable(),
-    updated_at: TimestampSchema,
-  })
-  .strict();
+export const SetFollowActionResultSchema = SetFollowResultSchema;
 export type SetFollowActionResult = z.infer<typeof SetFollowActionResultSchema>;
 
 const PendingActionProjectionCommonShape = {

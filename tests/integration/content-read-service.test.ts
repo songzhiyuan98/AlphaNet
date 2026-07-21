@@ -68,6 +68,7 @@ describeContentRead("PostgresContentReadService", () => {
   dependencies.push(postgres);
 
   let context: AgentCredentialContext;
+  let followedAuthorContext: AgentCredentialContext;
   let noReadContext: AgentCredentialContext;
   let communityId = "";
   let activeAdditionalCommunityId = "";
@@ -92,6 +93,15 @@ describeContentRead("PostgresContentReadService", () => {
   let topic = "";
   let mentionHandle = "";
   let sourceUrl = "";
+  let followCommunityId = "";
+  let followSymbol = "";
+  let followSymbolId = "";
+  let followTopic = "";
+  let followTopicId = "";
+  let followedRootId = "";
+  let followedFirstReplyId = "";
+  let followedSecondReplyId = "";
+  let followedThirdReplyId = "";
 
   async function createVerifiedOwner(testMarker: string): Promise<string> {
     const users = await postgres.sql<{ id: string }[]>`
@@ -238,6 +248,10 @@ describeContentRead("PostgresContentReadService", () => {
     const suspendedTopicId = randomUUID();
     const symbolId = randomUUID();
     const symbolCandidateId = randomUUID();
+    followCommunityId = randomUUID();
+    followTopicId = randomUUID();
+    followSymbolId = randomUUID();
+    const followSymbolCandidateId = randomUUID();
     topic = `content-read-${marker}`;
     const activeAdditionalTopic = `content-read-active-${marker}`;
     const archivedTopic = `content-read-archived-${marker}`;
@@ -245,6 +259,8 @@ describeContentRead("PostgresContentReadService", () => {
     const readOnlyTopic = `content-read-read-only-${marker}`;
     const suspendedTopic = `content-read-suspended-${marker}`;
     symbol = `R${marker.slice(0, 8).toUpperCase()}`;
+    followTopic = `following-${marker}`;
+    followSymbol = `F${marker.slice(0, 8).toUpperCase()}`;
     sourceUrl = `https://evidence.example.test/content-read/${marker}`;
     const postingRules = {
       allowed_content: ["investment-research", "discussion"],
@@ -388,6 +404,58 @@ describeContentRead("PostgresContentReadService", () => {
       `;
     });
 
+    await postgres.sql.begin(async (transaction) => {
+      await transaction`
+        insert into platform.topics (id, slug, name, description)
+        values (
+          ${followTopicId},
+          ${followTopic},
+          'Strict Following Feed integration topic',
+          'An isolated topic for Follow matching and cursor invalidation.'
+        )
+      `;
+      await transaction`
+        insert into platform.communities (
+          id,
+          slug,
+          name,
+          description,
+          kind,
+          posting_rules,
+          settings
+        )
+        values (
+          ${followCommunityId},
+          ${followTopic},
+          'Strict Following Feed Integration Community',
+          'An isolated Community for the Follow read projection.',
+          'topic',
+          ${transaction.json(postingRules)},
+          ${transaction.json({ integration_fixture: marker, slice: "following" })}
+        )
+      `;
+      await transaction`
+        insert into platform.community_topics (community_id, topic_id, is_primary)
+        values (${followCommunityId}, ${followTopicId}, true)
+      `;
+      await transaction`
+        insert into platform.symbols (
+          id,
+          community_candidate_id,
+          ticker,
+          exchange,
+          name
+        )
+        values (
+          ${followSymbolId},
+          ${followSymbolCandidateId},
+          ${followSymbol},
+          'TEST',
+          'Strict Following Feed integration symbol'
+        )
+      `;
+    });
+
     const ownerId = await createVerifiedOwner(marker);
     const writer = await agentService.createAgent(
       ownerId,
@@ -407,6 +475,19 @@ describeContentRead("PostgresContentReadService", () => {
       randomUUID(),
     );
     mentionHandle = mentioned.agent.handle;
+    await activatePolicy(ownerId, mentioned.agent.id, "autonomous");
+    const followedAuthorCredential = await agentService.createCredential(
+      ownerId,
+      mentioned.agent.id,
+      {
+        name: "Strict Following Feed fixture author",
+        scopes: ["research:read", "content:write"],
+      },
+      randomUUID(),
+    );
+    followedAuthorContext = await agentService.authenticateStaticApiKey(
+      followedAuthorCredential.apiKey,
+    );
 
     const credential = await agentService.createCredential(
       ownerId,
@@ -425,6 +506,95 @@ describeContentRead("PostgresContentReadService", () => {
       randomUUID(),
     );
     noReadContext = await agentService.authenticateStaticApiKey(noReadCredential.apiKey);
+
+    const followedRoot = await writeService.createPost(
+      followedAuthorContext,
+      {
+        bodyMarkdown:
+          "A Follow-specific market thesis used to verify explainable social discovery.",
+        idempotencyKey: `content-read-followed-root-${randomUUID()}`,
+        primaryCommunityId: followCommunityId,
+        symbols: [followSymbol],
+        title: "Strict Following Feed market thesis",
+        topics: [followTopic],
+      },
+      { requestId: `req-${randomUUID()}` },
+    );
+    followedRootId = requireId(followedRoot.result?.contentId, "Followed Root Content");
+    const followedFirstReply = await writeService.replyToContent(
+      followedAuthorContext,
+      {
+        bodyMarkdown:
+          "A directly followed reply that must survive default post filtering.",
+        idempotencyKey: `content-read-followed-reply-1-${randomUUID()}`,
+        parentContentId: followedRootId,
+      },
+      { requestId: `req-${randomUUID()}` },
+    );
+    followedFirstReplyId = requireId(
+      followedFirstReply.result?.contentId,
+      "Directly Followed Reply Content",
+    );
+    const followedSecondReply = await writeService.replyToContent(
+      followedAuthorContext,
+      {
+        bodyMarkdown: "A direct child of the followed reply.",
+        idempotencyKey: `content-read-followed-reply-2-${randomUUID()}`,
+        parentContentId: followedFirstReplyId,
+      },
+      { requestId: `req-${randomUUID()}` },
+    );
+    followedSecondReplyId = requireId(
+      followedSecondReply.result?.contentId,
+      "Followed Reply Child Content",
+    );
+    const followedThirdReply = await writeService.replyToContent(
+      followedAuthorContext,
+      {
+        bodyMarkdown:
+          "A grandchild that must not match a Follow on its grandparent reply.",
+        idempotencyKey: `content-read-followed-reply-3-${randomUUID()}`,
+        parentContentId: followedSecondReplyId,
+      },
+      { requestId: `req-${randomUUID()}` },
+    );
+    followedThirdReplyId = requireId(
+      followedThirdReply.result?.contentId,
+      "Followed Reply Grandchild Content",
+    );
+
+    await postgres.sql`
+      insert into platform.follows (
+        follower_actor_id,
+        target_type,
+        target_actor_id,
+        target_symbol_id,
+        target_topic_id,
+        target_content_id,
+        notification_level
+      )
+      values
+        (
+          ${context.agent.actorId}, 'actor', ${followedAuthorContext.agent.actorId},
+          null, null, null, 'new_posts'
+        ),
+        (
+          ${context.agent.actorId}, 'symbol', null,
+          ${followSymbolId}, null, null, 'feed_only'
+        ),
+        (
+          ${context.agent.actorId}, 'topic', null,
+          null, ${followTopicId}, null, 'all_events'
+        ),
+        (
+          ${context.agent.actorId}, 'content', null,
+          null, null, ${followedRootId}, 'feed_only'
+        ),
+        (
+          ${context.agent.actorId}, 'content', null,
+          null, null, ${followedFirstReplyId}, 'all_events'
+        )
+    `;
 
     const reference = await writeService.createPost(
       context,
@@ -653,8 +823,306 @@ describeContentRead("PostgresContentReadService", () => {
     await closeDependencies(dependencies);
   });
 
-  it("is ready against the exact 000008 Content read schema", async () => {
+  it("is ready against the exact 000008, 000009, and 000011 read schemas", async () => {
     await expect(readService.checkReady()).resolves.toBeUndefined();
+  });
+
+  it("builds a strict, explainable Following Feed across all four target types", async () => {
+    const empty = await readService.browseContent(followedAuthorContext, {
+      scope: "following",
+      sort: "latest",
+    });
+    expect(empty.items).toEqual([]);
+
+    const defaults = await readService.browseContent(context, {
+      limit: 100,
+      scope: "following",
+      sort: "latest",
+    });
+    expect(defaults.ranking.rankingVersion).toBe("following-latest-v1");
+    expect(defaults.items.map((item) => item.contentId)).toEqual([
+      followedFirstReplyId,
+      followedRootId,
+    ]);
+
+    const explicitPosts = await readService.browseContent(context, {
+      contentTypes: ["post"],
+      limit: 100,
+      scope: "following",
+      sort: "latest",
+    });
+    expect(explicitPosts.items.map((item) => item.contentId)).toEqual([followedRootId]);
+
+    const replies = await readService.browseContent(context, {
+      contentTypes: ["reply"],
+      limit: 100,
+      scope: "following",
+      sort: "active",
+    });
+    expect(replies.ranking.rankingVersion).toBe("following-active-v1");
+    expect(new Set(replies.items.map((item) => item.contentId))).toEqual(
+      new Set([followedFirstReplyId, followedSecondReplyId, followedThirdReplyId]),
+    );
+
+    const byId = new Map(
+      [...defaults.items, ...replies.items].map((item) => [item.contentId, item]),
+    );
+    const root = byId.get(followedRootId)!;
+    const firstReply = byId.get(followedFirstReplyId)!;
+    const secondReply = byId.get(followedSecondReplyId)!;
+    const thirdReply = byId.get(followedThirdReplyId)!;
+    expect(root.matchedFollows.map((match) => match.targetType)).toEqual([
+      "content",
+      "actor",
+      "symbol",
+      "topic",
+    ]);
+    expect(firstReply.matchedFollows.map((match) => match.targetType)).toEqual([
+      "content",
+      "content",
+      "actor",
+      "symbol",
+      "topic",
+    ]);
+    expect(secondReply.matchedFollows.map((match) => match.targetType)).toEqual([
+      "content",
+      "content",
+      "actor",
+      "symbol",
+      "topic",
+    ]);
+    expect(thirdReply.matchedFollows.map((match) => match.targetType)).toEqual([
+      "content",
+      "actor",
+      "symbol",
+      "topic",
+    ]);
+    expect(
+      firstReply.matchedFollows
+        .filter((match) => match.targetType === "content")
+        .map((match) => match.targetId),
+    ).toEqual([followedFirstReplyId, followedRootId].sort());
+    expect(
+      thirdReply.matchedFollows.some(
+        (match) =>
+          match.targetType === "content" && match.targetId === followedFirstReplyId,
+      ),
+    ).toBe(false);
+    expect(root.viewerState.following).toBe(true);
+    expect(firstReply.viewerState.following).toBe(true);
+    expect(secondReply.viewerState.following).toBe(false);
+
+    await expect(
+      readService.getContent(context, { contentId: followedRootId }),
+    ).resolves.toMatchObject({ viewerState: { following: true } });
+    await expect(
+      readService.getContent(null, { contentId: followedRootId }),
+    ).resolves.toMatchObject({ viewerState: { following: false } });
+    const discussion = await readService.getDiscussion(context, {
+      contentId: followedSecondReplyId,
+      limit: 50,
+      sort: "oldest",
+    });
+    expect(discussion.root.viewerState.following).toBe(true);
+    expect(
+      discussion.replies.find((reply) => reply.id === followedFirstReplyId)?.viewerState
+        .following,
+    ).toBe(true);
+    expect(
+      discussion.replies.find((reply) => reply.id === followedSecondReplyId)?.viewerState
+        .following,
+    ).toBe(false);
+  });
+
+  it("uses created_at as the deterministic third Active-order key", async () => {
+    const olderId = randomUUID();
+    const newerId = randomUUID();
+    const olderRevisionId = randomUUID();
+    const newerRevisionId = randomUUID();
+    const times = await postgres.sql<
+      {
+        activity_at: Date;
+        boundary_at: Date;
+        newer_created_at: Date;
+        older_created_at: Date;
+      }[]
+    >`
+      select
+        clock_timestamp() - interval '100 milliseconds' as activity_at,
+        clock_timestamp() - interval '130 milliseconds' as boundary_at,
+        clock_timestamp() - interval '110 milliseconds' as newer_created_at,
+        clock_timestamp() - interval '120 milliseconds' as older_created_at
+    `;
+    const timing = times[0]!;
+    await postgres.sql.begin(async (transaction) => {
+      await transaction`
+        insert into platform.content_items (
+          id,
+          kind,
+          author_actor_id,
+          primary_community_id,
+          root_id,
+          parent_id,
+          depth,
+          published_at,
+          created_at,
+          updated_at
+        )
+        values
+          (
+            ${olderId},
+            'post',
+            ${followedAuthorContext.agent.actorId},
+            ${followCommunityId},
+            ${olderId},
+            null,
+            0,
+            ${timing.older_created_at},
+            ${timing.older_created_at},
+            ${timing.activity_at}
+          ),
+          (
+            ${newerId},
+            'post',
+            ${followedAuthorContext.agent.actorId},
+            ${followCommunityId},
+            ${newerId},
+            null,
+            0,
+            ${timing.newer_created_at},
+            ${timing.newer_created_at},
+            ${timing.activity_at}
+          )
+      `;
+      await transaction`
+        insert into platform.content_revisions (
+          id,
+          content_id,
+          revision_number,
+          title,
+          body_markdown,
+          body_plain_text,
+          created_by_actor_id,
+          created_at,
+          source_version,
+          content_hash,
+          public_node_serialized_bytes
+        )
+        values
+          (
+            ${olderRevisionId},
+            ${olderId},
+            1,
+            'Following active-order older creation',
+            'Older creation time with the same active timestamp.',
+            'Older creation time with the same active timestamp.',
+            ${followedAuthorContext.agent.actorId},
+            ${timing.activity_at},
+            1,
+            decode(repeat('a', 64), 'hex'),
+            512
+          ),
+          (
+            ${newerRevisionId},
+            ${newerId},
+            1,
+            'Following active-order newer creation',
+            'Newer creation time with the same active timestamp.',
+            'Newer creation time with the same active timestamp.',
+            ${followedAuthorContext.agent.actorId},
+            ${timing.activity_at},
+            1,
+            decode(repeat('b', 64), 'hex'),
+            512
+          )
+      `;
+      await transaction`
+        update platform.content_items
+        set current_revision_id = case
+          when id = ${olderId}::uuid then ${olderRevisionId}::uuid
+          else ${newerRevisionId}::uuid
+        end
+        where id in (${olderId}::uuid, ${newerId}::uuid)
+      `;
+    });
+
+    const first = await readService.browseContent(context, {
+      contentTypes: ["post"],
+      createdAfter: timing.boundary_at,
+      limit: 1,
+      scope: "following",
+      sort: "active",
+    });
+    expect(first.items.map((item) => item.contentId)).toEqual([newerId]);
+    expect(first.page.nextCursor).toBeTruthy();
+    const second = await readService.browseContent(context, {
+      contentTypes: ["post"],
+      createdAfter: timing.boundary_at,
+      cursor: first.page.nextCursor,
+      limit: 1,
+      scope: "following",
+      sort: "active",
+    });
+    expect(second.items.map((item) => item.contentId)).toEqual([olderId]);
+    expect(second.ranking).toEqual(first.ranking);
+  });
+
+  it("isolates Following cursors by the current Actor follow epoch", async () => {
+    const first = await readService.browseContent(context, {
+      contentTypes: ["reply"],
+      limit: 1,
+      scope: "following",
+      sort: "latest",
+    });
+    expect(first.page.nextCursor).toBeTruthy();
+
+    await postgres.sql`
+      insert into platform.follows (
+        follower_actor_id,
+        target_type,
+        target_symbol_id,
+        notification_level
+      )
+      values (
+        ${followedAuthorContext.agent.actorId},
+        'symbol',
+        ${followSymbolId},
+        'feed_only'
+      )
+    `;
+    const continuation = await readService.browseContent(context, {
+      contentTypes: ["reply"],
+      cursor: first.page.nextCursor,
+      limit: 1,
+      scope: "following",
+      sort: "latest",
+    });
+    expect(continuation.ranking).toEqual(first.ranking);
+
+    const beforeOwnMutation = await readService.browseContent(context, {
+      contentTypes: ["reply"],
+      limit: 1,
+      scope: "following",
+      sort: "latest",
+    });
+    expect(beforeOwnMutation.page.nextCursor).toBeTruthy();
+    await postgres.sql`
+      update platform.follows
+      set notification_level = 'new_posts'
+      where follower_actor_id = ${context.agent.actorId}
+        and target_type = 'topic'
+        and target_topic_id = ${followTopicId}
+    `;
+
+    await expect(
+      readService.browseContent(context, {
+        contentTypes: ["reply"],
+        cursor: beforeOwnMutation.page.nextCursor,
+        limit: 1,
+        scope: "following",
+        sort: "latest",
+      }),
+    ).rejects.toMatchObject({ code: "SNAPSHOT_EXPIRED", statusCode: 410 });
   });
 
   it("browses public content with scopes, filters, active order, and stable cursors", async () => {

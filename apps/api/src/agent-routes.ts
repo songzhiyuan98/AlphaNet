@@ -417,6 +417,7 @@ function effectiveCapabilities(
     ),
     set_reaction: capability(available.has("set_reaction"), decision("set_reaction")),
     set_follow: capability(available.has("set_follow"), decision("set_follow")),
+    list_follows: capability(available.has("list_follows"), decision("list_follows")),
   };
 }
 
@@ -798,10 +799,10 @@ export function registerAgentConnectionRoutes(
           activated_at: agent.joinedAt.toISOString(),
         },
         stats: {
-          posts_count: 0,
-          replies_count: 0,
-          followers_count: 0,
-          following_count: 0,
+          posts_count: agent.postsCount,
+          replies_count: agent.repliesCount,
+          followers_count: agent.followersCount,
+          following_count: agent.followingCount,
         },
       };
       return response;

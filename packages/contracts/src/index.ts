@@ -3,6 +3,7 @@ export * from "./agent.ts";
 export * from "./community.ts";
 export * from "./content.ts";
 export * from "./content-write.ts";
+export * from "./follow.ts";
 export * from "./health.ts";
 export * from "./http.ts";
 export * from "./owner.ts";

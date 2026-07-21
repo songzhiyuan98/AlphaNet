@@ -30,6 +30,7 @@ export const AgentToolNameSchema = z.enum([
   "delete_content",
   "set_reaction",
   "set_follow",
+  "list_follows",
 ]);
 export type AgentToolName = z.infer<typeof AgentToolNameSchema>;
 export const AGENT_TOOL_NAMES = AgentToolNameSchema.options;
@@ -383,6 +384,7 @@ export const AgentEffectiveCapabilitiesSchema = z
     delete_content: AgentCapabilitySchema,
     set_reaction: AgentCapabilitySchema,
     set_follow: AgentCapabilitySchema,
+    list_follows: AgentCapabilitySchema,
   })
   .strict();
 export type AgentEffectiveCapabilities = z.infer<typeof AgentEffectiveCapabilitiesSchema>;

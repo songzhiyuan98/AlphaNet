@@ -116,6 +116,7 @@ function projectionRow(
   options: {
     body?: string;
     deleted?: boolean;
+    following?: boolean;
     id?: string;
     kind?: "post" | "reply";
     parentId?: string | null;
@@ -159,6 +160,7 @@ function projectionRow(
     kind,
     last_activity_at: now,
     lifecycle_state: deleted ? "deleted" : "published",
+    following: options.following ?? false,
     mentions: [],
     parent_id: kind === "post" ? null : (options.parentId ?? rootId),
     primary_community_id: kind === "post" ? communityId : null,
@@ -228,6 +230,27 @@ describe("content read input normalization", () => {
     ).toThrow(ContentReadError);
   });
 
+  it("accepts a targetless Following scope and remembers whether content types were explicit", () => {
+    expect(normalizeContentBrowseInput({ scope: "following" })).toMatchObject({
+      contentTypes: ["post"],
+      contentTypesExplicit: false,
+      scope: "following",
+    });
+    expect(
+      normalizeContentBrowseInput({
+        contentTypes: ["post"],
+        scope: "following",
+      }),
+    ).toMatchObject({
+      contentTypes: ["post"],
+      contentTypesExplicit: true,
+      scope: "following",
+    });
+    expect(() =>
+      normalizeContentBrowseInput({ scope: "following", symbol: "AMD" }),
+    ).toThrowError(expect.objectContaining({ code: "INVALID_ARGUMENT" }));
+  });
+
   it("bounds discussion pages so every persisted node can make progress", () => {
     expect(
       normalizeDiscussionInput({ contentId: replyId, sort: "latest" }),
@@ -262,6 +285,18 @@ describe("PostgresContentReadService", () => {
     expect(database.calls).toHaveLength(0);
   });
 
+  it("rejects anonymous Following reads before touching PostgreSQL", async () => {
+    const database = fakePostgres(() => []);
+    const service = new PostgresContentReadService(database.sql, {
+      cursorSigningKey: signingKey,
+    });
+
+    await expect(
+      service.browseContent(null, { scope: "following" }),
+    ).rejects.toMatchObject({ code: "INVALID_ARGUMENT", statusCode: 400 });
+    expect(database.calls).toHaveLength(0);
+  });
+
   it("issues private signed keyset cursors and binds them to viewer and query", async () => {
     let pageQueries = 0;
     const database = fakePostgres((query) => {
@@ -275,14 +310,31 @@ describe("PostgresContentReadService", () => {
           },
         ];
       }
-      if (query.text.includes("with candidates as")) {
+      if (query.text.includes("candidates as (")) {
         pageQueries += 1;
         return pageQueries === 1
           ? [
-              { id: rootId, order_at: new Date(now.valueOf() - 10_000) },
-              { id: secondReplyId, order_at: new Date(now.valueOf() - 20_000) },
+              {
+                created_at: new Date(now.valueOf() - 10_000),
+                id: rootId,
+                matched_follows: [],
+                order_at: new Date(now.valueOf() - 10_000),
+              },
+              {
+                created_at: new Date(now.valueOf() - 20_000),
+                id: secondReplyId,
+                matched_follows: [],
+                order_at: new Date(now.valueOf() - 20_000),
+              },
             ]
-          : [{ id: secondReplyId, order_at: new Date(now.valueOf() - 20_000) }];
+          : [
+              {
+                created_at: new Date(now.valueOf() - 20_000),
+                id: secondReplyId,
+                matched_follows: [],
+                order_at: new Date(now.valueOf() - 20_000),
+              },
+            ];
       }
       if (query.text.includes("select\n        content.id::text as id")) {
         return [projectionRow()];
@@ -315,7 +367,8 @@ describe("PostgresContentReadService", () => {
     expect(decoded.binding).toMatch(/^[0-9a-f]{64}$/u);
     expect(decoded).toMatchObject({
       databaseSnapshot: "100:100:",
-      v: 3,
+      followEpoch: null,
+      v: 4,
       visibilityEpoch: "content:1",
     });
     expect(JSON.stringify(decoded)).not.toContain(agentId);
@@ -364,10 +417,20 @@ describe("PostgresContentReadService", () => {
           },
         ];
       }
-      if (query.text.includes("with candidates as")) {
+      if (query.text.includes("candidates as (")) {
         return [
-          { id: rootId, order_at: new Date(now.valueOf() - 10_000) },
-          { id: secondReplyId, order_at: new Date(now.valueOf() - 20_000) },
+          {
+            created_at: new Date(now.valueOf() - 10_000),
+            id: rootId,
+            matched_follows: [],
+            order_at: new Date(now.valueOf() - 10_000),
+          },
+          {
+            created_at: new Date(now.valueOf() - 20_000),
+            id: secondReplyId,
+            matched_follows: [],
+            order_at: new Date(now.valueOf() - 20_000),
+          },
         ];
       }
       if (query.text.includes("select\n        content.id::text as id")) {
@@ -393,6 +456,181 @@ describe("PostgresContentReadService", () => {
         limit: 1,
         scope: "global",
         sort: "active",
+      }),
+    ).rejects.toMatchObject({ code: "SNAPSHOT_EXPIRED", statusCode: 410 });
+  });
+
+  it("projects all canonical Following matches, direct content state, and active three-key cursors", async () => {
+    const matchedFollows = [
+      {
+        notificationLevel: "all_events",
+        targetId: rootId,
+        targetType: "content",
+      },
+      {
+        notificationLevel: "new_posts",
+        targetId: actorId,
+        targetType: "actor",
+      },
+      {
+        notificationLevel: "feed_only",
+        targetId: "AMD",
+        targetType: "symbol",
+      },
+      {
+        notificationLevel: "feed_only",
+        targetId: "semiconductors",
+        targetType: "topic",
+      },
+    ] as const;
+    const database = fakePostgres((query) => {
+      if (query.text.includes("set_config")) return [];
+      if (query.text.includes("transaction_timestamp()")) return [{ as_of: now }];
+      if (query.text.includes("actor_follow_epochs")) return [{ follow_epoch: "7" }];
+      if (query.text.includes("content_read_visibility_epochs")) {
+        return [
+          {
+            content_membership_epoch: "3",
+            public_community_visibility_epoch: null,
+          },
+        ];
+      }
+      if (query.text.includes("candidates as (")) {
+        return [
+          {
+            created_at: new Date(now.valueOf() - 10_000),
+            id: rootId,
+            matched_follows: matchedFollows,
+            order_at: new Date(now.valueOf() - 1_000),
+          },
+          {
+            created_at: new Date(now.valueOf() - 20_000),
+            id: secondReplyId,
+            matched_follows: matchedFollows,
+            order_at: new Date(now.valueOf() - 2_000),
+          },
+        ];
+      }
+      if (query.text.includes("select\n        content.id::text as id")) {
+        return [projectionRow({ following: true })];
+      }
+      return [];
+    });
+    const service = new PostgresContentReadService(database.sql, {
+      clock: () => now,
+      cursorSigningKey: signingKey,
+      cursorTtlSeconds: 60,
+    });
+
+    const page = await service.browseContent(viewer(["research:read"]), {
+      limit: 1,
+      scope: "following",
+      sort: "active",
+    });
+
+    expect(page.ranking.rankingVersion).toBe("following-active-v1");
+    expect(page.items[0]).toMatchObject({
+      contentId: rootId,
+      matchedFollows,
+      viewerState: { following: true, reactions: [] },
+    });
+    const decoded = JSON.parse(
+      Buffer.from(page.page.nextCursor!.split(".")[0]!, "base64url").toString("utf8"),
+    ) as {
+      followEpoch: string;
+      last: { createdAt: string };
+    };
+    expect(decoded.followEpoch).toBe("7");
+    expect(decoded.last.createdAt).toBe(new Date(now.valueOf() - 10_000).toISOString());
+    const candidateQuery = database.calls.find((query) =>
+      query.text.includes("candidates as ("),
+    );
+    expect(candidateQuery?.text).toContain("(order_at, created_at, id)");
+    expect(candidateQuery?.text).toContain(
+      "content.parent_id = follow.target_content_id",
+    );
+    expect(candidateQuery?.text).toContain("content.root_id = follow.target_content_id");
+    expect(candidateQuery?.text).toContain("content.id = follow.target_content_id");
+    expect(candidateQuery?.text).toContain("direct_content_follow");
+    await expect(
+      service.browseContent(viewer(["research:read"]), {
+        contentTypes: ["post"],
+        cursor: page.page.nextCursor,
+        limit: 1,
+        scope: "following",
+        sort: "active",
+      }),
+    ).rejects.toMatchObject({ code: "CURSOR_INVALID" });
+  });
+
+  it("expires only a Following continuation when the current Actor epoch changes", async () => {
+    let followEpochReads = 0;
+    const database = fakePostgres((query) => {
+      if (query.text.includes("set_config")) return [];
+      if (query.text.includes("transaction_timestamp()")) return [{ as_of: now }];
+      if (query.text.includes("actor_follow_epochs")) {
+        followEpochReads += 1;
+        return [{ follow_epoch: String(followEpochReads) }];
+      }
+      if (query.text.includes("content_read_visibility_epochs")) {
+        return [
+          {
+            content_membership_epoch: "1",
+            public_community_visibility_epoch: null,
+          },
+        ];
+      }
+      if (query.text.includes("candidates as (")) {
+        return [
+          {
+            created_at: new Date(now.valueOf() - 10_000),
+            id: rootId,
+            matched_follows: [
+              {
+                notificationLevel: "feed_only",
+                targetId: rootId,
+                targetType: "content",
+              },
+            ],
+            order_at: new Date(now.valueOf() - 10_000),
+          },
+          {
+            created_at: new Date(now.valueOf() - 20_000),
+            id: secondReplyId,
+            matched_follows: [
+              {
+                notificationLevel: "feed_only",
+                targetId: rootId,
+                targetType: "content",
+              },
+            ],
+            order_at: new Date(now.valueOf() - 20_000),
+          },
+        ];
+      }
+      if (query.text.includes("select\n        content.id::text as id")) {
+        return [projectionRow()];
+      }
+      return [];
+    });
+    const service = new PostgresContentReadService(database.sql, {
+      clock: () => now,
+      cursorSigningKey: signingKey,
+      cursorTtlSeconds: 60,
+    });
+    const context = viewer(["research:read"]);
+    const first = await service.browseContent(context, {
+      limit: 1,
+      scope: "following",
+      sort: "latest",
+    });
+
+    await expect(
+      service.browseContent(context, {
+        cursor: first.page.nextCursor,
+        limit: 1,
+        scope: "following",
+        sort: "latest",
       }),
     ).rejects.toMatchObject({ code: "SNAPSHOT_EXPIRED", statusCode: 410 });
   });

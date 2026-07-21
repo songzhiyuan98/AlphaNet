@@ -8,7 +8,16 @@ import {
   ReactionTypeSchema,
   ViewerContentStateSchema,
 } from "./content.ts";
+import { SetFollowWriteResultSchema } from "./follow.ts";
 import { V1ErrorDetailSchema } from "./v1-error.ts";
+import {
+  IdempotencyKeySchema,
+  WriteStatusSchema,
+  type WriteStatus,
+} from "./write-primitives.ts";
+
+export { IdempotencyKeySchema, WriteStatusSchema } from "./write-primitives.ts";
+export type { WriteStatus } from "./write-primitives.ts";
 
 const KIBIBYTE = 1_024;
 const MAX_NORMALIZED_BODY_BYTES = 160 * KIBIBYTE;
@@ -100,19 +109,6 @@ export const SourceLinkInputSchema = z
   })
   .strict();
 export type SourceLinkInput = z.infer<typeof SourceLinkInputSchema>;
-
-export const IdempotencyKeySchema = z
-  .string()
-  .min(1)
-  .refine(
-    (value) => unicodeLength(value) <= 200,
-    "Idempotency key cannot exceed 200 Unicode characters.",
-  )
-  .refine(
-    (value) => !/\p{Cc}/u.test(value),
-    "Idempotency key cannot contain control characters.",
-  )
-  .refine((value) => value.trim().length > 0, "Idempotency key cannot be blank.");
 
 // Exact duplicate sources and references remain valid input: the domain
 // canonicalizer collapses them before hashing. Conflicting metadata for one
@@ -231,14 +227,6 @@ export const ContentWriteOperationSchema = z.enum([
   "set_follow",
 ]);
 export type ContentWriteOperation = z.infer<typeof ContentWriteOperationSchema>;
-
-export const WriteStatusSchema = z.enum([
-  "succeeded",
-  "pending_approval",
-  "denied",
-  "failed",
-]);
-export type WriteStatus = z.infer<typeof WriteStatusSchema>;
 
 export const PendingActionStateSchema = z.enum([
   "pending_approval",
@@ -465,5 +453,6 @@ export const UnifiedContentWriteResultSchema = z.union([
   CreatePostWriteResultSchema,
   ReplyToContentWriteResultSchema,
   SetReactionWriteResultSchema,
+  SetFollowWriteResultSchema,
 ]);
 export type UnifiedContentWriteResult = z.infer<typeof UnifiedContentWriteResultSchema>;

@@ -293,12 +293,71 @@ export const MatchedFollowSchema = z
     target_id: OpaqueIdSchema,
     notification_level: FollowNotificationLevelSchema,
   })
-  .strict();
+  .strict()
+  .superRefine((match, context) => {
+    const targetSchema =
+      match.target_type === "symbol"
+        ? SymbolSchema
+        : match.target_type === "topic"
+          ? TopicSchema
+          : z.uuid();
+    if (!targetSchema.safeParse(match.target_id).success) {
+      context.addIssue({
+        code: "custom",
+        path: ["target_id"],
+        message: `target_id is not canonical for target_type=${match.target_type}.`,
+      });
+    }
+  });
+
+const matchedFollowTypeRank = {
+  content: 0,
+  actor: 1,
+  symbol: 2,
+  topic: 3,
+} as const;
+
+export const MatchedFollowsSchema = z
+  .array(MatchedFollowSchema)
+  // A reply may simultaneously match self, parent and root Content follows,
+  // one author, and the distinct classifications on both itself and root.
+  .max(40)
+  .superRefine((matches, context) => {
+    const identities = new Set<string>();
+    for (const [index, match] of matches.entries()) {
+      const identity = `${match.target_type}\u0000${match.target_id}`;
+      if (identities.has(identity)) {
+        context.addIssue({
+          code: "custom",
+          path: [index],
+          message: "Matched Follow reasons must be unique by target type and ID.",
+        });
+      }
+      identities.add(identity);
+
+      const previous = matches[index - 1];
+      if (previous === undefined) continue;
+      const rankDifference =
+        matchedFollowTypeRank[previous.target_type] -
+        matchedFollowTypeRank[match.target_type];
+      if (
+        rankDifference > 0 ||
+        (rankDifference === 0 && previous.target_id >= match.target_id)
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: [index],
+          message:
+            "Matched Follow reasons must use canonical content, actor, symbol, topic order and ascending IDs within a type.",
+        });
+      }
+    }
+  });
 
 export const BrowseContentItemSchema = ContentListProjectionBaseSchema.extend({
   rank: z.number().int().positive(),
   score: z.number().finite(),
-  matched_follows: z.array(MatchedFollowSchema),
+  matched_follows: MatchedFollowsSchema,
   selection_reasons: z.array(z.string().min(1)),
 })
   .strict()

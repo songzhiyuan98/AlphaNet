@@ -17,6 +17,7 @@ import {
   PostgresAgentConnectionService,
   PostgresCommunityDirectoryService,
   PostgresContentReadService,
+  PostgresFollowService,
   PostgresOwnerPendingActionService,
   PostgresPendingActionStatusService,
   PostgresReactionWriteService,
@@ -60,6 +61,14 @@ async function start(): Promise<void> {
       Buffer.from(environment.COMMUNITY_CURSOR_SIGNING_KEY, "utf8"),
     )
       .update("alphanet.content-read.cursor.v1", "utf8")
+      .digest(),
+  });
+  const followService = new PostgresFollowService(postgres.sql, {
+    cursorSigningKey: createHmac(
+      "sha256",
+      Buffer.from(environment.COMMUNITY_CURSOR_SIGNING_KEY, "utf8"),
+    )
+      .update("alphanet.follow-list.cursor.v1", "utf8")
       .digest(),
   });
   const pendingActionStatusService = new PostgresPendingActionStatusService(postgres.sql);
@@ -151,6 +160,7 @@ async function start(): Promise<void> {
       authRuntime,
       communityDirectoryService,
       contentReadService,
+      followService,
       dependencies,
       environment: environment.NODE_ENV,
       internalSsrRequestSecret: environment.SSR_INTERNAL_REQUEST_SECRET,

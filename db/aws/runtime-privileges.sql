@@ -156,6 +156,7 @@ GRANT SELECT ON TABLE
   platform.content_symbols,
   platform.content_topics,
   platform.credentials,
+  platform.follows,
   platform.idempotency_records,
   platform.mentions,
   platform.owners,
@@ -190,7 +191,26 @@ GRANT INSERT ON TABLE
 TO :"runtime_role";
 
 GRANT DELETE ON TABLE
+  platform.follows,
   platform.reactions
+TO :"runtime_role";
+
+-- Follow timestamps remain database-owned. Runtime can create only the
+-- identity and preference columns, then change only the preference.
+GRANT INSERT (
+  id,
+  follower_actor_id,
+  target_type,
+  target_actor_id,
+  target_symbol_id,
+  target_topic_id,
+  target_content_id,
+  notification_level
+) ON TABLE platform.follows
+TO :"runtime_role";
+
+GRANT UPDATE (notification_level) ON TABLE
+  platform.follows
 TO :"runtime_role";
 
 GRANT UPDATE ON TABLE
@@ -206,6 +226,7 @@ GRANT UPDATE ON TABLE
 TO :"runtime_role";
 
 GRANT SELECT ON TABLE
+  system.actor_follow_epochs,
   system.content_read_visibility_epochs,
   system.outbox_aggregate_heads,
   system.outbox_consumer_deliveries,

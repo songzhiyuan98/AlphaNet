@@ -12,10 +12,13 @@ import type {
 import {
   AGENT_POLICY_CONTROL_MIGRATION_CHECKSUM,
   CONTENT_REACTIONS_MIGRATION_CHECKSUM,
+  FOLLOW_GRAPH_MIGRATION_CHECKSUM,
 } from "./schema-migrations.js";
 
 const CONTENT_REACTIONS_MIGRATION_NAME = "content_reactions";
 const CONTENT_REACTIONS_MIGRATION_VERSION = "000009";
+const FOLLOW_GRAPH_MIGRATION_NAME = "follow_graph";
+const FOLLOW_GRAPH_MIGRATION_VERSION = "000011";
 const IDEMPOTENCY_MIN_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 const DEFAULT_IDEMPOTENCY_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 const ESTABLISHED_AGENT_REACTIONS_PER_HOUR = 120;
@@ -67,7 +70,7 @@ export interface ReactionCounts {
 }
 
 export interface ReactionViewerState {
-  following: false;
+  following: boolean;
   reactions: ReactionType[];
 }
 
@@ -207,6 +210,7 @@ interface ReactionAggregateRow {
   active_reactions: string[];
   agree_count: number;
   disagree_count: number;
+  following: boolean;
   helpful_count: number;
 }
 
@@ -230,7 +234,7 @@ interface PersistedReactionOutcome {
     content_id: string;
     reaction_counts: ReactionCounts;
     viewer_state: {
-      following: false;
+      following: boolean;
       reactions: ReactionType[];
     };
   };
@@ -550,7 +554,7 @@ function parsePersistedOutcome(
       counts === null ||
       !isRecord(viewer) ||
       !hasExactKeys(viewer, ["following", "reactions"]) ||
-      viewer.following !== false ||
+      typeof viewer.following !== "boolean" ||
       !Array.isArray(viewer.reactions) ||
       !viewer.reactions.every(isReactionType) ||
       new Set(viewer.reactions).size !== viewer.reactions.length
@@ -565,7 +569,7 @@ function parsePersistedOutcome(
       contentId: value.result.content_id,
       reactionCounts: counts,
       viewerState: {
-        following: false,
+        following: viewer.following,
         reactions: [...viewer.reactions] as ReactionType[],
       },
     };
@@ -694,6 +698,13 @@ export class PostgresReactionWriteService implements ReactionWriteService {
           )
           and exists (
             select 1
+            from system.schema_migrations
+            where version = ${FOLLOW_GRAPH_MIGRATION_VERSION}
+              and name = ${FOLLOW_GRAPH_MIGRATION_NAME}
+              and checksum = ${FOLLOW_GRAPH_MIGRATION_CHECKSUM}
+          )
+          and exists (
+            select 1
             from pg_catalog.pg_attribute
             where attrelid = to_regclass('platform.credentials')
               and attname = 'policy_ceiling_rules'
@@ -701,6 +712,7 @@ export class PostgresReactionWriteService implements ReactionWriteService {
               and not attisdropped
           )
           and to_regclass('platform.reactions') is not null
+          and to_regclass('platform.follows') is not null
           and to_regclass('platform.reactions_content_type_created_idx') is not null
           and to_regclass('platform.reactions_actor_created_idx') is not null
           and to_regclass(
@@ -1318,7 +1330,7 @@ export class PostgresReactionWriteService implements ReactionWriteService {
           helpful: aggregate.helpful_count,
         },
         viewerState: {
-          following: false,
+          following: aggregate.following,
           reactions: aggregate.active_reactions as ReactionType[],
         },
       },
@@ -1394,7 +1406,14 @@ export class PostgresReactionWriteService implements ReactionWriteService {
         count(*) filter (where reaction.reaction_type = 'agree')::integer
           as agree_count,
         count(*) filter (where reaction.reaction_type = 'disagree')::integer
-          as disagree_count
+          as disagree_count,
+        exists (
+          select 1
+          from platform.follows as follow
+          where follow.follower_actor_id = ${actorId}
+            and follow.target_type = 'content'
+            and follow.target_content_id = ${contentId}
+        ) as following
       from platform.reactions as reaction
       where reaction.content_id = ${contentId}
     `;
@@ -1406,6 +1425,7 @@ export class PostgresReactionWriteService implements ReactionWriteService {
       !Number.isInteger(row.helpful_count) ||
       !Number.isInteger(row.agree_count) ||
       !Number.isInteger(row.disagree_count) ||
+      typeof row.following !== "boolean" ||
       row.helpful_count < 0 ||
       row.agree_count < 0 ||
       row.disagree_count < 0

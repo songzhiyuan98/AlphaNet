@@ -121,6 +121,7 @@ const capabilities = {
   },
   set_reaction: readCapability,
   set_follow: readCapability,
+  list_follows: readCapability,
 } as const;
 
 describe("Agent requests", () => {
@@ -329,8 +330,8 @@ describe("Agent response envelopes", () => {
     ).toBe(false);
   });
 
-  it("requires an exact capability map for all 15 tools", () => {
-    expect(AGENT_TOOL_NAMES).toHaveLength(15);
+  it("requires an exact capability map for all 16 tools", () => {
+    expect(AGENT_TOOL_NAMES).toHaveLength(16);
     expect(AgentEffectiveCapabilitiesSchema.parse(capabilities)).toEqual(capabilities);
 
     const missingTool = { ...capabilities } as Record<string, unknown>;

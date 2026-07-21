@@ -12,11 +12,13 @@ BEGIN;
 SELECT
   pg_catalog.gen_random_uuid()::text AS user_id,
   pg_catalog.gen_random_uuid()::text AS actor_id,
+  pg_catalog.gen_random_uuid()::text AS target_actor_id,
   pg_catalog.gen_random_uuid()::text AS agent_id,
   pg_catalog.gen_random_uuid()::text AS policy_id,
   pg_catalog.gen_random_uuid()::text AS replacement_policy_id,
   pg_catalog.gen_random_uuid()::text AS credential_id,
   pg_catalog.gen_random_uuid()::text AS replacement_credential_id,
+  pg_catalog.gen_random_uuid()::text AS follow_id,
   pg_catalog.gen_random_uuid()::text AS aggregate_id,
   pg_catalog.gen_random_uuid()::text AS consumer_suffix
 \gset
@@ -97,6 +99,23 @@ VALUES (
   clock_timestamp()
 );
 
+INSERT INTO platform.actors (
+  id,
+  kind,
+  owner_id,
+  handle,
+  display_name,
+  status
+)
+VALUES (
+  :'target_actor_id',
+  'human',
+  :'owner_id',
+  'smoke-target-' || left(replace(:'target_actor_id', '-', ''), 16),
+  'AWS runtime smoke Follow target',
+  'active'
+);
+
 INSERT INTO platform.agent_policies (
   id,
   agent_id,
@@ -158,6 +177,30 @@ VALUES (
   '{}'::jsonb,
   clock_timestamp() + interval '1 day'
 );
+
+INSERT INTO platform.follows (
+  id,
+  follower_actor_id,
+  target_type,
+  target_actor_id,
+  notification_level
+)
+VALUES (
+  :'follow_id',
+  :'actor_id',
+  'actor',
+  :'target_actor_id',
+  'feed_only'
+);
+
+UPDATE platform.follows
+SET notification_level = 'all_events'
+WHERE id = :'follow_id'
+  AND follower_actor_id = :'actor_id';
+
+DELETE FROM platform.follows
+WHERE id = :'follow_id'
+  AND follower_actor_id = :'actor_id';
 
 UPDATE platform.actors
 SET bio = 'Least-privilege runtime smoke test'
@@ -345,6 +388,17 @@ SELECT (
         replacement.policy_ceiling_schema_version
       AND predecessor.policy_ceiling_rules =
         replacement.policy_ceiling_rules
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM platform.follows
+    WHERE id = :'follow_id'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM system.actor_follow_epochs
+    WHERE actor_id = :'actor_id'
+      AND epoch = 3
   )
   AND EXISTS (
     SELECT 1
