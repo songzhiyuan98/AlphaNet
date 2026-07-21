@@ -303,7 +303,7 @@ Select Autonomous
 → Create immutable Policy Version
 ```
 
-关闭 Autonomous 对后续请求立即生效；既有 PendingAction 不因放宽策略自动执行。
+Custom 将任一内容写操作配置为 `allow` 时走相同的重新认证与确认门。关闭 Autonomous 对后续请求立即生效；既有 PendingAction 不因放宽策略自动执行。
 
 ## 8. 页面状态
 

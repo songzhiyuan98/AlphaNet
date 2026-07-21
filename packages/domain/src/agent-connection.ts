@@ -8,6 +8,17 @@ import {
   parseStaticApiKey,
   staticApiKeyDigestMatches,
 } from "./api-key.js";
+import {
+  AGENT_POLICY_DEFAULTS_VERSION,
+  AGENT_POLICY_SCHEMA_VERSION,
+  agentPolicyRulesForStorage,
+  materializeAgentPolicyRules,
+  normalizeAgentPolicyRules,
+  parsePersistedAgentPolicyRules,
+  policyHasAutonomousContentWrites,
+  type AgentPolicyRules,
+} from "./agent-policy.js";
+import { AGENT_POLICY_CONTROL_MIGRATION_CHECKSUM } from "./schema-migrations.js";
 
 export const AGENT_SCOPES = [
   "research:read",
@@ -33,6 +44,28 @@ export interface AgentPolicyView {
   schemaVersion: number;
   version: string;
   effectiveFrom: Date;
+  rules: AgentPolicyRules;
+}
+
+export interface UpdateAgentPolicyInput {
+  authenticatedAt: Date;
+  authenticationAssurance: "owner_session" | "fresh_owner_session";
+  autonomousAcknowledged: boolean;
+  expectedVersion: string;
+  rules: unknown;
+  tier: AgentPolicyTier;
+}
+
+export interface AgentPolicyCredentialImpact {
+  ceilingCounts: Record<AgentPolicyTier, number>;
+  retainedCredentialCount: number;
+}
+
+export interface AgentPolicyMutationResult {
+  agent: OwnerAgentView;
+  changed: boolean;
+  credentialImpact: AgentPolicyCredentialImpact;
+  previousPolicy: AgentPolicyView;
 }
 
 export interface OwnerAgentView {
@@ -94,6 +127,9 @@ export interface CredentialView {
   scopes: AgentScope[];
   audience: string;
   policyCeiling: AgentPolicyTier;
+  policyCeilingDefaultsVersion: string;
+  policyCeilingRules: AgentPolicyRules;
+  policyCeilingSchemaVersion: number;
   issuedAt: Date;
   expiresAt: Date | null;
   lastUsedAt: Date | null;
@@ -151,7 +187,11 @@ export type AgentConnectionErrorCode =
   | "CREDENTIAL_EXPIRY_INVALID"
   | "INVALID_CREDENTIAL"
   | "CREDENTIAL_REVOKED"
-  | "TOKEN_EXPIRED";
+  | "TOKEN_EXPIRED"
+  | "AUTONOMOUS_ACKNOWLEDGEMENT_REQUIRED"
+  | "OWNER_REAUTHENTICATION_REQUIRED"
+  | "POLICY_RULES_INVALID"
+  | "AGENT_POLICY_VERSION_CONFLICT";
 
 const errorMessages: Record<AgentConnectionErrorCode, string> = {
   OWNER_EMAIL_VERIFICATION_REQUIRED:
@@ -173,6 +213,13 @@ const errorMessages: Record<AgentConnectionErrorCode, string> = {
   INVALID_CREDENTIAL: "The Agent credential is invalid.",
   CREDENTIAL_REVOKED: "The Agent credential has been revoked.",
   TOKEN_EXPIRED: "The Agent credential has expired.",
+  AUTONOMOUS_ACKNOWLEDGEMENT_REQUIRED:
+    "Explicit Owner acknowledgement is required for autonomous content writes.",
+  OWNER_REAUTHENTICATION_REQUIRED:
+    "A fresh Owner session is required for autonomous content writes.",
+  POLICY_RULES_INVALID: "The Agent permission policy rules are invalid.",
+  AGENT_POLICY_VERSION_CONFLICT:
+    "The Agent permission policy changed before this update was applied.",
 };
 
 const errorStatus: Record<AgentConnectionErrorCode, number> = {
@@ -191,22 +238,35 @@ const errorStatus: Record<AgentConnectionErrorCode, number> = {
   INVALID_CREDENTIAL: 401,
   CREDENTIAL_REVOKED: 409,
   TOKEN_EXPIRED: 409,
+  AUTONOMOUS_ACKNOWLEDGEMENT_REQUIRED: 422,
+  OWNER_REAUTHENTICATION_REQUIRED: 403,
+  POLICY_RULES_INVALID: 422,
+  AGENT_POLICY_VERSION_CONFLICT: 409,
 };
 
 export class AgentConnectionError extends Error {
   readonly code: AgentConnectionErrorCode;
+  readonly currentPolicyTier: AgentPolicyTier | undefined;
+  readonly currentPolicyVersion: string | undefined;
   readonly retryAt: Date | undefined;
   readonly retryable: boolean;
   readonly statusCode: number;
 
   constructor(
     code: AgentConnectionErrorCode,
-    options: { retryAt?: Date | undefined; retryable?: boolean | undefined } = {},
+    options: {
+      currentPolicyTier?: AgentPolicyTier | undefined;
+      currentPolicyVersion?: string | undefined;
+      retryAt?: Date | undefined;
+      retryable?: boolean | undefined;
+    } = {},
   ) {
     super(errorMessages[code]);
     this.name = "AgentConnectionError";
     this.code = code;
     this.statusCode = errorStatus[code];
+    this.currentPolicyTier = options.currentPolicyTier;
+    this.currentPolicyVersion = options.currentPolicyVersion;
     this.retryAt = options.retryAt;
     this.retryable =
       options.retryable ??
@@ -231,6 +291,12 @@ export interface AgentConnectionService {
     input: UpdateAgentInput,
     requestId: string,
   ): Promise<OwnerAgentView>;
+  updateAgentPolicy(
+    ownerId: string,
+    agentId: string,
+    input: UpdateAgentPolicyInput,
+    requestId: string,
+  ): Promise<AgentPolicyMutationResult>;
   activateAgent(
     ownerId: string,
     agentId: string,
@@ -306,6 +372,7 @@ interface AgentRow {
   policy_schema_version: number;
   policy_version: string;
   effective_from: Date;
+  policy_rules: unknown;
 }
 
 interface CredentialRow {
@@ -320,6 +387,9 @@ interface CredentialRow {
   scopes: AgentScope[];
   audience: string;
   policy_ceiling: AgentPolicyTier;
+  policy_ceiling_defaults_version: string;
+  policy_ceiling_rules: unknown;
+  policy_ceiling_schema_version: number;
   issued_at: Date;
   expires_at: Date | null;
   last_used_at: Date | null;
@@ -340,6 +410,9 @@ interface CredentialContextRow extends AgentRow {
   credential_scopes: AgentScope[];
   credential_audience: string;
   credential_policy_ceiling: AgentPolicyTier;
+  credential_policy_ceiling_defaults_version: string;
+  credential_policy_ceiling_rules: unknown;
+  credential_policy_ceiling_schema_version: number;
   credential_issued_at: Date;
   credential_expires_at: Date | null;
   credential_is_expired: boolean;
@@ -352,20 +425,11 @@ interface CredentialContextRow extends AgentRow {
   actor_status: string;
 }
 
-const defaultAssistedRules = {
-  browse: "allow",
-  content_read: "allow",
-  content_write: "require_approval",
-  delete_own_content: "require_approval",
-  edit_own_content: "require_approval",
-  follow_write: "allow",
-  notification_read: "allow",
-  reaction_write: "allow",
-  reply_write: "require_approval",
-  search: "allow",
-} as const;
-
 function mapAgent(row: AgentRow): OwnerAgentView {
+  const parsedRules = parsePersistedAgentPolicyRules(row.policy_tier, row.policy_rules);
+  if (!parsedRules) {
+    throw new Error("The persisted Agent policy rules are invalid.");
+  }
   return {
     id: row.id,
     actorId: row.actor_id,
@@ -388,11 +452,21 @@ function mapAgent(row: AgentRow): OwnerAgentView {
       schemaVersion: row.policy_schema_version,
       version: row.policy_version,
       effectiveFrom: row.effective_from,
+      rules: {
+        operations: materializeAgentPolicyRules(row.policy_tier, parsedRules),
+      },
     },
   };
 }
 
 function mapCredential(row: CredentialRow): CredentialView {
+  const ceilingRules = parsePersistedAgentPolicyRules(
+    row.policy_ceiling,
+    row.policy_ceiling_rules,
+  );
+  if (!ceilingRules) {
+    throw new Error("The persisted Credential policy ceiling is invalid.");
+  }
   return {
     id: row.id,
     ownerId: row.owner_id,
@@ -403,6 +477,9 @@ function mapCredential(row: CredentialRow): CredentialView {
     scopes: row.scopes,
     audience: row.audience,
     policyCeiling: row.policy_ceiling,
+    policyCeilingDefaultsVersion: row.policy_ceiling_defaults_version,
+    policyCeilingRules: ceilingRules,
+    policyCeilingSchemaVersion: row.policy_ceiling_schema_version,
     issuedAt: row.issued_at,
     expiresAt: row.expires_at,
     lastUsedAt: row.last_used_at,
@@ -453,6 +530,13 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
               and checksum =
                 'e0fff5aad564d487728c743e5864c01ba16382f3ced67022e4348fc811cd2ea0'
           )
+          and exists (
+            select 1
+            from system.schema_migrations
+            where version = '000010'
+              and name = 'agent_policy_control'
+              and checksum = ${AGENT_POLICY_CONTROL_MIGRATION_CHECKSUM}
+          )
           and to_regclass('platform.agents') is not null
           and to_regclass('platform.agent_policies') is not null
           and to_regclass('platform.credentials') is not null
@@ -468,6 +552,51 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
             where attrelid = to_regclass('platform.credentials')
               and attname = 'pepper_version'
               and not attisdropped
+          )
+          and (
+            select count(*) = 3
+            from information_schema.columns
+            where table_schema = 'platform'
+              and table_name = 'credentials'
+              and is_nullable = 'NO'
+              and (
+                (
+                  column_name = 'policy_ceiling_defaults_version'
+                  and data_type = 'text'
+                  and column_default =
+                    '''agent-permission-defaults-v1''::text'
+                )
+                or (
+                  column_name = 'policy_ceiling_schema_version'
+                  and data_type = 'integer'
+                  and column_default = '1'
+                )
+                or (
+                  column_name = 'policy_ceiling_rules'
+                  and data_type = 'jsonb'
+                  and column_default = '''{}''::jsonb'
+                )
+              )
+          )
+          and (
+            select count(*) = 2
+            from pg_catalog.pg_constraint as constraint_record
+            where constraint_record.contype = 'c'
+              and constraint_record.convalidated
+              and (
+                (
+                  constraint_record.conrelid =
+                    to_regclass('platform.agent_policies')
+                  and constraint_record.conname =
+                    'agent_policies_rules_valid'
+                )
+                or (
+                  constraint_record.conrelid =
+                    to_regclass('platform.credentials')
+                  and constraint_record.conname =
+                    'credentials_policy_ceiling_rules_valid'
+                )
+              )
           )
           and exists (
             select 1
@@ -489,6 +618,45 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
             where tgrelid = to_regclass('platform.action_logs')
               and tgname = 'action_logs_enforce_secret_values'
               and not tgisinternal
+          )
+          and (
+            select count(*) = 3
+            from pg_catalog.pg_trigger as trigger_record
+            where not trigger_record.tgisinternal
+              and trigger_record.tgenabled in ('O', 'A')
+              and (
+                (
+                  trigger_record.tgrelid =
+                    to_regclass('platform.agent_policies')
+                  and trigger_record.tgname =
+                    'agent_policies_validate_insert'
+                  and trigger_record.tgfoid =
+                    to_regprocedure(
+                      'platform.validate_agent_policy_insert()'
+                    )
+                  and trigger_record.tgtype = 7
+                )
+                or (
+                  trigger_record.tgrelid =
+                    to_regclass('platform.credentials')
+                  and trigger_record.tgname = 'credentials_validate_insert'
+                  and trigger_record.tgfoid =
+                    to_regprocedure(
+                      'platform.validate_credential_insert()'
+                    )
+                  and trigger_record.tgtype = 7
+                )
+                or (
+                  trigger_record.tgrelid =
+                    to_regclass('platform.credentials')
+                  and trigger_record.tgname = 'credentials_prepare_update'
+                  and trigger_record.tgfoid =
+                    to_regprocedure(
+                      'platform.prepare_credential_update()'
+                    )
+                  and trigger_record.tgtype = 19
+                )
+              )
           ) as ready
       `;
     });
@@ -666,10 +834,10 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
             ${policyId},
             ${agentId},
             'assisted',
-            'agent-permission-defaults-v1',
+            ${AGENT_POLICY_DEFAULTS_VERSION},
+            ${AGENT_POLICY_SCHEMA_VERSION},
             1,
-            1,
-            ${transaction.json(defaultAssistedRules)},
+            ${transaction.json({})},
             true,
             ${ownerId}
           )
@@ -836,6 +1004,246 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
         { agent_id: agentId, owner_id: ownerId },
       );
       return mapAgent(await this.#selectAgent(transaction, ownerId, agentId));
+    });
+  }
+
+  async updateAgentPolicy(
+    ownerId: string,
+    agentId: string,
+    input: UpdateAgentPolicyInput,
+    requestId: string,
+  ): Promise<AgentPolicyMutationResult> {
+    let normalizedRules: AgentPolicyRules;
+    try {
+      normalizedRules = normalizeAgentPolicyRules(input.tier, input.rules);
+    } catch {
+      throw new AgentConnectionError("POLICY_RULES_INVALID");
+    }
+
+    return this.#sql.begin(async (transaction) => {
+      await transaction`set local statement_timeout = '10s'`;
+      await this.#lockActiveOwner(transaction, ownerId);
+      const currentAgent = await this.#selectAgent(transaction, ownerId, agentId, true);
+      if (currentAgent.status === "archived") {
+        throw new AgentConnectionError("AGENT_STATE_CONFLICT");
+      }
+
+      const lockedPolicies = await transaction<
+        {
+          id: string;
+          tier: AgentPolicyTier;
+          defaults_version: string;
+          policy_schema_version: number;
+          version: string;
+          rules: unknown;
+          effective_from: Date;
+        }[]
+      >`
+        select
+          id,
+          tier,
+          defaults_version,
+          policy_schema_version,
+          version::text,
+          rules,
+          effective_from
+        from platform.agent_policies
+        where id = ${currentAgent.policy_id}
+          and agent_id = ${agentId}
+          and is_active
+        for update
+      `;
+      const lockedPolicy = lockedPolicies[0];
+      if (!lockedPolicy) {
+        throw new AgentConnectionError("AGENT_POLICY_VERSION_CONFLICT", {
+          currentPolicyTier: currentAgent.policy_tier,
+          currentPolicyVersion: currentAgent.policy_version,
+        });
+      }
+
+      const previousPolicy = mapAgent(currentAgent).policy;
+      const desiredMaterializedRules = materializeAgentPolicyRules(
+        input.tier,
+        normalizedRules,
+      );
+      const unchanged =
+        input.tier === previousPolicy.tier &&
+        JSON.stringify(desiredMaterializedRules) ===
+          JSON.stringify(previousPolicy.rules.operations);
+      const credentialImpact = await this.#credentialImpact(
+        transaction,
+        ownerId,
+        agentId,
+      );
+
+      // A convergent retry is a no-op even if its optimistic version is stale.
+      // It creates no audit or outbox noise because authority did not change.
+      if (unchanged) {
+        return {
+          agent: mapAgent(currentAgent),
+          changed: false,
+          credentialImpact,
+          previousPolicy,
+        };
+      }
+
+      if (input.expectedVersion !== lockedPolicy.version) {
+        throw new AgentConnectionError("AGENT_POLICY_VERSION_CONFLICT", {
+          currentPolicyTier: lockedPolicy.tier,
+          currentPolicyVersion: lockedPolicy.version,
+        });
+      }
+
+      const expandsAutonomousContentWrites = policyHasAutonomousContentWrites(
+        input.tier,
+        normalizedRules,
+      );
+      if (expandsAutonomousContentWrites && !input.autonomousAcknowledged) {
+        throw new AgentConnectionError("AUTONOMOUS_ACKNOWLEDGEMENT_REQUIRED");
+      }
+      if (expandsAutonomousContentWrites) {
+        const clockRows = await transaction<{ now: Date }[]>`
+          select clock_timestamp() as now
+        `;
+        const databaseNow = clockRows[0]?.now;
+        const authenticatedAt = input.authenticatedAt;
+        const authenticationAgeMs =
+          databaseNow &&
+          authenticatedAt instanceof Date &&
+          Number.isFinite(authenticatedAt.valueOf())
+            ? databaseNow.valueOf() - authenticatedAt.valueOf()
+            : Number.POSITIVE_INFINITY;
+        if (
+          input.authenticationAssurance !== "fresh_owner_session" ||
+          authenticationAgeMs < -60_000 ||
+          authenticationAgeMs > 10 * 60_000
+        ) {
+          throw new AgentConnectionError("OWNER_REAUTHENTICATION_REQUIRED");
+        }
+      }
+
+      const currentVersion = BigInt(lockedPolicy.version);
+      const postgresBigintMaximum = 9_223_372_036_854_775_807n;
+      if (currentVersion >= postgresBigintMaximum) {
+        throw new AgentConnectionError("AGENT_POLICY_VERSION_CONFLICT", {
+          currentPolicyTier: lockedPolicy.tier,
+          currentPolicyVersion: lockedPolicy.version,
+        });
+      }
+      const nextVersion = (currentVersion + 1n).toString();
+      const nextPolicyId = randomUUID();
+      const storedRules = agentPolicyRulesForStorage(input.tier, normalizedRules);
+
+      const deactivated = await transaction<{ id: string }[]>`
+        update platform.agent_policies
+        set is_active = false
+        where id = ${lockedPolicy.id}
+          and agent_id = ${agentId}
+          and version = ${lockedPolicy.version}
+          and is_active
+        returning id
+      `;
+      if (deactivated.length !== 1) {
+        throw new AgentConnectionError("AGENT_POLICY_VERSION_CONFLICT", {
+          currentPolicyTier: lockedPolicy.tier,
+          currentPolicyVersion: lockedPolicy.version,
+        });
+      }
+
+      await transaction`
+        insert into platform.agent_policies (
+          id,
+          agent_id,
+          tier,
+          defaults_version,
+          policy_schema_version,
+          version,
+          rules,
+          is_active,
+          configured_by_owner_id
+        )
+        values (
+          ${nextPolicyId},
+          ${agentId},
+          ${input.tier},
+          ${AGENT_POLICY_DEFAULTS_VERSION},
+          ${AGENT_POLICY_SCHEMA_VERSION},
+          ${nextVersion},
+          ${transaction.json(storedRules)},
+          true,
+          ${ownerId}
+        )
+      `;
+
+      const outboxEventId = await this.#writeOutboxEvent(
+        transaction,
+        "agent",
+        agentId,
+        "agent.permission_policy_changed.v1",
+        {
+          agent_id: agentId,
+          autonomous_content_write_acknowledged:
+            expandsAutonomousContentWrites && input.autonomousAcknowledged,
+          defaults_version: AGENT_POLICY_DEFAULTS_VERSION,
+          owner_id: ownerId,
+          policy_id: nextPolicyId,
+          policy_schema_version: AGENT_POLICY_SCHEMA_VERSION,
+          policy_tier: input.tier,
+          policy_version: nextVersion,
+          previous_policy_version: lockedPolicy.version,
+          rules: desiredMaterializedRules,
+        },
+      );
+      const reasonCode =
+        input.tier === "autonomous"
+          ? "owner_enabled_autonomous"
+          : input.tier === "custom" && expandsAutonomousContentWrites
+            ? "owner_enabled_custom_autonomous_write"
+            : "owner_changed_agent_policy";
+      await this.#writeActionLog(transaction, {
+        action: "agent.policy.update",
+        agentId,
+        after: {
+          defaults_version: AGENT_POLICY_DEFAULTS_VERSION,
+          policy_id: nextPolicyId,
+          policy_schema_version: AGENT_POLICY_SCHEMA_VERSION,
+          rules: desiredMaterializedRules,
+          tier: input.tier,
+          version: nextVersion,
+        },
+        authenticationAssurance: input.authenticationAssurance,
+        authorizationSnapshot: {
+          authenticated_at: input.authenticatedAt.toISOString(),
+          autonomous_content_write_acknowledged:
+            expandsAutonomousContentWrites && input.autonomousAcknowledged,
+          expected_policy_version: input.expectedVersion,
+          owner_direct_control: true,
+        },
+        before: {
+          defaults_version: lockedPolicy.defaults_version,
+          policy_id: lockedPolicy.id,
+          policy_schema_version: lockedPolicy.policy_schema_version,
+          rules: previousPolicy.rules.operations,
+          tier: lockedPolicy.tier,
+          version: lockedPolicy.version,
+        },
+        channel: "owner_api",
+        eventClass: "authorization_change",
+        outboxEventId,
+        ownerId,
+        policyVersion: nextVersion,
+        reasonCode,
+        requestId,
+        targetId: nextPolicyId,
+        targetType: "agent_policy",
+      });
+
+      return {
+        agent: mapAgent(await this.#selectAgent(transaction, ownerId, agentId)),
+        changed: true,
+        credentialImpact,
+        previousPolicy,
+      };
     });
   }
 
@@ -1071,6 +1479,9 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
         credential.scopes,
         credential.audience,
         credential.policy_ceiling,
+        credential.policy_ceiling_defaults_version,
+        credential.policy_ceiling_schema_version,
+        credential.policy_ceiling_rules,
         credential.issued_at,
         credential.expires_at,
         credential.last_used_at,
@@ -1122,6 +1533,17 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
       const expiresAt = this.#resolveExpiry(input.expiresAt);
       const generated = generateStaticApiKey(this.#currentApiKeyPepper());
       const credentialId = randomUUID();
+      const currentPolicyRules = parsePersistedAgentPolicyRules(
+        agent.policy_tier,
+        agent.policy_rules,
+      );
+      if (!currentPolicyRules) {
+        throw new Error("The persisted Agent policy rules are invalid.");
+      }
+      const ceilingRules = agentPolicyRulesForStorage(
+        agent.policy_tier,
+        currentPolicyRules,
+      );
       await transaction`
         insert into platform.credentials (
           id,
@@ -1135,6 +1557,9 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
           scopes,
           audience,
           policy_ceiling,
+          policy_ceiling_defaults_version,
+          policy_ceiling_schema_version,
+          policy_ceiling_rules,
           expires_at
         )
         values (
@@ -1149,6 +1574,9 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
           ${input.scopes},
           ${this.#options.apiAudience},
           ${agent.policy_tier},
+          ${agent.defaults_version},
+          ${agent.policy_schema_version},
+          ${transaction.json(ceilingRules)},
           ${expiresAt}
         )
       `;
@@ -1161,6 +1589,9 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
           expires_at: expiresAt.toISOString(),
           pepper_version: this.#options.apiKeyCurrentPepperVersion,
           policy_ceiling: agent.policy_tier,
+          policy_ceiling_defaults_version: agent.defaults_version,
+          policy_ceiling_schema_version: agent.policy_schema_version,
+          policy_ceiling_rules: ceilingRules,
           scopes: input.scopes,
         },
         credentialId,
@@ -1183,6 +1614,9 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
           expires_at: expiresAt.toISOString(),
           owner_id: ownerId,
           policy_ceiling: agent.policy_tier,
+          policy_ceiling_defaults_version: agent.defaults_version,
+          policy_ceiling_schema_version: agent.policy_schema_version,
+          policy_ceiling_rules: ceilingRules,
           scopes: input.scopes,
         },
       );
@@ -1223,6 +1657,17 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
       const expiresAt = this.#resolveExpiry(input.expiresAt);
       const generated = generateStaticApiKey(this.#currentApiKeyPepper());
       const replacementId = randomUUID();
+      const currentCeilingRules = parsePersistedAgentPolicyRules(
+        current.policy_ceiling,
+        current.policy_ceiling_rules,
+      );
+      if (!currentCeilingRules) {
+        throw new Error("The persisted Credential policy ceiling is invalid.");
+      }
+      const replacementCeilingRules = agentPolicyRulesForStorage(
+        current.policy_ceiling,
+        currentCeilingRules,
+      );
 
       await transaction`
         update platform.credentials
@@ -1245,6 +1690,9 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
           scopes,
           audience,
           policy_ceiling,
+          policy_ceiling_defaults_version,
+          policy_ceiling_schema_version,
+          policy_ceiling_rules,
           expires_at,
           replaces_credential_id
         )
@@ -1260,6 +1708,9 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
           ${current.scopes},
           ${current.audience},
           ${current.policy_ceiling},
+          ${current.policy_ceiling_defaults_version},
+          ${current.policy_ceiling_schema_version},
+          ${transaction.json(replacementCeilingRules)},
           ${expiresAt},
           ${credentialId}
         )
@@ -1272,6 +1723,9 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
           credential_id: credentialId,
           expires_at: current.expires_at?.toISOString() ?? null,
           policy_ceiling: current.policy_ceiling,
+          policy_ceiling_defaults_version: current.policy_ceiling_defaults_version,
+          policy_ceiling_rules: replacementCeilingRules,
+          policy_ceiling_schema_version: current.policy_ceiling_schema_version,
           scopes: current.scopes,
           status: "active",
         },
@@ -1281,6 +1735,9 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
           expires_at: expiresAt.toISOString(),
           pepper_version: this.#options.apiKeyCurrentPepperVersion,
           policy_ceiling: current.policy_ceiling,
+          policy_ceiling_defaults_version: current.policy_ceiling_defaults_version,
+          policy_ceiling_rules: replacementCeilingRules,
+          policy_ceiling_schema_version: current.policy_ceiling_schema_version,
           scopes: current.scopes,
           status: "active",
         },
@@ -1304,6 +1761,9 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
           expires_at: expiresAt.toISOString(),
           owner_id: ownerId,
           policy_ceiling: current.policy_ceiling,
+          policy_ceiling_defaults_version: current.policy_ceiling_defaults_version,
+          policy_ceiling_rules: replacementCeilingRules,
+          policy_ceiling_schema_version: current.policy_ceiling_schema_version,
           replacement_credential_id: replacementId,
           scopes: current.scopes,
         },
@@ -1450,6 +1910,7 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
         policy.policy_schema_version,
         policy.version::text as policy_version,
         policy.effective_from,
+        policy.rules as policy_rules,
         credential.id as credential_id,
         credential.owner_id as credential_owner_id,
         credential.agent_id as credential_agent_id,
@@ -1461,6 +1922,11 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
         credential.scopes as credential_scopes,
         credential.audience as credential_audience,
         credential.policy_ceiling as credential_policy_ceiling,
+        credential.policy_ceiling_defaults_version
+          as credential_policy_ceiling_defaults_version,
+        credential.policy_ceiling_schema_version
+          as credential_policy_ceiling_schema_version,
+        credential.policy_ceiling_rules as credential_policy_ceiling_rules,
         credential.issued_at as credential_issued_at,
         credential.expires_at as credential_expires_at,
         (
@@ -1530,6 +1996,9 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
         scopes: row.credential_scopes,
         audience: row.credential_audience,
         policy_ceiling: row.credential_policy_ceiling,
+        policy_ceiling_defaults_version: row.credential_policy_ceiling_defaults_version,
+        policy_ceiling_schema_version: row.credential_policy_ceiling_schema_version,
+        policy_ceiling_rules: row.credential_policy_ceiling_rules,
         issued_at: row.credential_issued_at,
         expires_at: row.credential_expires_at,
         last_used_at: row.credential_last_used_at,
@@ -1674,7 +2143,8 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
         policy.defaults_version,
         policy.policy_schema_version,
         policy.version::text as policy_version,
-        policy.effective_from
+        policy.effective_from,
+        policy.rules as policy_rules
       from platform.agents as agent
       join platform.actors as actor
         on actor.id = agent.actor_id
@@ -1733,7 +2203,8 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
         policy.defaults_version,
         policy.policy_schema_version,
         policy.version::text as policy_version,
-        policy.effective_from
+        policy.effective_from,
+        policy.rules as policy_rules
       from platform.agents as agent
       join platform.actors as actor
         on actor.id = agent.actor_id
@@ -1771,6 +2242,9 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
         credential.scopes,
         credential.audience,
         credential.policy_ceiling,
+        credential.policy_ceiling_defaults_version,
+        credential.policy_ceiling_schema_version,
+        credential.policy_ceiling_rules,
         credential.issued_at,
         credential.expires_at,
         credential.last_used_at,
@@ -1838,6 +2312,9 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
         credential.scopes,
         credential.audience,
         credential.policy_ceiling,
+        credential.policy_ceiling_defaults_version,
+        credential.policy_ceiling_schema_version,
+        credential.policy_ceiling_rules,
         credential.issued_at,
         credential.expires_at,
         credential.last_used_at,
@@ -1876,6 +2353,34 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
       throw new AgentConnectionError("RESOURCE_NOT_FOUND");
     }
     return row;
+  }
+
+  async #credentialImpact(
+    sql: QuerySql,
+    ownerId: string,
+    agentId: string,
+  ): Promise<AgentPolicyCredentialImpact> {
+    const rows = await sql<{ policy_ceiling: AgentPolicyTier; count: number }[]>`
+      select policy_ceiling, count(*)::integer as count
+      from platform.credentials
+      where owner_id = ${ownerId}
+        and agent_id = ${agentId}
+        and credential_type = 'static_api_key'
+        and revoked_at is null
+        and (expires_at is null or expires_at > clock_timestamp())
+      group by policy_ceiling
+    `;
+    const ceilingCounts: Record<AgentPolicyTier, number> = {
+      read_only: 0,
+      assisted: 0,
+      autonomous: 0,
+      custom: 0,
+    };
+    for (const row of rows) ceilingCounts[row.policy_ceiling] = row.count;
+    return {
+      ceilingCounts,
+      retainedCredentialCount: rows.reduce((total, row) => total + row.count, 0),
+    };
   }
 
   async #enforceCredentialLimits(
@@ -1979,7 +2484,11 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
       before?: postgres.JSONValue | undefined;
       after?: postgres.JSONValue | undefined;
       credentialId?: string | undefined;
+      authenticationAssurance?: "owner_session" | "fresh_owner_session" | undefined;
+      authorizationSnapshot?: postgres.JSONValue | undefined;
+      channel?: "web" | "owner_api" | undefined;
       eventClass: "domain_write" | "authorization_change" | "security_rejection";
+      outboxEventId?: string | undefined;
       ownerId: string;
       policyVersion?: string | undefined;
       reasonCode?: string | undefined;
@@ -2007,6 +2516,7 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
         decision,
         outcome,
         reason_code,
+        outbox_event_id,
         policy_version,
         request_id,
         before_state,
@@ -2019,17 +2529,18 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
         ${event.ownerId},
         ${event.agentId ?? null},
         ${event.credentialId ?? null},
-        'web',
+        ${event.channel ?? "web"},
         'owner_direct',
         ${event.ownerId},
-        'owner_session',
-        ${sql.json({ owner_session: true })},
+        ${event.authenticationAssurance ?? "owner_session"},
+        ${sql.json(event.authorizationSnapshot ?? { owner_session: true })},
         ${event.action},
         ${event.targetType},
         ${event.targetId},
         'allow',
         'succeeded',
         ${event.reasonCode ?? null},
+        ${event.outboxEventId ?? null},
         ${event.policyVersion ?? null},
         ${event.requestId},
         ${event.before ? sql.json(event.before) : null},
@@ -2044,7 +2555,7 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
     aggregateId: string,
     eventType: string,
     payload: postgres.JSONValue,
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     const rows = await sql<{ next_sequence: string }[]>`
       select coalesce(
         (
@@ -2057,7 +2568,7 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
       )::text as next_sequence
     `;
     const nextSequence = rows[0]?.next_sequence ?? "1";
-    await sql`
+    const inserted = await sql<{ id: string }[]>`
       insert into system.outbox_events (
         aggregate_type,
         aggregate_id,
@@ -2072,6 +2583,8 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
         ${eventType},
         ${sql.json(payload)}
       )
+      returning id
     `;
+    return inserted[0]?.id;
   }
 }

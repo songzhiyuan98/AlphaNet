@@ -79,7 +79,7 @@ export function LoginForm({
 
       {googleAuthEnabled ? (
         <>
-          <GoogleAuthButton intent="login" />
+          <GoogleAuthButton callbackPath={nextPath as `/${string}`} intent="login" />
           <div className="authDivider">
             <span>或使用邮箱</span>
           </div>

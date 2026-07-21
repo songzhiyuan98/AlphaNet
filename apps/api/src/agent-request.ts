@@ -296,7 +296,14 @@ export async function authorizeAgentRequest(
 
   const evaluation = evaluateAgentOperation({
     credentialPolicyCeiling: context.credential.policyCeiling,
+    credentialPolicyCeilingDefaultsVersion:
+      context.credential.policyCeilingDefaultsVersion,
+    credentialPolicyCeilingRules: context.credential.policyCeilingRules,
+    credentialPolicyCeilingSchemaVersion: context.credential.policyCeilingSchemaVersion,
     operation: options.operation,
+    policyDefaultsVersion: context.agent.policy.defaultsVersion,
+    policyRules: context.agent.policy.rules,
+    policySchemaVersion: context.agent.policy.schemaVersion,
     policyTier: context.agent.policy.tier,
     scopes: context.credential.scopes,
   });

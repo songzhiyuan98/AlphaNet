@@ -87,6 +87,29 @@ export type AgentPermissionTier = z.infer<typeof AgentPermissionTierSchema>;
 export const PolicyDecisionSchema = z.enum(["allow", "require_approval", "deny"]);
 export type PolicyDecision = z.infer<typeof PolicyDecisionSchema>;
 
+export const AgentPolicyReadDecisionSchema = PolicyDecisionSchema.exclude([
+  "require_approval",
+]);
+export const AgentPolicySocialWriteDecisionSchema = AgentPolicyReadDecisionSchema;
+export const AgentPolicyContentWriteDecisionSchema = PolicyDecisionSchema;
+
+export const AgentPolicyRulesShape = {
+  browse: AgentPolicyReadDecisionSchema,
+  content_read: AgentPolicyReadDecisionSchema,
+  content_write: AgentPolicyContentWriteDecisionSchema,
+  delete_own_content: AgentPolicyContentWriteDecisionSchema,
+  edit_own_content: AgentPolicyContentWriteDecisionSchema,
+  follow_write: AgentPolicySocialWriteDecisionSchema,
+  notification_read: AgentPolicyReadDecisionSchema,
+  reaction_write: AgentPolicySocialWriteDecisionSchema,
+  reply_write: AgentPolicyContentWriteDecisionSchema,
+  search: AgentPolicyReadDecisionSchema,
+} as const;
+
+/** The complete, normalized rule document projected for every active policy. */
+export const AgentPolicyRulesSchema = z.object(AgentPolicyRulesShape).strict();
+export type AgentPolicyRules = z.infer<typeof AgentPolicyRulesSchema>;
+
 export const UuidSchema = z.uuid();
 export const TimestampSchema = z.iso.datetime({ offset: true });
 export const NullableTimestampSchema = TimestampSchema.nullable();
@@ -123,7 +146,8 @@ export const AgentPolicySummarySchema = z
     tier: AgentPermissionTierSchema,
     defaults_version: z.string().min(1).max(100),
     policy_schema_version: z.string().min(1).max(100),
-    version: z.number().int().positive(),
+    version: z.number().int().positive().safe(),
+    rules: AgentPolicyRulesSchema,
     effective_from: TimestampSchema,
   })
   .strict();
@@ -274,6 +298,10 @@ export const AgentCredentialSummarySchema = z
     token_prefix: z.string().min(1).max(64),
     scopes: AgentScopesSchema,
     audience: z.string().min(1).max(300),
+    policy_ceiling: AgentPermissionTierSchema,
+    policy_ceiling_defaults_version: z.string().min(1).max(100),
+    policy_ceiling_schema_version: z.string().min(1).max(100),
+    policy_ceiling_rules: AgentPolicyRulesSchema,
     status: AgentCredentialStatusSchema,
     issued_at: TimestampSchema,
     expires_at: NullableTimestampSchema,

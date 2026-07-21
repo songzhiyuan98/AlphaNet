@@ -19,6 +19,7 @@ import {
 import {
   AgentConnectionError,
   type AgentConnectionService,
+  type AgentPolicyRules,
   type CredentialView,
   type OwnerAgentView,
   type PublicAgentProfile,
@@ -56,6 +57,7 @@ const ownerSession: OwnerSession = {
     status: "active",
   },
   session: {
+    createdAt: timestamps.created,
     expiresAt: timestamps.expires,
     id: ids.session,
   },
@@ -83,6 +85,7 @@ const ownerAgent: OwnerAgentView = {
     schemaVersion: 1,
     version: "1",
     effectiveFrom: timestamps.created,
+    rules: { operations: {} },
   },
 };
 
@@ -104,6 +107,9 @@ const credential: CredentialView = {
   ],
   audience: "https://api.alphanet.test/v1",
   policyCeiling: "assisted",
+  policyCeilingDefaultsVersion: "agent-permission-defaults-v1",
+  policyCeilingRules: { operations: {} },
+  policyCeilingSchemaVersion: 1,
   issuedAt: timestamps.created,
   expiresAt: timestamps.expires,
   lastUsedAt: null,
@@ -199,6 +205,9 @@ function createService() {
         status: "revoked",
         revokedAt: timestamps.revoked,
       }),
+    ),
+    updateAgentPolicy: vi.fn<AgentConnectionService["updateAgentPolicy"]>(() =>
+      Promise.reject(new Error("unexpected Agent policy update")),
     ),
     authenticateStaticApiKey: vi.fn<AgentConnectionService["authenticateStaticApiKey"]>(
       () =>
@@ -535,6 +544,18 @@ describe("Agent connection Owner routes", () => {
             defaults_version: "agent-permission-defaults-v1",
             policy_schema_version: "1",
             version: 1,
+            rules: {
+              browse: "allow",
+              content_read: "allow",
+              content_write: "require_approval",
+              delete_own_content: "require_approval",
+              edit_own_content: "require_approval",
+              follow_write: "allow",
+              notification_read: "allow",
+              reaction_write: "allow",
+              reply_write: "require_approval",
+              search: "allow",
+            },
             effective_from: "2026-07-20T12:00:00.000Z",
           },
           credential_count: 1,
@@ -619,6 +640,17 @@ describe("Agent connection Owner routes", () => {
     expect(OwnerCredentialCreateResponseSchema.safeParse(created.json()).success).toBe(
       true,
     );
+    expect(created.json()).toMatchObject({
+      credential: {
+        policy_ceiling: "assisted",
+        policy_ceiling_defaults_version: "agent-permission-defaults-v1",
+        policy_ceiling_schema_version: "1",
+        policy_ceiling_rules: {
+          content_write: "require_approval",
+          reaction_write: "allow",
+        },
+      },
+    });
 
     expect(listed.statusCode).toBe(200);
     expect(OwnerCredentialListResponseSchema.safeParse(listed.json()).success).toBe(true);
@@ -637,6 +669,59 @@ describe("Agent connection Owner routes", () => {
     );
     expect(revoked.json()).not.toHaveProperty("api_key");
     expect(revoked.body).not.toContain(apiKey);
+  });
+
+  it("materializes Custom credential ceilings and fails closed without a snapshot", async () => {
+    const customService = createService();
+    customService.listOwnerCredentials.mockResolvedValueOnce([
+      {
+        ...credential,
+        policyCeiling: "custom",
+        policyCeilingRules: {
+          operations: { content_write: "allow", reaction_write: "deny" },
+        },
+      },
+    ]);
+    const customApp = await createApp({ service: customService });
+    const customResponse = await customApp.app.inject({
+      headers: { cookie: "alphanet.session_token=opaque-session" },
+      method: "GET",
+      url: `/v1/owner/credentials?agent_id=${ids.agent}`,
+    });
+
+    expect(customResponse.statusCode).toBe(200);
+    expect(customResponse.json()).toMatchObject({
+      credentials: [
+        {
+          policy_ceiling: "custom",
+          policy_ceiling_rules: {
+            browse: "allow",
+            content_write: "allow",
+            reaction_write: "deny",
+            reply_write: "require_approval",
+          },
+        },
+      ],
+    });
+
+    const invalidService = createService();
+    invalidService.listOwnerCredentials.mockResolvedValueOnce([
+      {
+        ...credential,
+        policyCeilingRules: undefined,
+      } as unknown as CredentialView,
+    ]);
+    const invalidApp = await createApp({ service: invalidService });
+    const invalidResponse = await invalidApp.app.inject({
+      headers: { cookie: "alphanet.session_token=opaque-session" },
+      method: "GET",
+      url: `/v1/owner/credentials?agent_id=${ids.agent}`,
+    });
+
+    expect(invalidResponse.statusCode).toBe(503);
+    expect(invalidResponse.json()).toMatchObject({
+      error: { code: "TEMPORARILY_UNAVAILABLE" },
+    });
   });
 });
 
@@ -898,6 +983,7 @@ describe("Agent Bearer and public routes", () => {
           ...ownerAgent.policy,
           tier: "custom",
           version: "2",
+          rules: undefined as unknown as AgentPolicyRules,
         },
       },
       credential,
@@ -922,6 +1008,49 @@ describe("Agent Bearer and public routes", () => {
         .filter(([name]) => name !== "get_agent_context")
         .every(([, value]) => value.default_decision === "deny"),
     ).toBe(true);
+  });
+
+  it("projects Custom policy and Credential ceiling rules into capabilities", async () => {
+    const service = createService();
+    service.authenticateStaticApiKey.mockResolvedValueOnce({
+      agent: {
+        ...ownerAgent,
+        policy: {
+          ...ownerAgent.policy,
+          tier: "custom",
+          version: "2",
+          rules: {
+            operations: {
+              content_write: "allow",
+              search: "deny",
+            },
+          },
+        },
+      },
+      credential: {
+        ...credential,
+        policyCeiling: "custom",
+        policyCeilingRules: {
+          operations: { content_write: "require_approval", search: "allow" },
+        },
+      },
+      owner: { id: ids.owner },
+    });
+    const { app } = await createApp({ service });
+
+    const response = await app.inject({
+      headers: { authorization: `Bearer ${apiKey}` },
+      method: "GET",
+      url: "/v1/agent/context",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json<AgentContextResponse>().effective_capabilities).toMatchObject({
+      browse_content: { default_decision: "allow" },
+      create_post: { default_decision: "require_approval" },
+      reply_to_content: { default_decision: "require_approval" },
+      search_content: { default_decision: "deny" },
+    });
   });
 
   it("projects community-only credentials onto both community discovery tools", async () => {

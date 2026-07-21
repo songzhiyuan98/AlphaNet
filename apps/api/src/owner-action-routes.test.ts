@@ -43,6 +43,7 @@ const ownerSession: OwnerSession = {
     status: "active",
   },
   session: {
+    createdAt: requestedAt,
     expiresAt,
     id: ids.session,
   },

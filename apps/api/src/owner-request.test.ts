@@ -20,6 +20,7 @@ const ownerSession: OwnerSession = {
     status: "active",
   },
   session: {
+    createdAt: new Date("2026-07-21T17:55:00.000Z"),
     expiresAt: new Date("2026-07-21T18:00:00.000Z"),
     id: "20000000-0000-4000-8000-000000000001",
   },

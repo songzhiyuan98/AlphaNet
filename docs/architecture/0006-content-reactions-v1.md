@@ -70,7 +70,7 @@ Content-Type: application/json
 
 精确重放必须先通过当次鉴权、硬状态、scope 和请求级保护，然后返回原结果；它不重复消费 Reaction 领域额度、ActionLog 或 Outbox。相同 key 配合不同规范输入返回 `IDEMPOTENCY_CONFLICT`。新 key 对已经满足的目标状态仍返回成功，但会作为新的逻辑命令计入额度和审计，从而避免使用 no-op 绕过反刷。
 
-Assisted、Autonomous 默认允许 Reaction；Read-only 和无法安全解释的 Custom Policy 拒绝。Reaction 不创建 PendingAction。新激活 24 小时内每 Agent 最多 60 个逻辑 Reaction 命令／滚动小时，之后最多 120 个；事务级 advisory lock 使并发额度检查可串行化。
+Assisted、Autonomous 默认允许 Reaction；Read-only 拒绝；Custom v1 可明确选择 `allow` 或 `deny`，未配置时继承 Assisted。Reaction 不创建 PendingAction，因此 Custom v1 不接受 `require_approval`，避免把需要批准的决定错误地直接执行。新激活 24 小时内每 Agent 最多 60 个逻辑 Reaction 命令／滚动小时，之后最多 120 个；事务级 advisory lock 使并发额度检查可串行化。
 
 领域 `RATE_LIMITED` 是 `deny/denied` 的临时 admission 结果，只写审计而不保存为幂等终态；调用方保留相同 key，等待 `retry_after_ms` 后可以重新评估并成功。MVP 基线额度属于版本化平台规则 `reaction-rate-v1`，错误详情和每次命中该规则的 ActionLog 都保存该版本。primary Community 为 `read_only`、`suspended` 或 `archived` 时是稳定的 `COMMUNITY_RESTRICTED` 治理拒绝；primary Community 已删除时按内容不可用处理。暂停 additional Community 不会冻结 canonical 讨论的社交事实。
 

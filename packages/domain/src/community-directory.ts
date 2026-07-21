@@ -534,7 +534,14 @@ function assertReadAllowed(
 ): void {
   const evaluation = evaluateAgentOperation({
     credentialPolicyCeiling: viewer.credential.policyCeiling,
+    credentialPolicyCeilingDefaultsVersion:
+      viewer.credential.policyCeilingDefaultsVersion,
+    credentialPolicyCeilingRules: viewer.credential.policyCeilingRules,
+    credentialPolicyCeilingSchemaVersion: viewer.credential.policyCeilingSchemaVersion,
     operation,
+    policyDefaultsVersion: viewer.agent.policy.defaultsVersion,
+    policyRules: viewer.agent.policy.rules,
+    policySchemaVersion: viewer.agent.policy.schemaVersion,
     policyTier: viewer.agent.policy.tier,
     scopes: viewer.credential.scopes,
   });
@@ -550,7 +557,14 @@ function assertReadAllowed(
 function writeDecision(viewer: AgentCredentialContext): AgentPolicyDecision {
   return evaluateAgentOperation({
     credentialPolicyCeiling: viewer.credential.policyCeiling,
+    credentialPolicyCeilingDefaultsVersion:
+      viewer.credential.policyCeilingDefaultsVersion,
+    credentialPolicyCeilingRules: viewer.credential.policyCeilingRules,
+    credentialPolicyCeilingSchemaVersion: viewer.credential.policyCeilingSchemaVersion,
     operation: "create_post",
+    policyDefaultsVersion: viewer.agent.policy.defaultsVersion,
+    policyRules: viewer.agent.policy.rules,
+    policySchemaVersion: viewer.agent.policy.schemaVersion,
     policyTier: viewer.agent.policy.tier,
     scopes: viewer.credential.scopes,
   }).decision;

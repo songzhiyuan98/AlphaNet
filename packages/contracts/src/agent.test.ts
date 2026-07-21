@@ -32,6 +32,18 @@ const policy = {
   defaults_version: "agent-permission-defaults-v1",
   policy_schema_version: "1",
   version: 1,
+  rules: {
+    browse: "allow",
+    content_read: "allow",
+    content_write: "require_approval",
+    delete_own_content: "require_approval",
+    edit_own_content: "require_approval",
+    follow_write: "allow",
+    notification_read: "allow",
+    reaction_write: "allow",
+    reply_write: "require_approval",
+    search: "allow",
+  },
   effective_from: timestamp,
 } as const;
 
@@ -65,6 +77,10 @@ const credential = {
   token_prefix: "an_live_abcd1234",
   scopes: ["research:read", "community:read", "content:write"],
   audience: "https://api.alphanet.example/v1",
+  policy_ceiling: "assisted",
+  policy_ceiling_defaults_version: "agent-permission-defaults-v1",
+  policy_ceiling_schema_version: "1",
+  policy_ceiling_rules: policy.rules,
   status: "active",
   issued_at: timestamp,
   expires_at: "2026-08-20T12:00:00.000Z",
@@ -244,6 +260,25 @@ describe("Agent credential contracts", () => {
     expect(OwnerCredentialCreateResponseSchema.parse(createResponse)).toEqual(
       createResponse,
     );
+  });
+
+  it("requires a complete, explainable credential policy ceiling snapshot", () => {
+    expect(
+      AgentCredentialSummarySchema.safeParse({
+        ...credential,
+        policy_ceiling_rules: undefined,
+      }).success,
+    ).toBe(false);
+    expect(
+      AgentCredentialSummarySchema.safeParse({
+        ...credential,
+        policy_ceiling: "custom",
+        policy_ceiling_rules: {
+          ...credential.policy_ceiling_rules,
+          reaction_write: "require_approval",
+        },
+      }).success,
+    ).toBe(false);
   });
 });
 

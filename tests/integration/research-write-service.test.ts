@@ -2258,4 +2258,103 @@ describeResearchWrite("PostgresResearchWriteService", () => {
       },
     ]);
   });
+
+  it("does not auto-execute pending work on relaxation and invalidates it after tightening", async () => {
+    const bodyMarkdown = `policy-transition-${randomUUID()}: never publish this text.`;
+    const pending = await service.createPost(
+      assistedContext,
+      {
+        bodyMarkdown,
+        idempotencyKey: `policy-transition-${randomUUID()}`,
+        primaryCommunityId: generalCommunityId,
+        title: "Pending policy transition boundary",
+      },
+      { requestId: `req-${randomUUID()}` },
+    );
+    const actionId = pending.pendingAction?.id;
+    expectUuid(actionId);
+    expect(pending.status).toBe("pending_approval");
+
+    const relaxed = await agentService.updateAgentPolicy(
+      assistedContext.owner.id,
+      assistedContext.agent.id,
+      {
+        authenticatedAt: new Date(),
+        authenticationAssurance: "fresh_owner_session",
+        autonomousAcknowledged: true,
+        expectedVersion: assistedContext.agent.policy.version,
+        rules: {},
+        tier: "autonomous",
+      },
+      `req-${randomUUID()}`,
+    );
+    expect(relaxed.agent.policy.version).toBe("2");
+
+    const stillPending = await postgres.sql<{ state: string; version: number }[]>`
+      select state, version::integer as version
+      from platform.pending_actions
+      where id = ${actionId}
+    `;
+    expect(stillPending).toEqual([{ state: "pending_approval", version: 1 }]);
+
+    const tightened = await agentService.updateAgentPolicy(
+      assistedContext.owner.id,
+      assistedContext.agent.id,
+      {
+        authenticatedAt: new Date(),
+        authenticationAssurance: "owner_session",
+        autonomousAcknowledged: false,
+        expectedVersion: relaxed.agent.policy.version,
+        rules: {},
+        tier: "read_only",
+      },
+      `req-${randomUUID()}`,
+    );
+    expect(tightened.agent.policy.version).toBe("3");
+
+    const detail = await ownerActionService.getAction(
+      assistedContext.owner.id,
+      actionId,
+      { requestId: `req-${randomUUID()}` },
+    );
+    await ownerActionService.approveAction(assistedContext.owner.id, actionId, {
+      expectedVersion: detail.version,
+      reasonCode: "owner_approved",
+      requestId: `req-${randomUUID()}`,
+    });
+
+    const executionRepository = new PostgresPendingActionExecutionRepository(
+      postgres.sql,
+      {
+        leaseOwner: `policy-transition-integration:${randomUUID()}`,
+        leaseSeconds: 30,
+      },
+    );
+    const claim = await claimIsolatedAction(executionRepository, actionId);
+    if (!claim) throw new Error("The tightened action was not available to the worker");
+    await expect(
+      service.executeApprovedAction(executionRepository, claim),
+    ).rejects.toMatchObject({
+      code: "APPROVED_ACTION_CONTEXT_INVALID",
+      disposition: "invalidate",
+    });
+    const invalidated = await executionRepository.markInvalidated(claim);
+    expect(invalidated).toMatchObject({
+      action: { actionId, state: "invalidated" },
+      applied: true,
+    });
+
+    const effects = await postgres.sql<{ content_count: number; state: string }[]>`
+      select
+        action.state,
+        (
+          select count(*)::integer
+          from platform.content_revisions as revision
+          where revision.body_markdown = ${bodyMarkdown}
+        ) as content_count
+      from platform.pending_actions as action
+      where action.id = ${actionId}
+    `;
+    expect(effects).toEqual([{ content_count: 0, state: "invalidated" }]);
+  });
 });

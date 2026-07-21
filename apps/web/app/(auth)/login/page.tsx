@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 
 import { LoginForm } from "../../../components/auth/login-form";
+import { safeLoginNextPath } from "../../../lib/safe-login-next";
 import { isGoogleAuthEnabled } from "../../../lib/web-auth-config";
 
 export const dynamic = "force-dynamic";
@@ -13,11 +14,6 @@ type SearchValue = string | string[] | undefined;
 
 function first(value: SearchValue): string | undefined {
   return Array.isArray(value) ? value[0] : value;
-}
-
-function safeNextPath(value: SearchValue): string {
-  const candidate = first(value);
-  return candidate && new Set(["/home"]).has(candidate) ? candidate : "/home";
 }
 
 export default async function LoginPage({
@@ -36,7 +32,7 @@ export default async function LoginPage({
   return (
     <LoginForm
       googleAuthEnabled={isGoogleAuthEnabled()}
-      nextPath={safeNextPath(params.next)}
+      nextPath={safeLoginNextPath(params.next)}
       {...(notice ? { notice } : {})}
     />
   );

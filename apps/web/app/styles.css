@@ -2379,6 +2379,418 @@ footer {
   padding-top: 22px;
 }
 
+.agentPolicySummary {
+  display: grid;
+  gap: 4px;
+}
+
+.agentPolicySummary strong {
+  color: #dce3d8;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 620;
+}
+
+.agentPolicySummary span {
+  color: #717a6e;
+}
+
+.agentPolicyPanel {
+  background: #0c0f0c;
+  border: 1px solid rgba(183, 243, 67, 0.18);
+  border-radius: 11px;
+  display: grid;
+  gap: 22px;
+  margin-top: 20px;
+  padding: 22px;
+}
+
+.policyPanelHeader,
+.policySectionHeading {
+  align-items: start;
+  display: flex;
+  gap: 18px;
+  justify-content: space-between;
+}
+
+.policyPanelHeader .authKicker {
+  margin-bottom: 7px;
+}
+
+.policyPanelHeader h3 {
+  font-size: 20px;
+  letter-spacing: -0.025em;
+  margin: 0;
+}
+
+.policyPanelHeader > div > p:last-child {
+  color: #7f887c;
+  font-size: 10px;
+  line-height: 1.6;
+  margin: 8px 0 0;
+}
+
+.policyMessage {
+  margin: 0;
+}
+
+.policyTierFieldset,
+.customPolicyFieldset {
+  border: 0;
+  margin: 0;
+  min-width: 0;
+  padding: 0;
+}
+
+.policyTierFieldset > legend,
+.customPolicyFieldset > legend {
+  color: #dce2d8;
+  font-size: 11px;
+  font-weight: 620;
+  margin-bottom: 12px;
+}
+
+.policyTierGrid {
+  display: grid;
+  gap: 9px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.policyTierOption {
+  background: #111511;
+  border: 1px solid #2d332c;
+  border-radius: 9px;
+  cursor: pointer;
+  display: grid;
+  min-height: 132px;
+  padding: 15px;
+  position: relative;
+}
+
+.policyTierOption:hover {
+  border-color: #454d42;
+}
+
+.policyTierOption.selected {
+  background: rgba(183, 243, 67, 0.045);
+  border-color: rgba(183, 243, 67, 0.42);
+  box-shadow: inset 0 0 0 1px rgba(183, 243, 67, 0.06);
+}
+
+.policyTierOption input {
+  height: 15px;
+  margin: 0 0 14px;
+  width: 15px;
+}
+
+.policyTierOption > span {
+  display: grid;
+  gap: 7px;
+}
+
+.policyTierOption strong {
+  color: #dce3d8;
+  font-size: 11px;
+}
+
+.policyTierOption small {
+  color: #778075;
+  font-size: 9px;
+  line-height: 1.55;
+}
+
+.policyEffectPreview,
+.autonomousConfirmation {
+  background: #111411;
+  border: 1px solid #292f28;
+  border-radius: 9px;
+  padding: 18px;
+}
+
+.policySectionHeading > div > span,
+.policySectionHeading > span {
+  color: #717a6e;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.policySectionHeading h4 {
+  font-size: 14px;
+  margin: 6px 0 0;
+}
+
+.policySectionHeading > span {
+  border: 1px solid #353b34;
+  border-radius: 999px;
+  padding: 5px 8px;
+}
+
+.policyEffectGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 17px 0 0;
+}
+
+.policyEffectGrid > div {
+  border-top: 1px solid #2a3029;
+  display: grid;
+  gap: 7px;
+  padding: 13px 12px 4px;
+}
+
+.policyEffectGrid > div:first-child {
+  padding-left: 0;
+}
+
+.policyEffectGrid > div + div {
+  border-left: 1px solid #2a3029;
+}
+
+.policyEffectGrid dt {
+  color: #737c71;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.policyEffectGrid dd {
+  color: #c7cec4;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.policyBoundaryNote,
+.customPolicyFieldset > p,
+.reauthenticationNote {
+  color: #737c71;
+  font-size: 10px;
+  line-height: 1.6;
+  margin: 14px 0 0;
+}
+
+.customPolicyFieldset {
+  border-top: 1px solid #292e28;
+  padding-top: 20px;
+}
+
+.customPolicyFieldset > p {
+  margin: -4px 0 14px;
+}
+
+.customPolicyGrid {
+  border: 1px solid #292f28;
+  border-radius: 9px;
+  overflow: hidden;
+}
+
+.customPolicyGrid > label {
+  align-items: center;
+  background: #101310;
+  display: flex;
+  gap: 20px;
+  justify-content: space-between;
+  min-height: 66px;
+  padding: 12px 14px;
+}
+
+.customPolicyGrid > label + label {
+  border-top: 1px solid #272c26;
+}
+
+.customPolicyGrid label > span {
+  display: grid;
+  gap: 4px;
+}
+
+.customPolicyGrid strong {
+  color: #c9d0c6;
+  font-size: 10px;
+  font-weight: 590;
+}
+
+.customPolicyGrid small {
+  color: #687166;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.customPolicyGrid select {
+  background: #090c09;
+  border: 1px solid #343a33;
+  border-radius: 7px;
+  color: #dce3d8;
+  flex: 0 0 180px;
+  font-size: 10px;
+  min-height: 38px;
+  padding: 0 10px;
+}
+
+.customPolicyGrid select:focus {
+  border-color: #789f30;
+  box-shadow: 0 0 0 3px rgba(183, 243, 67, 0.08);
+  outline: none;
+}
+
+.fixedPolicyLimits {
+  align-items: start;
+  background: rgba(232, 105, 99, 0.035);
+  border: 1px solid rgba(232, 105, 99, 0.12);
+  border-radius: 8px;
+  display: grid;
+  gap: 5px;
+  margin-top: 10px;
+  padding: 12px 14px;
+}
+
+.fixedPolicyLimits strong {
+  color: #d99a95;
+  font-size: 10px;
+}
+
+.fixedPolicyLimits span {
+  color: #8e7370;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.autonomousConfirmation {
+  background: rgba(232, 189, 99, 0.045);
+  border-color: rgba(232, 189, 99, 0.22);
+}
+
+.autonomousConfirmation .policySectionHeading > span {
+  border-color: rgba(232, 189, 99, 0.26);
+  color: #dfbd78;
+}
+
+.autonomousConfirmation ul {
+  color: #b9a77f;
+  display: grid;
+  font-size: 11px;
+  gap: 7px;
+  line-height: 1.55;
+  margin: 16px 0;
+  padding-left: 18px;
+}
+
+.credentialImpactPreview {
+  background: rgba(5, 7, 5, 0.35);
+  border: 1px solid rgba(232, 189, 99, 0.15);
+  border-radius: 8px;
+  color: #9e9278;
+  font-size: 11px;
+  line-height: 1.55;
+  padding: 12px 13px;
+}
+
+.credentialImpactPreview > p,
+.credentialImpactPreview div > p {
+  margin: 0;
+}
+
+.credentialImpactPreview div {
+  display: grid;
+  gap: 6px;
+}
+
+.credentialImpactPreview strong {
+  color: #ddc48e;
+  font-size: 12px;
+}
+
+.credentialImpactPreview span {
+  color: #8e846f;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+}
+
+.credentialImpactPreview a {
+  color: #d0e6a9;
+  margin-inline: 3px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.credentialImpactPreview .smallGhostButton {
+  justify-self: start;
+  margin-top: 4px;
+}
+
+.policyCustomCeilingPreview {
+  border-top: 1px solid rgba(232, 189, 99, 0.13);
+  margin-top: 4px;
+  padding-top: 8px;
+}
+
+.policyCustomCeilingPreview summary {
+  color: #c5b58d;
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.autonomousConfirmation .policyCustomCeilingPreview ul {
+  color: #a99d80;
+  display: grid;
+  font-size: 10px;
+  gap: 6px;
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.policyCustomCeilingPreview li {
+  display: grid;
+  gap: 2px;
+}
+
+.policyCustomCeilingPreview li strong {
+  color: #d7c498;
+  font-size: 10px;
+}
+
+.policyCustomCeilingPreview li span {
+  font-family: inherit;
+  font-size: 10px;
+}
+
+.autonomousConsentLabel {
+  align-items: start;
+  cursor: pointer;
+  display: flex;
+  gap: 10px;
+  margin-top: 15px;
+}
+
+.autonomousConsentLabel input {
+  flex: 0 0 auto;
+  height: 15px;
+  margin: 1px 0 0;
+  width: 15px;
+}
+
+.autonomousConsentLabel span {
+  color: #e3cd9f;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.reauthenticationNote {
+  color: #8e836b;
+  margin-top: 9px;
+}
+
+.policyActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+
+.policyActions .submitButton,
+.policyActions .secondaryButton {
+  width: auto;
+}
+
 .smallPrimaryButton,
 .smallGhostButton,
 .smallDangerButton,
@@ -2528,6 +2940,17 @@ footer {
   color: #6e766c;
   font-size: 9px;
   margin-top: 4px;
+}
+
+.credentialCeilingNotice {
+  background: rgba(183, 243, 67, 0.04);
+  border: 1px solid rgba(183, 243, 67, 0.12);
+  border-radius: 8px;
+  color: #899283;
+  font-size: 9px;
+  line-height: 1.55;
+  margin: 0;
+  padding: 10px 12px;
 }
 
 .credentialWorkspace > .workspaceMessage {
@@ -2712,12 +3135,65 @@ footer {
   font-size: 8px;
 }
 
+.credentialDetails dd small {
+  color: #687066;
+  display: block;
+  font-size: 8px;
+  line-height: 1.5;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+
 .credentialScopes {
   margin-bottom: 14px;
 }
 
 .credentialScopes span {
   font-size: 8px;
+}
+
+.credentialCeilingRules {
+  background: rgba(183, 243, 67, 0.025);
+  border: 1px solid rgba(183, 243, 67, 0.13);
+  border-radius: 8px;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+}
+
+.credentialCeilingRules summary {
+  color: #b7c6ae;
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.credentialCeilingRules dl {
+  display: grid;
+  gap: 0;
+  margin: 10px 0 0;
+}
+
+.credentialCeilingRules dl > div {
+  align-items: center;
+  border-top: 1px solid #252a24;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 7px 0;
+}
+
+.credentialCeilingRules dt,
+.credentialCeilingRules dd {
+  font-size: 9px;
+  margin: 0;
+}
+
+.credentialCeilingRules dt {
+  color: #778075;
+}
+
+.credentialCeilingRules dd {
+  color: #c9d0c6;
+  text-align: right;
 }
 
 .inlineConfirmation {
@@ -3782,6 +4258,54 @@ footer {
 
   .agentMetadata div:nth-child(n + 3) {
     border-top: 1px solid #252a24;
+  }
+
+  .agentPolicyPanel {
+    padding: 18px;
+  }
+
+  .policyPanelHeader {
+    display: grid;
+  }
+
+  .policyPanelHeader .smallGhostButton {
+    justify-self: start;
+  }
+
+  .policyTierGrid,
+  .policyEffectGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .policyTierOption {
+    min-height: 0;
+  }
+
+  .policyEffectGrid > div,
+  .policyEffectGrid > div:first-child {
+    padding: 12px 0;
+  }
+
+  .policyEffectGrid > div + div {
+    border-left: 0;
+  }
+
+  .customPolicyGrid > label {
+    align-items: start;
+    display: grid;
+  }
+
+  .customPolicyGrid select {
+    width: 100%;
+  }
+
+  .policyActions {
+    display: grid;
+  }
+
+  .policyActions .submitButton,
+  .policyActions .secondaryButton {
+    width: 100%;
   }
 
   .archiveConfirmation {

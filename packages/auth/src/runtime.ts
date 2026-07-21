@@ -51,6 +51,8 @@ export interface AlphaNetAuthRuntimeDependencies {
   redis?: Redis;
 }
 
+export const OWNER_SESSION_FRESH_AGE_SECONDS = 10 * 60;
+
 interface RegistrationControlRow {
   mode: "open" | "paused";
 }
@@ -68,6 +70,7 @@ export interface OwnerSession {
     status: "active" | "closed" | "pending_verification" | "restricted" | "suspended";
   };
   session: {
+    createdAt: Date;
     expiresAt: Date;
     id: string;
   };
@@ -375,7 +378,7 @@ export function createAlphaNetAuthRuntime(
       },
       deferSessionRefresh: true,
       expiresIn: 7 * 24 * 60 * 60,
-      freshAge: 10 * 60,
+      freshAge: OWNER_SESSION_FRESH_AGE_SECONDS,
       updateAge: 12 * 60 * 60,
     },
     socialProviders,
@@ -580,6 +583,7 @@ export function createAlphaNetAuthRuntime(
           status: owner.status,
         },
         session: {
+          createdAt: session.session.createdAt,
           expiresAt: session.session.expiresAt,
           id: session.session.id,
         },

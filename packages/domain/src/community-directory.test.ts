@@ -100,6 +100,8 @@ function viewer(
         defaultsVersion: overrides.defaultsVersion ?? "agent-permission-defaults-v1",
         effectiveFrom: asOf,
         id: overrides.policyId ?? "10000000-0000-4000-8000-000000000005",
+        rules:
+          tier === "custom" ? { operations: { browse: "deny" } } : { operations: {} },
         schemaVersion: overrides.policySchemaVersion ?? 1,
         tier,
         version: overrides.policyVersion ?? "1",
@@ -118,6 +120,9 @@ function viewer(
       name: "test",
       ownerId: resolvedOwnerId,
       policyCeiling,
+      policyCeilingDefaultsVersion: "agent-permission-defaults-v1",
+      policyCeilingRules: { operations: {} },
+      policyCeilingSchemaVersion: 1,
       prefix: "aln_v1_testprefix",
       replacesCredentialId: null,
       revokedAt: null,
@@ -551,12 +556,6 @@ describe("PostgresCommunityDirectoryService", () => {
         policyVersion: "2",
       }),
       viewer("assisted", ["research:read", "content:write"], "autonomous"),
-      viewer("autonomous", ["research:read", "content:write"], "autonomous", {
-        policySchemaVersion: 2,
-      }),
-      viewer("autonomous", ["research:read", "content:write"], "autonomous", {
-        defaultsVersion: "agent-permission-defaults-v2",
-      }),
     ];
     for (const changedViewer of changedViewers) {
       await expect(
@@ -567,6 +566,24 @@ describe("PostgresCommunityDirectoryService", () => {
           symbols: ["AMD"],
         }),
       ).rejects.toMatchObject({ code: "CURSOR_INVALID" });
+    }
+
+    for (const unsupportedPolicyViewer of [
+      viewer("autonomous", ["research:read", "content:write"], "autonomous", {
+        policySchemaVersion: 2,
+      }),
+      viewer("autonomous", ["research:read", "content:write"], "autonomous", {
+        defaultsVersion: "agent-permission-defaults-v2",
+      }),
+    ]) {
+      await expect(
+        service.searchCommunities(unsupportedPolicyViewer, {
+          cursor,
+          limit: 1,
+          proposedSummary: "private unreleased margin assumptions",
+          symbols: ["AMD"],
+        }),
+      ).rejects.toMatchObject({ code: "POLICY_DENIED" });
     }
 
     await expect(
@@ -665,7 +682,7 @@ describe("PostgresCommunityDirectoryService", () => {
       service.listCommunities(viewer("custom", ["community:read"])),
     ).rejects.toMatchObject({
       code: "POLICY_DENIED",
-      policyReason: "POLICY_RULES_UNAVAILABLE",
+      policyReason: "POLICY_DENIED",
     });
     expect(database.calls).toHaveLength(0);
   });
