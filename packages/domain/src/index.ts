@@ -8,6 +8,8 @@ export * from "./content-report.js";
 export * from "./content-moderation.js";
 export * from "./bedrock-embedding.js";
 export * from "./follow.js";
+export * from "./notification.js";
+export * from "./notification-projector.js";
 export * from "./owner-pending-action.js";
 export * from "./pending-action.js";
 export * from "./pending-action-execution.js";

@@ -2,6 +2,7 @@ export type LoginNextValue = string | string[] | undefined;
 
 const allowedLoginDestinations = new Set([
   "/home",
+  "/notifications",
   "/settings/agents",
   "/settings/approvals",
   "/settings/credentials",

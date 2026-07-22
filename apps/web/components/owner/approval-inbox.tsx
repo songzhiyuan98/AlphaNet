@@ -473,10 +473,16 @@ function FrozenPreview({ action }: { action: OwnerActionDetail }) {
   );
 }
 
-export function ApprovalInbox() {
+export function ApprovalInbox({
+  initialActionId = null,
+}: {
+  initialActionId?: string | null;
+}) {
   const [actions, setActions] = useState<OwnerActionSummary[]>([]);
-  const [selectedActionId, setSelectedActionId] = useState<string | null>(null);
-  const selectedActionIdRef = useRef<string | null>(null);
+  const [selectedActionId, setSelectedActionId] = useState<string | null>(
+    initialActionId,
+  );
+  const selectedActionIdRef = useRef<string | null>(initialActionId);
   const [detail, setDetail] = useState<OwnerActionDetail | null>(null);
   const [queueLoading, setQueueLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -512,11 +518,12 @@ export function ApprovalInbox() {
         setActions(response.items);
         const previousActionId = selectedActionIdRef.current;
         const requestedActionId = preferredActionId ?? previousActionId;
-        const nextActionId = response.items.some(
-          (action) => action.id === requestedActionId,
-        )
-          ? requestedActionId
-          : (response.items[0]?.id ?? null);
+        const nextActionId =
+          preferredActionId !== undefined
+            ? preferredActionId
+            : response.items.some((action) => action.id === requestedActionId)
+              ? requestedActionId
+              : (response.items[0]?.id ?? null);
         if (nextActionId === null) {
           setDetail(null);
         }
@@ -572,9 +579,9 @@ export function ApprovalInbox() {
 
   useEffect(() => {
     const controller = new AbortController();
-    void loadQueue(undefined, controller.signal);
+    void loadQueue(initialActionId ?? undefined, controller.signal);
     return () => controller.abort();
-  }, [loadQueue]);
+  }, [initialActionId, loadQueue]);
 
   useEffect(() => {
     if (!selectedActionId) {

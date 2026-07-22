@@ -66,6 +66,7 @@ const recoveredActionId = "30000000-0000-4000-8000-000000000003";
 const failedActionId = "30000000-0000-4000-8000-000000000004";
 const ownerId = "10000000-0000-4000-8000-000000000001";
 const agentId = "20000000-0000-4000-8000-000000000001";
+const actorId = "20000000-0000-4000-8000-000000000002";
 const credentialId = "40000000-0000-4000-8000-000000000001";
 const idempotencyId = "50000000-0000-4000-8000-000000000001";
 const decisionId = "60000000-0000-4000-8000-000000000001";
@@ -89,6 +90,7 @@ function projectionRow(state: string, overrides: Readonly<Record<string, unknown
     id: actionId,
     owner_id: ownerId,
     agent_id: agentId,
+    actor_id: actorId,
     operation: "create_post",
     state,
     version: "3",
@@ -523,16 +525,26 @@ describe("PostgresPendingActionExecutionRepository recovery and completion", () 
     );
     expect(Object.keys(resolvedPayload ?? {}).sort()).toEqual([
       "action_id",
+      "actor_id",
+      "agent_id",
       "correlated_outbox_event_id",
+      "error_code",
       "operation",
+      "owner_id",
+      "reason_code",
       "resource_id",
       "result",
       "state",
     ]);
     expect(resolvedPayload).toMatchObject({
       action_id: actionId,
+      actor_id: actorId,
+      agent_id: agentId,
       correlated_outbox_event_id: contentOutboxEventId,
+      error_code: null,
       operation: "create_post",
+      owner_id: ownerId,
+      reason_code: "execution_succeeded",
       resource_id: contentId,
       result: publicResult,
       state: "succeeded",
@@ -1116,6 +1128,83 @@ describe("PostgresPendingActionExecutionRepository recovery and completion", () 
     ).toBe(true);
   });
 
+  it("resolves exactly once when scheduling a retry exhausts the failure budget", async () => {
+    const goodClaim = claim();
+    const { calls, sql } = createTestSql((text) => {
+      if (
+        text.includes("normalized_input_ciphertext") &&
+        text.endsWith("for update of action")
+      ) {
+        return [fencedRow({ failure_count: 19 })];
+      }
+      if (
+        text.startsWith("with database_clock as materialized") &&
+        text.includes("set state = $value") &&
+        text.includes("terminal_at = database_clock.now")
+      ) {
+        return [
+          projectionRow("failed", {
+            failure_count: 20,
+            terminal_at: terminalAt,
+            error: {
+              code: "ACTION_EXECUTION_FAILED",
+              message: "The approved action could not be completed.",
+              retryable: false,
+              details: null,
+              retry_after_ms: null,
+            },
+          }),
+        ];
+      }
+      if (text.startsWith("select pg_catalog.pg_advisory_xact_lock")) return [];
+      if (text.startsWith("select coalesce(")) return [{ next_sequence: "2" }];
+      if (text.startsWith("insert into system.outbox_events")) {
+        return [{ aggregate_sequence: "2", id: resolvedOutboxEventId }];
+      }
+      if (text.startsWith("insert into platform.action_logs")) return [{ id: auditId }];
+      if (text.startsWith("update platform.pending_action_attempts")) {
+        return [{ id: actionId }];
+      }
+      if (text.startsWith("update platform.idempotency_records")) {
+        return [{ id: idempotencyId }];
+      }
+      if (text.startsWith("select action.id, action.operation")) {
+        return [
+          committedRow("failed", {
+            error: { code: "ACTION_EXECUTION_FAILED" },
+            failure_count: 20,
+          }),
+        ];
+      }
+      throw new Error(`Unexpected SQL: ${text}`);
+    });
+    const repository = new PostgresPendingActionExecutionRepository(sql, {
+      leaseOwner: "worker-a",
+    });
+
+    await expect(repository.scheduleRetry(goodClaim)).resolves.toMatchObject({
+      action: { failureCount: 20, state: "failed" },
+      applied: true,
+    });
+
+    const resolvedPayload = hasObjectValue(
+      calls,
+      (value) => value.actor_id === actorId && value.state === "failed",
+    );
+    expect(resolvedPayload).toMatchObject({
+      action_id: actionId,
+      actor_id: actorId,
+      agent_id: agentId,
+      error_code: "ACTION_EXECUTION_FAILED",
+      owner_id: ownerId,
+      reason_code: "max_failures_exhausted",
+      state: "failed",
+    });
+    expect(calls.filter((call) => call.values.includes("action.resolved"))).toHaveLength(
+      1,
+    );
+  });
+
   it("defers rate or quota capacity without consuming the failure budget", async () => {
     const goodClaim = { ...claim(), attemptCount: 20 };
     const { calls, sql } = createTestSql((text) => {
@@ -1263,6 +1352,11 @@ describe("PostgresPendingActionExecutionRepository recovery and completion", () 
           }),
         ];
       }
+      if (text.startsWith("select pg_catalog.pg_advisory_xact_lock")) return [];
+      if (text.startsWith("select coalesce(")) return [{ next_sequence: "2" }];
+      if (text.startsWith("insert into system.outbox_events")) {
+        return [{ aggregate_sequence: "2", id: resolvedOutboxEventId }];
+      }
       if (text.startsWith("insert into platform.action_logs")) return [{ id: auditId }];
       if (text.startsWith("update platform.pending_action_attempts")) {
         return [{ id: actionId }];
@@ -1323,6 +1417,46 @@ describe("PostgresPendingActionExecutionRepository recovery and completion", () 
       code: "ACTION_EXECUTION_FAILED",
       retryAfterMs: null,
     });
+    const resolvedPayloads = calls
+      .flatMap((call) => call.values)
+      .filter((value): value is Record<string, unknown> => {
+        if (
+          typeof value !== "object" ||
+          value === null ||
+          Array.isArray(value) ||
+          Buffer.isBuffer(value)
+        ) {
+          return false;
+        }
+        const record = value as Record<string, unknown>;
+        return (
+          record.actor_id === actorId &&
+          (record.state === "expired" || record.state === "failed")
+        );
+      });
+    expect(resolvedPayloads).toEqual([
+      expect.objectContaining({
+        action_id: expiredActionId,
+        actor_id: actorId,
+        agent_id: agentId,
+        error_code: "ACTION_EXPIRED",
+        owner_id: ownerId,
+        reason_code: "action_expired",
+        state: "expired",
+      }),
+      expect.objectContaining({
+        action_id: failedActionId,
+        actor_id: actorId,
+        agent_id: agentId,
+        error_code: "ACTION_EXECUTION_FAILED",
+        owner_id: ownerId,
+        reason_code: "max_failures_exhausted",
+        state: "failed",
+      }),
+    ]);
+    expect(calls.filter((call) => call.values.includes("action.resolved"))).toHaveLength(
+      2,
+    );
   });
 
   it.each([
@@ -1359,6 +1493,11 @@ describe("PostgresPendingActionExecutionRepository recovery and completion", () 
               },
             }),
           ];
+        }
+        if (text.startsWith("select pg_catalog.pg_advisory_xact_lock")) return [];
+        if (text.startsWith("select coalesce(")) return [{ next_sequence: "2" }];
+        if (text.startsWith("insert into system.outbox_events")) {
+          return [{ aggregate_sequence: "2", id: resolvedOutboxEventId }];
         }
         if (text.startsWith("insert into platform.action_logs")) return [{ id: auditId }];
         if (text.startsWith("update platform.pending_action_attempts")) {
@@ -1406,6 +1545,27 @@ describe("PostgresPendingActionExecutionRepository recovery and completion", () 
       expect(terminalUpdate?.text).toContain(
         "action.lease_expires_at > database_clock.now",
       );
+      const resolvedPayload = hasObjectValue(
+        calls,
+        (value) => value.actor_id === actorId && value.state === state,
+      );
+      expect(resolvedPayload).toMatchObject({
+        action_id: actionId,
+        actor_id: actorId,
+        agent_id: agentId,
+        error_code: code,
+        operation: "create_post",
+        owner_id: ownerId,
+        reason_code: state === "failed" ? "execution_failed" : "action_invalidated",
+        state,
+      });
+      expect(
+        calls.filter((call) => call.values.includes("action.resolved")),
+      ).toHaveLength(1);
+      const audit = calls.find((call) =>
+        call.text.startsWith("insert into platform.action_logs"),
+      );
+      expect(audit?.values).toContain(resolvedOutboxEventId);
     },
   );
 
@@ -1444,5 +1604,6 @@ describe("PostgresPendingActionExecutionRepository recovery and completion", () 
       state: "failed",
     });
     expect(calls.some((call) => call.text.includes("set state = $value"))).toBe(false);
+    expect(calls.some((call) => call.values.includes("action.resolved"))).toBe(false);
   });
 });

@@ -197,6 +197,10 @@ interface ActionProjectionRow {
   version: string;
 }
 
+interface ResolvedActionProjectionRow extends ActionProjectionRow {
+  actor_id: string;
+}
+
 interface ClaimRow extends ActionProjectionRow {
   lease_expires_at: Date;
 }
@@ -265,6 +269,13 @@ interface TransitionAuditInput {
   outboxEventId?: string | null | undefined;
   outcome: "succeeded" | "pending" | "denied" | "failed";
   reasonCode: string;
+}
+
+interface ResolvedOutboxInput {
+  errorCode: string | null;
+  extraPayload?: OutboxJsonObject | undefined;
+  reasonCode: string;
+  state: "succeeded" | ExecutionTerminalState;
 }
 
 type SuccessResultSnapshot =
@@ -900,7 +911,7 @@ export class PostgresPendingActionExecutionRepository {
       );
     }
 
-    const rows = await transaction<ActionProjectionRow[]>`
+    const rows = await transaction<ResolvedActionProjectionRow[]>`
       with database_clock as materialized (
         select clock_timestamp() as now
       )
@@ -926,6 +937,12 @@ export class PostgresPendingActionExecutionRepository {
         action.id,
         action.owner_id,
         action.agent_id,
+        (
+          select agent.actor_id::text
+          from platform.agents as agent
+          where agent.id = action.agent_id
+            and agent.owner_id = action.owner_id
+        ) as actor_id,
         action.operation,
         action.state,
         action.version::text as version,
@@ -961,20 +978,15 @@ export class PostgresPendingActionExecutionRepository {
       );
     }
 
-    const resolvedOutbox = await appendOutboxEvent(transaction, {
-      aggregateId: row.id,
-      aggregateType: "pending_action",
-      eventType: "action.resolved",
-      eventVersion: 1,
-      occurredAt: row.terminal_at!,
-      payload: {
-        action_id: row.id,
+    const resolvedOutbox = await this.#appendResolvedOutboxEvent(transaction, row, {
+      errorCode: null,
+      extraPayload: {
         correlated_outbox_event_id: snapshot.correlatedOutboxEventId,
-        operation: parseOperation(row.operation),
         resource_id: snapshot.resourceId,
         result: snapshot.result,
-        state: "succeeded",
       },
+      reasonCode: "execution_succeeded",
+      state: "succeeded",
     });
     const auditId = await this.#writeTransitionAudit(transaction, row, {
       action: "pending_action.succeeded",
@@ -1290,7 +1302,7 @@ export class PostgresPendingActionExecutionRepository {
     reasonCode: string,
     consumeFailureBudget = false,
   ): Promise<boolean> {
-    const rows = await transaction<ActionProjectionRow[]>`
+    const rows = await transaction<ResolvedActionProjectionRow[]>`
       with database_clock as materialized (
         select clock_timestamp() as now
       )
@@ -1318,6 +1330,12 @@ export class PostgresPendingActionExecutionRepository {
         action.id,
         action.owner_id,
         action.agent_id,
+        (
+          select agent.actor_id::text
+          from platform.agents as agent
+          where agent.id = action.agent_id
+            and agent.owner_id = action.owner_id
+        ) as actor_id,
         action.operation,
         action.state,
         action.version::text as version,
@@ -1339,12 +1357,18 @@ export class PostgresPendingActionExecutionRepository {
     if (!row) {
       return false;
     }
+    const resolvedOutbox = await this.#appendResolvedOutboxEvent(transaction, row, {
+      errorCode: terminalErrors[state].code,
+      reasonCode,
+      state,
+    });
     const auditId = await this.#writeTransitionAudit(transaction, row, {
       action: auditAction,
       afterState: state,
       beforeFailureCount: locked.failure_count,
       beforeState: "executing",
       errorCode: terminalErrors[state].code,
+      outboxEventId: resolvedOutbox.id,
       outcome: "failed",
       reasonCode,
     });
@@ -1360,7 +1384,7 @@ export class PostgresPendingActionExecutionRepository {
     transaction: TransactionSql,
     candidate: ReapCandidateRow,
   ): Promise<boolean> {
-    const rows = await transaction<ActionProjectionRow[]>`
+    const rows = await transaction<ResolvedActionProjectionRow[]>`
       with database_clock as materialized (
         select clock_timestamp() as now
       )
@@ -1378,6 +1402,12 @@ export class PostgresPendingActionExecutionRepository {
         action.id,
         action.owner_id,
         action.agent_id,
+        (
+          select agent.actor_id::text
+          from platform.agents as agent
+          where agent.id = action.agent_id
+            and agent.owner_id = action.owner_id
+        ) as actor_id,
         action.operation,
         action.state,
         action.version::text as version,
@@ -1397,11 +1427,17 @@ export class PostgresPendingActionExecutionRepository {
     `;
     const row = rows[0];
     if (!row) return false;
+    const resolvedOutbox = await this.#appendResolvedOutboxEvent(transaction, row, {
+      errorCode: terminalErrors.expired.code,
+      reasonCode: "action_expired",
+      state: "expired",
+    });
     await this.#writeTransitionAudit(transaction, row, {
       action: "pending_action.expired",
       afterState: "expired",
       beforeState: candidate.state,
       errorCode: terminalErrors.expired.code,
+      outboxEventId: resolvedOutbox.id,
       outcome: "denied",
       reasonCode: "action_expired",
     });
@@ -1490,7 +1526,7 @@ export class PostgresPendingActionExecutionRepository {
     transaction: TransactionSql,
     candidate: ReapCandidateRow,
   ): Promise<boolean> {
-    const rows = await transaction<ActionProjectionRow[]>`
+    const rows = await transaction<ResolvedActionProjectionRow[]>`
       with database_clock as materialized (
         select clock_timestamp() as now
       )
@@ -1517,6 +1553,12 @@ export class PostgresPendingActionExecutionRepository {
         action.id,
         action.owner_id,
         action.agent_id,
+        (
+          select agent.actor_id::text
+          from platform.agents as agent
+          where agent.id = action.agent_id
+            and agent.owner_id = action.owner_id
+        ) as actor_id,
         action.operation,
         action.state,
         action.version::text as version,
@@ -1538,18 +1580,25 @@ export class PostgresPendingActionExecutionRepository {
     if (!row) return false;
     const failureBudgetExhausted = candidate.failure_count + 1 >= MAX_FAILURES;
     const generationExhausted = candidate.attempt_count >= MAX_ATTEMPT_GENERATION;
+    const reasonCode = failureBudgetExhausted
+      ? "max_failures_exhausted"
+      : generationExhausted
+        ? "fence_generation_exhausted"
+        : "retry_window_exhausted";
+    const resolvedOutbox = await this.#appendResolvedOutboxEvent(transaction, row, {
+      errorCode: terminalErrors.failed.code,
+      reasonCode,
+      state: "failed",
+    });
     const auditId = await this.#writeTransitionAudit(transaction, row, {
       action: "pending_action.failed",
       afterState: "failed",
       beforeFailureCount: candidate.failure_count,
       beforeState: "executing",
       errorCode: terminalErrors.failed.code,
+      outboxEventId: resolvedOutbox.id,
       outcome: "failed",
-      reasonCode: failureBudgetExhausted
-        ? "max_failures_exhausted"
-        : generationExhausted
-          ? "fence_generation_exhausted"
-          : "retry_window_exhausted",
+      reasonCode,
     });
     await this.#attachAttemptAudit(transaction, row, auditId, "finish");
     await this.#syncIdempotency(transaction, row);
@@ -1711,6 +1760,40 @@ export class PostgresPendingActionExecutionRepository {
     if (rows.length !== 1) {
       throw new Error("PendingAction transition could not synchronize idempotency.");
     }
+  }
+
+  async #appendResolvedOutboxEvent(
+    transaction: TransactionSql,
+    row: ResolvedActionProjectionRow,
+    input: ResolvedOutboxInput,
+  ) {
+    if (!UUID_PATTERN.test(row.actor_id)) {
+      throw new Error("PendingAction terminal projection has no valid recipient Actor.");
+    }
+    if (
+      !(row.terminal_at instanceof Date) ||
+      !Number.isFinite(row.terminal_at.getTime())
+    ) {
+      throw new Error("PendingAction terminal projection has no terminal timestamp.");
+    }
+    return appendOutboxEvent(transaction, {
+      aggregateId: row.id,
+      aggregateType: "pending_action",
+      eventType: "action.resolved",
+      eventVersion: 1,
+      occurredAt: row.terminal_at,
+      payload: {
+        ...(input.extraPayload ?? {}),
+        action_id: row.id,
+        actor_id: row.actor_id,
+        agent_id: row.agent_id,
+        error_code: input.errorCode,
+        operation: parseOperation(row.operation),
+        owner_id: row.owner_id,
+        reason_code: input.reasonCode,
+        state: input.state,
+      },
+    });
   }
 
   async #writeTransitionAudit(

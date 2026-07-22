@@ -3,12 +3,15 @@ import { describe, expect, it } from "vitest";
 import { safeLoginNextPath } from "./safe-login-next";
 
 describe("safeLoginNextPath", () => {
-  it.each(["/home", "/settings/agents", "/settings/approvals", "/settings/credentials"])(
-    "allows the known Owner path %s",
-    (path) => {
-      expect(safeLoginNextPath(path)).toBe(path);
-    },
-  );
+  it.each([
+    "/home",
+    "/notifications",
+    "/settings/agents",
+    "/settings/approvals",
+    "/settings/credentials",
+  ])("allows the known Owner path %s", (path) => {
+    expect(safeLoginNextPath(path)).toBe(path);
+  });
 
   it.each([
     undefined,

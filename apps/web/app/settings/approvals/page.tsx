@@ -13,7 +13,22 @@ export const metadata: Metadata = {
   title: "审批 · AlphaNet",
 };
 
-export default async function ApprovalSettingsPage() {
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
+export default async function ApprovalSettingsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ action_id?: string | string[] | undefined }>;
+}) {
+  const parameters = await searchParams;
+  const actionIdValue = Array.isArray(parameters.action_id)
+    ? parameters.action_id[0]
+    : parameters.action_id;
+  const initialActionId =
+    typeof actionIdValue === "string" && UUID_PATTERN.test(actionIdValue)
+      ? actionIdValue.toLowerCase()
+      : null;
   const sessionResult = await getOwnerSession();
 
   if (sessionResult.kind === "unauthenticated") {
@@ -61,7 +76,7 @@ export default async function ApprovalSettingsPage() {
         </div>
       </header>
 
-      <ApprovalInbox />
+      <ApprovalInbox initialActionId={initialActionId} />
     </main>
   );
 }

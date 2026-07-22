@@ -20,6 +20,7 @@ readonly content_revision_write_checksum="c0e3b1f605651e30a619caede945eb978840a7
 readonly content_search_v1_checksum="ae8c3d68863d78b8d131129a4f3cedd4f6026e733530eaf8f6a563b7fdfeeaf2"
 readonly content_delete_antispam_v1_checksum="c02af8f023edc8ab6eb58fc78afef9a5e4c0909f4833e04666ddfcfc384a2b18"
 readonly web_reporting_content_moderation_v1_checksum="d5d7e900d8270914ff927c7a08ec89f677a9fcfbd71d33238756394f5ec60c3b"
+readonly notifications_v1_checksum="41af3431fa6d8cbaa7ac7aea9aaf35a3791a02ec5407cda7ae159ff572fbf95e"
 readonly suffix="${GITHUB_RUN_ID:-local}_${RANDOM}_$$"
 readonly empty_database="alphanet_migration_empty_${suffix}"
 readonly owner_database="alphanet_migration_owner_${suffix}"
@@ -1025,9 +1026,10 @@ for database in \
       --set=content_revision_write_checksum="${content_revision_write_checksum}" \
       --set=content_search_v1_checksum="${content_search_v1_checksum}" \
       --set=content_delete_antispam_v1_checksum="${content_delete_antispam_v1_checksum}" \
-      --set=web_reporting_content_moderation_v1_checksum="${web_reporting_content_moderation_v1_checksum}" <<'SQL'
+      --set=web_reporting_content_moderation_v1_checksum="${web_reporting_content_moderation_v1_checksum}" \
+      --set=notifications_v1_checksum="${notifications_v1_checksum}" <<'SQL'
 SELECT
-  (SELECT count(*) FROM system.schema_migrations) = 15
+  (SELECT count(*) FROM system.schema_migrations) = 16
   AND EXISTS (
     SELECT 1
     FROM system.schema_migrations
@@ -1101,6 +1103,43 @@ SELECT
       AND name = 'web_reporting_content_moderation_v1'
       AND checksum = :'web_reporting_content_moderation_v1_checksum'
   )
+  AND EXISTS (
+    SELECT 1
+    FROM system.schema_migrations
+    WHERE version = '000016'
+      AND name = 'notifications_v1'
+      AND checksum = :'notifications_v1_checksum'
+  )
+  AND (
+    SELECT count(*) = 4
+    FROM pg_class AS relation
+    WHERE relation.oid IN (
+      'platform.notifications'::regclass,
+      'platform.notification_aggregate_actors'::regclass,
+      'system.notification_change_journal'::regclass,
+      'system.notification_recipient_sequences'::regclass
+    )
+  )
+  AND to_regclass('platform.notifications_recipient_history_idx') IS NOT NULL
+  AND to_regclass(
+    'platform.notifications_recipient_unread_history_idx'
+  ) IS NOT NULL
+  AND to_regclass('platform.notifications_retention_idx') IS NOT NULL
+  AND to_regclass('platform.notifications_symbol_ids_idx') IS NOT NULL
+  AND to_regclass('platform.notifications_community_ids_idx') IS NOT NULL
+  AND to_regprocedure(
+    'system.project_notification(uuid,uuid,text,uuid,text,uuid,text[],uuid[],text,text,text,jsonb,text,timestamptz,text)'
+  ) IS NOT NULL
+  AND to_regprocedure(
+    'system.project_reaction_notification(uuid,uuid,uuid,text,timestamptz,uuid,boolean,timestamptz,bigint)'
+  ) IS NOT NULL
+  AND to_regprocedure(
+    'system.purge_expired_notifications(integer)'
+  ) IS NOT NULL
+  AND to_regprocedure(
+    'system.set_notification_read_state(uuid,uuid,boolean)'
+  ) IS NOT NULL
+  AND to_regprocedure('system.mark_all_notifications_read(uuid)') IS NOT NULL
   AND (
     SELECT count(*) = 8
     FROM pg_class AS relation
@@ -1829,4 +1868,4 @@ SQL
   fi
 done
 
-echo "Empty, Owner-schema, and published Agent-v1 paths all reach the Web Reporting/Content Moderation v1 schema."
+echo "Empty, Owner-schema, and published Agent-v1 paths all reach the Notifications v1 schema."

@@ -23,6 +23,7 @@ import {
   PostgresContentReportService,
   PostgresContentSearchService,
   PostgresFollowService,
+  PostgresNotificationService,
   PostgresOwnerPendingActionService,
   PostgresPendingActionStatusService,
   PostgresReactionWriteService,
@@ -138,6 +139,14 @@ async function start(): Promise<void> {
       .update("alphanet.follow-list.cursor.v1", "utf8")
       .digest(),
   });
+  const notificationService = new PostgresNotificationService(postgres.sql, {
+    cursorSigningKey: createHmac(
+      "sha256",
+      Buffer.from(environment.COMMUNITY_CURSOR_SIGNING_KEY, "utf8"),
+    )
+      .update("alphanet.notification.cursor.v1", "utf8")
+      .digest(),
+  });
   const pendingActionStatusService = new PostgresPendingActionStatusService(postgres.sql);
   const pendingActionKeys: Record<number, Uint8Array> = Object.fromEntries([
     ...Object.entries(environment.PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS).map(
@@ -213,7 +222,11 @@ async function start(): Promise<void> {
     // PostgreSQL also verifies that bind parameters cannot be logged. Redis is
     // connected before listen so the first public request does not fail closed
     // merely because the lazy client has not completed its initial handshake.
-    await Promise.all([postgres.check(), redis.check()]);
+    await Promise.all([
+      postgres.check(),
+      redis.check(),
+      notificationService.checkReady(),
+    ]);
     authRuntime = createAlphaNetAuthRuntime(
       {
         baseUrl: environment.BETTER_AUTH_URL,
@@ -257,6 +270,7 @@ async function start(): Promise<void> {
       contentReportService,
       contentSearchService,
       followService,
+      notificationService,
       dependencies,
       environment: environment.NODE_ENV,
       internalSsrRequestSecret: environment.SSR_INTERNAL_REQUEST_SECRET,

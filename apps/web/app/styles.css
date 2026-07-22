@@ -72,6 +72,10 @@ body:has(.researchPage) {
   background: var(--bg);
 }
 
+body:has(.ownerPage) {
+  background: var(--bg);
+}
+
 .landingPage {
   background: #040604;
 }
@@ -2307,6 +2311,220 @@ footer {
 
 .securityAside {
   border-color: rgba(183, 243, 67, 0.2);
+}
+
+/* Agent notification inbox */
+
+.notificationWorkspace {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  overflow: hidden;
+  position: relative;
+}
+
+.notificationA11yStatus {
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  height: 1px;
+  overflow: hidden;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
+}
+
+.notificationToolbar {
+  align-items: end;
+  background: #0b0e0b;
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  gap: 18px;
+  grid-template-columns: minmax(240px, 1fr) auto auto;
+  padding: 18px 20px;
+}
+
+.notificationToolbar label:first-child {
+  display: grid;
+  gap: 7px;
+}
+
+.notificationToolbar label > span {
+  color: var(--foreground-tertiary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.notificationToolbar select {
+  background: #0f130f;
+  border: 1px solid #30372f;
+  border-radius: 8px;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  min-height: 40px;
+  padding: 0 12px;
+  width: 100%;
+}
+
+.notificationUnreadFilter {
+  align-items: center;
+  color: var(--foreground-secondary);
+  display: flex;
+  font-size: 12px;
+  gap: 8px;
+  min-height: 40px;
+  white-space: nowrap;
+}
+
+.notificationUnreadFilter input {
+  accent-color: var(--accent);
+}
+
+.notificationToolbarActions,
+.notificationActions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.notificationError {
+  margin: 16px 20px 0;
+}
+
+.notificationList {
+  background: #080b08;
+}
+
+.notificationItem {
+  align-items: center;
+  display: grid;
+  gap: 16px;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  min-height: 132px;
+  padding: 22px 20px;
+}
+
+.notificationItem + .notificationItem {
+  border-top: 1px solid var(--line);
+}
+
+.notificationItem.read {
+  opacity: 0.68;
+}
+
+.notificationSignal {
+  background: #3a4138;
+  border-radius: 999px;
+  height: 7px;
+  width: 7px;
+}
+
+.notificationItem.unread .notificationSignal {
+  background: var(--accent);
+  box-shadow: 0 0 0 5px rgba(183, 243, 67, 0.08);
+}
+
+.notificationBody {
+  min-width: 0;
+}
+
+.notificationMeta {
+  align-items: center;
+  color: var(--foreground-tertiary);
+  display: flex;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  gap: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.notificationMeta span {
+  color: var(--accent);
+}
+
+.notificationMeta .notificationReadState {
+  color: #899385;
+}
+
+.notificationItem.unread .notificationReadState {
+  color: #c9ef83;
+}
+
+.notificationBody h2 {
+  font-size: 17px;
+  margin: 9px 0 7px;
+}
+
+.notificationBody p {
+  color: var(--foreground-secondary);
+  font-size: 12px;
+  margin: 0;
+}
+
+.notificationBody .notificationAggregate {
+  color: #899385;
+  margin-top: 7px;
+}
+
+.notificationLoading,
+.notificationEmptyState {
+  display: grid;
+  min-height: 240px;
+  place-content: center;
+  text-align: center;
+}
+
+.notificationLoading,
+.notificationEmptyState p {
+  color: var(--foreground-secondary);
+  font-size: 13px;
+}
+
+.notificationEmptyState strong {
+  font-size: 18px;
+}
+
+.notificationEmptyState p {
+  margin: 9px auto 0;
+  max-width: 480px;
+}
+
+.notificationEmptyAction {
+  margin-top: 22px;
+  width: fit-content;
+}
+
+.notificationPagination {
+  border-top: 1px solid var(--line);
+  display: flex;
+  justify-content: center;
+  padding: 16px 20px;
+}
+
+@media (max-width: 760px) {
+  .notificationToolbar {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .notificationToolbarActions {
+    justify-content: stretch;
+  }
+
+  .notificationToolbarActions button {
+    flex: 1;
+  }
+
+  .notificationItem {
+    align-items: start;
+    grid-template-columns: 8px minmax(0, 1fr);
+  }
+
+  .notificationActions {
+    grid-column: 2;
+  }
 }
 
 .quotaStrip {

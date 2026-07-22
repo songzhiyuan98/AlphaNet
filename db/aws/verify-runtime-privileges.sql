@@ -12,6 +12,18 @@ CREATE TEMPORARY TABLE expected_table_privileges (
   PRIMARY KEY (schema_name, table_name, privilege)
 ) ON COMMIT DROP;
 
+-- Tables in this inventory are deliberately closed to the runtime role. Keep
+-- them classified separately so adding a sensitive table cannot be mistaken
+-- for an omitted privilege decision.
+CREATE TEMPORARY TABLE expected_closed_tables (
+  schema_name name NOT NULL,
+  table_name name NOT NULL,
+  PRIMARY KEY (schema_name, table_name)
+) ON COMMIT DROP;
+
+INSERT INTO expected_closed_tables (schema_name, table_name)
+VALUES ('platform', 'notification_aggregate_actors');
+
 INSERT INTO expected_table_privileges (schema_name, table_name, privilege)
 SELECT 'auth', table_name, privilege
 FROM (
@@ -49,6 +61,7 @@ FROM (
     ('moderation_actions'::name),
     ('moderation_case_items'::name),
     ('moderation_cases'::name),
+    ('notifications'::name),
     ('owners'::name),
     ('pending_action_attempts'::name),
     ('pending_actions'::name),
@@ -114,6 +127,8 @@ FROM (
     ('content_embedding_jobs'::name),
     ('content_search_candidate_snapshots'::name),
     ('content_read_visibility_epochs'::name),
+    ('notification_change_journal'::name),
+    ('notification_recipient_sequences'::name),
     ('outbox_aggregate_heads'::name),
     ('outbox_consumer_deliveries'::name),
     ('outbox_consumer_receipts'::name),
@@ -391,9 +406,14 @@ VALUES
   ('system', 'claim_content_embedding_jobs', 'candidate_lease_owner text, candidate_lease_token_digest bytea, candidate_batch_size integer, candidate_lease_seconds integer'),
   ('system', 'complete_content_embedding_job', 'candidate_job_id uuid, candidate_lease_owner text, candidate_lease_token_digest bytea'),
   ('system', 'enqueue_content_embedding_job', 'candidate_revision_id uuid, candidate_embedding_model text, candidate_priority smallint'),
+  ('system', 'mark_all_notifications_read', 'candidate_recipient_actor_id uuid'),
+  ('system', 'project_notification', 'candidate_notification_id uuid, candidate_recipient_actor_id uuid, candidate_type text, candidate_trigger_actor_id uuid, candidate_object_type text, candidate_object_id uuid, candidate_symbol_ids text[], candidate_community_ids uuid[], candidate_matched_follow_target_type text, candidate_matched_follow_target_id text, candidate_matched_follow_notification_level text, candidate_context jsonb, candidate_summary_template_key text, candidate_occurred_at timestamp with time zone, candidate_dedupe_key text'),
+  ('system', 'project_reaction_notification', 'candidate_notification_id uuid, candidate_recipient_actor_id uuid, candidate_content_id uuid, candidate_reaction_type text, candidate_bucket_start timestamp with time zone, candidate_trigger_actor_id uuid, candidate_active boolean, candidate_event_occurred_at timestamp with time zone, candidate_event_sequence bigint'),
   ('system', 'purge_expired_content_search_candidate_snapshots', 'candidate_batch_size integer'),
+  ('system', 'purge_expired_notifications', 'candidate_batch_size integer'),
   ('system', 'renew_content_embedding_job_lease', 'candidate_job_id uuid, candidate_lease_owner text, candidate_lease_token_digest bytea, candidate_lease_seconds integer'),
   ('system', 'retry_content_embedding_job', 'candidate_job_id uuid, candidate_lease_owner text, candidate_lease_token_digest bytea, candidate_error_code text, candidate_retry_seconds integer'),
+  ('system', 'set_notification_read_state', 'candidate_notification_id uuid, candidate_recipient_actor_id uuid, candidate_is_read boolean'),
   ('system', 'store_content_search_candidate_snapshot', 'candidate_snapshot_id text, candidate_binding_hmac bytea, candidate_candidates jsonb, candidate_expires_at timestamp with time zone');
 
 SELECT set_config('alphanet.verify.migration_role', :'migration_role', false);
@@ -792,6 +812,9 @@ BEGIN
   FROM (
     SELECT DISTINCT schema_name, table_name
     FROM expected_table_privileges
+    UNION
+    SELECT schema_name, table_name
+    FROM expected_closed_tables
   ) AS expected
   WHERE to_regclass(format('%I.%I', expected.schema_name, expected.table_name))
     IS NULL;
@@ -812,6 +835,12 @@ BEGIN
     AND NOT EXISTS (
       SELECT 1
       FROM expected_table_privileges AS expected
+      WHERE expected.schema_name = namespace.nspname
+        AND expected.table_name = relation.relname
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM expected_closed_tables AS expected
       WHERE expected.schema_name = namespace.nspname
         AND expected.table_name = relation.relname
     );
@@ -1031,6 +1060,30 @@ BEGIN
     RAISE EXCEPTION 'Runtime can grant or mutate administrator roles';
   END IF;
 
+  IF has_table_privilege(
+       runtime_role_oid,
+       'platform.notifications',
+       'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'
+     )
+     OR has_table_privilege(
+       runtime_role_oid,
+       'platform.notification_aggregate_actors',
+       'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'
+     )
+     OR has_table_privilege(
+       runtime_role_oid,
+       'system.notification_change_journal',
+       'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'
+     )
+     OR has_table_privilege(
+       runtime_role_oid,
+       'system.notification_recipient_sequences',
+       'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'
+     ) THEN
+    RAISE EXCEPTION
+      'Runtime can bypass notification projection/read-state entry points';
+  END IF;
+
   IF has_function_privilege(
        runtime_role_oid,
        'system.redrive_content_embedding_job(uuid)',
@@ -1142,6 +1195,26 @@ BEGIN
      OR NOT has_function_privilege(runtime_role_oid, routine.oid, 'EXECUTE');
   IF violation IS NOT NULL THEN
     RAISE EXCEPTION 'Runtime is missing approved function privileges: %', violation;
+  END IF;
+
+  IF (
+    SELECT count(*) <> 5
+    FROM pg_catalog.pg_proc AS routine
+    JOIN pg_catalog.pg_namespace AS namespace
+      ON namespace.oid = routine.pronamespace
+    WHERE namespace.nspname = 'system'
+      AND routine.proname IN (
+        'mark_all_notifications_read',
+        'project_notification',
+        'project_reaction_notification',
+        'purge_expired_notifications',
+        'set_notification_read_state'
+      )
+      AND routine.prosecdef
+      AND 'search_path=pg_catalog' = ANY (routine.proconfig)
+  ) THEN
+    RAISE EXCEPTION
+      'Notification runtime entry points are missing or not hardened SECURITY DEFINER functions';
   END IF;
 
   IF NOT EXISTS (

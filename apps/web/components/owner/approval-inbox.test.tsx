@@ -285,6 +285,26 @@ describe("ApprovalInbox", () => {
     expect(screen.getByText("当前没有动作")).toBeTruthy();
   });
 
+  it("opens a notification-linked terminal action even when it is absent from the active queue", async () => {
+    const terminal = detailFor("rejected");
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = requestUrl(input);
+      if (url === queuePath) {
+        return Promise.resolve(Response.json(listPayload([])));
+      }
+      if (url === detailPath) {
+        return Promise.resolve(Response.json(detailPayload(terminal)));
+      }
+      throw new Error(`Unexpected approval request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<ApprovalInbox initialActionId={ids.action} />);
+
+    expect((await screen.findAllByText("已拒绝")).length).toBeGreaterThan(0);
+    expect(screen.getByText(terminal.approval_summary)).toBeTruthy();
+  });
+
   it("renders frozen Markdown as inert text and never fetches source links", async () => {
     const malicious = '<script>alert("xss")</script><img src="x" onerror="alert(1)">';
     const pending = detailFor("pending_approval", malicious);
