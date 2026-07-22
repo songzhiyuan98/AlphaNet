@@ -870,7 +870,6 @@ export class PostgresReactionWriteService implements ReactionWriteService {
             digest,
             id: idempotencyId,
             idempotencyKey: command.idempotencyKey,
-            now,
             principalScopeKey,
           });
           const denied = errorOutcome(
@@ -930,7 +929,6 @@ export class PostgresReactionWriteService implements ReactionWriteService {
           digest,
           id: idempotencyId,
           idempotencyKey: command.idempotencyKey,
-          now,
           principalScopeKey,
         });
 
@@ -1105,11 +1103,9 @@ export class PostgresReactionWriteService implements ReactionWriteService {
       digest: Buffer;
       id: string;
       idempotencyKey: string;
-      now: Date;
       principalScopeKey: string;
     },
   ): Promise<void> {
-    const expiresAt = new Date(input.now.valueOf() + this.#idempotencyRetentionMs);
     await transaction`
       insert into platform.idempotency_records (
         id,
@@ -1126,7 +1122,7 @@ export class PostgresReactionWriteService implements ReactionWriteService {
         updated_at,
         expires_at
       )
-      values (
+      select
         ${input.id},
         ${input.principalScopeKey},
         ${input.context.owner.id},
@@ -1137,10 +1133,13 @@ export class PostgresReactionWriteService implements ReactionWriteService {
         ${input.idempotencyKey},
         ${input.digest},
         'in_progress',
-        ${input.now},
-        ${input.now},
-        ${expiresAt}
-      )
+        database_time.value,
+        database_time.value,
+        database_time.value
+          + ${this.#idempotencyRetentionMs} * interval '1 millisecond'
+      from (
+        select clock_timestamp() as value
+      ) as database_time
     `;
   }
 
@@ -1379,7 +1378,6 @@ export class PostgresReactionWriteService implements ReactionWriteService {
       200,
       outcome,
       input.input.contentId,
-      input.now,
     );
     return outcome;
   }
@@ -1484,7 +1482,6 @@ export class PostgresReactionWriteService implements ReactionWriteService {
       statusForError(error.code),
       input.outcome,
       null,
-      input.now,
     );
   }
 
@@ -1614,9 +1611,7 @@ export class PostgresReactionWriteService implements ReactionWriteService {
     responseCode: number,
     outcome: ReactionWriteOutcome,
     resourceId: string | null,
-    now: Date,
   ): Promise<void> {
-    const minimumExpiry = new Date(now.valueOf() + IDEMPOTENCY_MIN_RETENTION_MS);
     const updated = await transaction<{ id: string }[]>`
       update platform.idempotency_records
       set status = ${status},
@@ -1625,9 +1620,16 @@ export class PostgresReactionWriteService implements ReactionWriteService {
             serializeOutcome(outcome) as unknown as postgres.JSONValue,
           )},
           resource_id = ${resourceId},
-          terminal_at = ${now},
-          expires_at = greatest(expires_at, ${minimumExpiry}),
-          updated_at = ${now}
+          terminal_at = greatest(first_received_at, database_time.value),
+          expires_at = greatest(
+            expires_at,
+            greatest(first_received_at, database_time.value)
+              + ${IDEMPOTENCY_MIN_RETENTION_MS} * interval '1 millisecond'
+          ),
+          updated_at = greatest(first_received_at, database_time.value)
+      from (
+        select clock_timestamp() as value
+      ) as database_time
       where id = ${id}
         and status = 'in_progress'
         and terminal_at is null

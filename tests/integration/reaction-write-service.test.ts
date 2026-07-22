@@ -668,6 +668,53 @@ describeReactionWrite("PostgresReactionWriteService", () => {
     });
   });
 
+  it("uses the database clock for IdempotencyRecord lifecycle timestamps", async () => {
+    const skewedApplicationNow = new Date(Date.now() + 10 * 60 * 1_000);
+    const skewedService = new PostgresReactionWriteService(postgres.sql, {
+      clock: () => skewedApplicationNow,
+    });
+    const idempotencyKey = `database-clock-${randomUUID()}`;
+
+    const outcome = await skewedService.setReaction(
+      reactorContext,
+      {
+        active: false,
+        contentId: followProjectionContentId,
+        idempotencyKey,
+        reaction: "disagree",
+      },
+      { channel: "integration-database-clock", requestId: `req-${randomUUID()}` },
+    );
+
+    expect(outcome).toMatchObject({
+      replayed: false,
+      status: "succeeded",
+    });
+    const persisted = await postgres.sql<
+      {
+        first_received_at: Date;
+        terminal_at: Date;
+        updated_at: Date;
+      }[]
+    >`
+      select first_received_at, terminal_at, updated_at
+      from platform.idempotency_records
+      where principal_scope_key = ${`credential:${reactorContext.credential.id}`}
+        and operation = 'set_reaction'
+        and idempotency_key = ${idempotencyKey}
+    `;
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0]!.first_received_at.valueOf()).toBeLessThan(
+      skewedApplicationNow.valueOf() - 5 * 60 * 1_000,
+    );
+    expect(persisted[0]!.updated_at.valueOf()).toBeGreaterThanOrEqual(
+      persisted[0]!.first_received_at.valueOf(),
+    );
+    expect(persisted[0]!.terminal_at.valueOf()).toBeGreaterThanOrEqual(
+      persisted[0]!.first_received_at.valueOf(),
+    );
+  });
+
   it("canonicalizes uppercase UUID input before digest, persistence, and exact replay", async () => {
     const key = `canonical-content-${randomUUID()}`;
     const requestId = `req-${randomUUID()}`;
