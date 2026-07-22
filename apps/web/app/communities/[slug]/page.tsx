@@ -11,6 +11,10 @@ import {
 } from "../../../lib/forward-pagination";
 import { getPublicCommunityBySlug } from "../../../lib/public-community-api";
 import { getPublicContent } from "../../../lib/public-content-api";
+import {
+  publicFeedRankingOptions,
+  readPublicFeedSort,
+} from "../../../lib/public-content-ranking";
 
 export const dynamic = "force-dynamic";
 
@@ -35,7 +39,7 @@ export default async function GeneralCommunityPage({
 }) {
   const { slug } = await params;
   const query = await searchParams;
-  const sort = query.sort === "active" ? "active" : "latest";
+  const sort = readPublicFeedSort(query.sort);
   const cursor = readForwardCursor(query.cursor);
   if (!isCanonicalCommunitySlug(slug)) notFound();
   const pathname = `/communities/${encodeURIComponent(slug)}`;
@@ -51,7 +55,7 @@ export default async function GeneralCommunityPage({
     cursor,
     limit: 20,
     scope: "community",
-    sort,
+    ...publicFeedRankingOptions(sort),
   });
   const feedData = feed.kind === "success" ? feed.data : null;
   return (

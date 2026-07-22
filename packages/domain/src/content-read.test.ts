@@ -42,7 +42,7 @@ function fakePostgres(
   const tag = async (strings: TemplateStringsArray, ...values: unknown[]) => {
     const query = { text: strings.join("?"), values };
     calls.push(query);
-    if (query.text.includes("pg_current_snapshot()")) {
+    if (query.text.includes("select pg_current_snapshot()::text as database_snapshot")) {
       return [{ database_snapshot: "100:100:" }];
     }
     return responder(query);
@@ -265,6 +265,67 @@ describe("content read input normalization", () => {
     ).toThrowError(expect.objectContaining({ code: "INVALID_ARGUMENT" }));
   });
 
+  it("normalizes Home, Hot, Top, and Discussion Top ranking inputs", () => {
+    expect(normalizeContentBrowseInput({ scope: "home" })).toMatchObject({
+      scope: "home",
+      sort: "latest",
+      topMetric: null,
+      window: null,
+    });
+    expect(
+      normalizeContentBrowseInput({
+        scope: "global",
+        sort: "hot",
+        window: "24h",
+      }),
+    ).toMatchObject({ sort: "hot", topMetric: null, window: "24h" });
+    expect(
+      normalizeContentBrowseInput({
+        scope: "global",
+        sort: "top",
+        topMetric: "controversy",
+        window: "30d",
+      }),
+    ).toMatchObject({
+      sort: "top",
+      topMetric: "controversy",
+      window: "30d",
+    });
+    expect(normalizeDiscussionInput({ contentId: rootId, sort: "top" })).toMatchObject({
+      sort: "top",
+    });
+  });
+
+  it("rejects incomplete or incompatible ranking parameters", () => {
+    expect(() =>
+      normalizeContentBrowseInput({ scope: "global", sort: "hot" }),
+    ).toThrowError(expect.objectContaining({ code: "INVALID_ARGUMENT" }));
+    expect(() =>
+      normalizeContentBrowseInput({
+        scope: "global",
+        sort: "hot",
+        window: "all",
+      }),
+    ).toThrowError(expect.objectContaining({ code: "INVALID_ARGUMENT" }));
+    expect(() =>
+      normalizeContentBrowseInput({
+        scope: "global",
+        sort: "top",
+        window: "7d",
+      }),
+    ).toThrowError(expect.objectContaining({ code: "INVALID_ARGUMENT" }));
+    expect(() =>
+      normalizeContentBrowseInput({
+        scope: "global",
+        sort: "latest",
+        topMetric: "helpful",
+      }),
+    ).toThrowError(expect.objectContaining({ code: "INVALID_ARGUMENT" }));
+    expect(() =>
+      normalizeContentBrowseInput({ scope: "home", symbol: "AMD" }),
+    ).toThrowError(expect.objectContaining({ code: "INVALID_ARGUMENT" }));
+  });
+
   it("bounds discussion pages so every persisted node can make progress", () => {
     expect(
       normalizeDiscussionInput({ contentId: replyId, sort: "latest" }),
@@ -281,6 +342,45 @@ describe("content read input normalization", () => {
 });
 
 describe("PostgresContentReadService", () => {
+  it("requires ranking snapshot maintenance functions and indexes in readiness", async () => {
+    const database = fakePostgres((query) => {
+      if (query.text.includes("set_config")) return [];
+      if (query.text.includes("as ready")) return [{ ready: true }];
+      return [];
+    });
+    const service = new PostgresContentReadService(database.sql, {
+      cursorSigningKey: signingKey,
+    });
+
+    await expect(service.checkReady()).resolves.toBeUndefined();
+
+    const readinessQuery = database.calls.find((query) =>
+      query.text.includes("as ready"),
+    );
+    expect(readinessQuery?.text).toContain(
+      "system.content_ranking_candidate_snapshots_expiry_idx",
+    );
+    expect(readinessQuery?.text).toContain("platform.reactions_ranking_recent_idx");
+    expect(readinessQuery?.text).toContain(
+      "platform.content_items_ranking_reply_recent_idx",
+    );
+    expect(readinessQuery?.text).toContain(
+      "system.purge_expired_content_ranking_candidate_snapshots(integer)",
+    );
+  });
+
+  it("caps cursor retention at the frozen ranking snapshot boundary", () => {
+    const database = fakePostgres(() => []);
+
+    expect(
+      () =>
+        new PostgresContentReadService(database.sql, {
+          cursorSigningKey: signingKey,
+          cursorTtlSeconds: 3_601,
+        }),
+    ).toThrow(/cursor TTL must be between 60 and 3600/u);
+  });
+
   it("enforces research:read before touching PostgreSQL", async () => {
     const database = fakePostgres(() => []);
     const service = new PostgresContentReadService(database.sql, {
@@ -311,6 +411,115 @@ describe("PostgresContentReadService", () => {
     expect(database.calls).toHaveLength(0);
   });
 
+  it("rejects anonymous Home reads before touching PostgreSQL", async () => {
+    const database = fakePostgres(() => []);
+    const service = new PostgresContentReadService(database.sql, {
+      cursorSigningKey: signingKey,
+    });
+
+    await expect(service.browseContent(null, { scope: "home" })).rejects.toMatchObject({
+      code: "INVALID_ARGUMENT",
+      statusCode: 400,
+    });
+    expect(database.calls).toHaveLength(0);
+  });
+
+  it("keeps Home chronological ranking free of social-signal aggregates", async () => {
+    const database = fakePostgres((query) => {
+      if (query.text.includes("set_config")) return [];
+      if (query.text.includes("transaction_timestamp()")) return [{ as_of: now }];
+      if (query.text.includes("content_read_visibility_epochs")) {
+        return [
+          {
+            content_membership_epoch: "1",
+            public_community_visibility_epoch: null,
+          },
+        ];
+      }
+      if (query.text.includes("actor_follow_epochs")) return [{ follow_epoch: "1" }];
+      if (query.text.includes("lane_ranked_candidates as")) {
+        return [
+          {
+            created_at: new Date(now.valueOf() - 10_000),
+            id: rootId,
+            matched_follows: [],
+            order_at: new Date(now.valueOf() - 10_000),
+            score_micros: 500_000_000,
+          },
+        ];
+      }
+      if (query.text.includes("select\n        content.id::text as id")) {
+        return [projectionRow()];
+      }
+      return [];
+    });
+    const service = new PostgresContentReadService(database.sql, {
+      clock: () => now,
+      cursorSigningKey: signingKey,
+    });
+
+    await expect(
+      service.browseContent(viewer(["research:read"]), {
+        scope: "home",
+        sort: "latest",
+      }),
+    ).resolves.toMatchObject({ items: [expect.objectContaining({ contentId: rootId })] });
+
+    const query = database.calls.find((call) =>
+      call.text.includes("lane_ranked_candidates as"),
+    );
+    expect(query?.text).not.toContain("reaction_stats as");
+    expect(query?.text).not.toContain("reply_author_counts as");
+  });
+
+  it("keeps non-Home Hot ranking free of the Home lane window", async () => {
+    const database = fakePostgres((query) => {
+      if (query.text.includes("set_config")) return [];
+      if (query.text.includes("transaction_timestamp()")) return [{ as_of: now }];
+      if (query.text.includes("content_read_visibility_epochs")) {
+        return [
+          {
+            content_membership_epoch: "1",
+            public_community_visibility_epoch: "1",
+          },
+        ];
+      }
+      if (query.text.includes("base_candidates as materialized")) {
+        return [
+          {
+            created_at: new Date(now.valueOf() - 10_000),
+            id: rootId,
+            matched_follows: [],
+            order_at: new Date(now.valueOf() - 10_000),
+            score_micros: 1_000_000,
+          },
+        ];
+      }
+      if (query.text.includes("select\n        content.id::text as id")) {
+        return [projectionRow()];
+      }
+      return [];
+    });
+    const service = new PostgresContentReadService(database.sql, {
+      clock: () => now,
+      cursorSigningKey: signingKey,
+    });
+
+    await expect(
+      service.browseContent(null, {
+        scope: "global",
+        sort: "hot",
+        window: "7d",
+      }),
+    ).resolves.toMatchObject({ items: [expect.objectContaining({ contentId: rootId })] });
+
+    const query = database.calls.find((call) =>
+      call.text.includes("base_candidates as materialized"),
+    );
+    expect(query?.text).toContain("participant_rows as");
+    expect(query?.text).not.toContain("lane_ranked_candidates as");
+  });
+
   it("issues private signed keyset cursors and binds them to viewer and query", async () => {
     let pageQueries = 0;
     const database = fakePostgres((query) => {
@@ -333,12 +542,14 @@ describe("PostgresContentReadService", () => {
                 id: rootId,
                 matched_follows: [],
                 order_at: new Date(now.valueOf() - 10_000),
+                score_micros: 1_000_000,
               },
               {
                 created_at: new Date(now.valueOf() - 20_000),
                 id: secondReplyId,
                 matched_follows: [],
                 order_at: new Date(now.valueOf() - 20_000),
+                score_micros: 900_000,
               },
             ]
           : [
@@ -347,6 +558,7 @@ describe("PostgresContentReadService", () => {
                 id: secondReplyId,
                 matched_follows: [],
                 order_at: new Date(now.valueOf() - 20_000),
+                score_micros: 900_000,
               },
             ];
       }
@@ -367,6 +579,11 @@ describe("PostgresContentReadService", () => {
       scope: "global",
       sort: "latest",
     });
+    const chronologicalCandidateQuery = database.calls.find((query) =>
+      query.text.includes("candidates as ("),
+    );
+    expect(chronologicalCandidateQuery?.text).not.toContain("reaction_stats as");
+    expect(chronologicalCandidateQuery?.text).not.toContain("lane_ranked_candidates as");
     expect(first.page).toMatchObject({ hasMore: true, limit: 1 });
     expect(first.items[0]).toMatchObject({
       contentId: rootId,
@@ -382,6 +599,7 @@ describe("PostgresContentReadService", () => {
     expect(decoded).toMatchObject({
       databaseSnapshot: "100:100:",
       followEpoch: null,
+      orderingVersion: "content-read-v1:latest",
       v: 4,
       visibilityEpoch: "content:1",
     });
@@ -438,12 +656,14 @@ describe("PostgresContentReadService", () => {
             id: rootId,
             matched_follows: [],
             order_at: new Date(now.valueOf() - 10_000),
+            score_micros: 1_000_000,
           },
           {
             created_at: new Date(now.valueOf() - 20_000),
             id: secondReplyId,
             matched_follows: [],
             order_at: new Date(now.valueOf() - 20_000),
+            score_micros: 900_000,
           },
         ];
       }
@@ -516,12 +736,14 @@ describe("PostgresContentReadService", () => {
             id: rootId,
             matched_follows: matchedFollows,
             order_at: new Date(now.valueOf() - 1_000),
+            score_micros: 1_000_000,
           },
           {
             created_at: new Date(now.valueOf() - 20_000),
             id: secondReplyId,
             matched_follows: matchedFollows,
             order_at: new Date(now.valueOf() - 2_000),
+            score_micros: 900_000,
           },
         ];
       }
@@ -615,6 +837,7 @@ describe("PostgresContentReadService", () => {
             id: rootId,
             matched_follows: [],
             order_at: new Date(now.valueOf() - 10_000),
+            score_micros: 1_000_000,
           },
         ];
       }
@@ -682,6 +905,7 @@ describe("PostgresContentReadService", () => {
               },
             ],
             order_at: new Date(now.valueOf() - 10_000),
+            score_micros: 1_000_000,
           },
           {
             created_at: new Date(now.valueOf() - 20_000),
@@ -694,6 +918,7 @@ describe("PostgresContentReadService", () => {
               },
             ],
             order_at: new Date(now.valueOf() - 20_000),
+            score_micros: 900_000,
           },
         ];
       }
@@ -1187,13 +1412,17 @@ describe("PostgresContentReadService", () => {
       if (query.text.includes("as serialized_bytes")) {
         return [
           {
+            created_at: new Date(now.valueOf() - 5_000),
             id: replyId,
             order_at: new Date(now.valueOf() - 5_000),
+            score_micros: 1_000_000,
             serialized_bytes: 600_000,
           },
           {
+            created_at: new Date(now.valueOf() - 4_000),
             id: secondReplyId,
             order_at: new Date(now.valueOf() - 4_000),
+            score_micros: 900_000,
             serialized_bytes: 600_000,
           },
         ];

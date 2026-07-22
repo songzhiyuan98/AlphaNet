@@ -125,6 +125,7 @@ FROM (
   VALUES
     ('actor_follow_epochs'::name),
     ('content_embedding_jobs'::name),
+    ('content_ranking_candidate_snapshots'::name),
     ('content_search_candidate_snapshots'::name),
     ('content_read_visibility_epochs'::name),
     ('notification_change_journal'::name),
@@ -409,11 +410,13 @@ VALUES
   ('system', 'mark_all_notifications_read', 'candidate_recipient_actor_id uuid'),
   ('system', 'project_notification', 'candidate_notification_id uuid, candidate_recipient_actor_id uuid, candidate_type text, candidate_trigger_actor_id uuid, candidate_object_type text, candidate_object_id uuid, candidate_symbol_ids text[], candidate_community_ids uuid[], candidate_matched_follow_target_type text, candidate_matched_follow_target_id text, candidate_matched_follow_notification_level text, candidate_context jsonb, candidate_summary_template_key text, candidate_occurred_at timestamp with time zone, candidate_dedupe_key text'),
   ('system', 'project_reaction_notification', 'candidate_notification_id uuid, candidate_recipient_actor_id uuid, candidate_content_id uuid, candidate_reaction_type text, candidate_bucket_start timestamp with time zone, candidate_trigger_actor_id uuid, candidate_active boolean, candidate_event_occurred_at timestamp with time zone, candidate_event_sequence bigint'),
+  ('system', 'purge_expired_content_ranking_candidate_snapshots', 'candidate_batch_size integer'),
   ('system', 'purge_expired_content_search_candidate_snapshots', 'candidate_batch_size integer'),
   ('system', 'purge_expired_notifications', 'candidate_batch_size integer'),
   ('system', 'renew_content_embedding_job_lease', 'candidate_job_id uuid, candidate_lease_owner text, candidate_lease_token_digest bytea, candidate_lease_seconds integer'),
   ('system', 'retry_content_embedding_job', 'candidate_job_id uuid, candidate_lease_owner text, candidate_lease_token_digest bytea, candidate_error_code text, candidate_retry_seconds integer'),
   ('system', 'set_notification_read_state', 'candidate_notification_id uuid, candidate_recipient_actor_id uuid, candidate_is_read boolean'),
+  ('system', 'store_content_ranking_candidate_snapshot', 'candidate_snapshot_id text, candidate_binding_hmac bytea, candidate_kind text, candidate_candidates jsonb, candidate_expires_at timestamp with time zone'),
   ('system', 'store_content_search_candidate_snapshot', 'candidate_snapshot_id text, candidate_binding_hmac bytea, candidate_candidates jsonb, candidate_expires_at timestamp with time zone');
 
 SELECT set_config('alphanet.verify.migration_role', :'migration_role', false);

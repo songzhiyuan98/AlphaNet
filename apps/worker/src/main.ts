@@ -18,6 +18,7 @@ import {
 import { AwsBedrockInvokeModelTransport } from "@alphanet/integrations";
 import { createLogger } from "@alphanet/observability";
 
+import { ContentRankingSnapshotMaintenance } from "./content-ranking-snapshot-maintenance.js";
 import { ContentSearchSnapshotMaintenance } from "./content-search-snapshot-maintenance.js";
 import { NotificationRetentionMaintenance } from "./notification-retention-maintenance.js";
 import { PendingActionWorker } from "./pending-action-worker.js";
@@ -154,6 +155,10 @@ async function start(): Promise<void> {
       logger,
       repository: pendingActionRepository,
     });
+    const contentRankingSnapshotMaintenance = new ContentRankingSnapshotMaintenance({
+      logger,
+      sql: postgres.sql,
+    });
     const contentSearchSnapshotMaintenance = new ContentSearchSnapshotMaintenance({
       logger,
       sql: postgres.sql,
@@ -174,6 +179,7 @@ async function start(): Promise<void> {
         pendingActionCount,
         reconciledSearchEvents,
         purgedSearchEvents,
+        purgedRankingCandidateSnapshots,
         purgedCandidateSnapshots,
       ] = await Promise.all([
         worker.runOnce(),
@@ -214,6 +220,7 @@ async function start(): Promise<void> {
         postgres.sql<{ purged: number }[]>`
           select platform.purge_expired_agent_search_activity_events(1000) as purged
         `,
+        contentRankingSnapshotMaintenance.runOnce(),
         contentSearchSnapshotMaintenance.runOnce(),
       ]);
       return (
@@ -221,6 +228,7 @@ async function start(): Promise<void> {
         pendingActionCount +
         (reconciledSearchEvents[0]?.reconciled ?? 0) +
         (purgedSearchEvents[0]?.purged ?? 0) +
+        purgedRankingCandidateSnapshots +
         purgedCandidateSnapshots
       );
     };

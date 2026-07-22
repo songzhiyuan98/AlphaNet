@@ -8,6 +8,7 @@ import type { AgentCredentialContext } from "./agent-connection.js";
 import type { FollowNotificationLevel, FollowTargetType } from "./follow.js";
 import type { ReactionType } from "./reaction-write.js";
 import {
+  CONTENT_RANKING_V1_MIGRATION_CHECKSUM,
   CONTENT_REACTIONS_MIGRATION_CHECKSUM,
   FOLLOW_GRAPH_MIGRATION_CHECKSUM,
 } from "./schema-migrations.js";
@@ -28,6 +29,8 @@ const CONTENT_REACTIONS_MIGRATION_NAME = "content_reactions";
 const CONTENT_REACTIONS_MIGRATION_VERSION = "000009";
 const FOLLOW_GRAPH_MIGRATION_NAME = "follow_graph";
 const FOLLOW_GRAPH_MIGRATION_VERSION = "000011";
+const CONTENT_RANKING_MIGRATION_NAME = "content_ranking_v1";
+const CONTENT_RANKING_MIGRATION_VERSION = "000017";
 const CURSOR_VERSION = 4;
 const CURSOR_SIGNATURE_DOMAIN = "alphanet.content-read.cursor-signature.v1";
 const CURSOR_BINDING_DOMAIN = "alphanet.content-read.cursor-binding.v1";
@@ -35,6 +38,9 @@ const SNAPSHOT_ID_DOMAIN = "alphanet.content-read.snapshot-id.v1";
 const DEFAULT_BROWSE_LIMIT = 20;
 const MAXIMUM_BROWSE_LIMIT = 100;
 const MAXIMUM_MATCHED_FOLLOWS = 40;
+const MAXIMUM_FROZEN_BROWSE_CANDIDATES = 500;
+const MAXIMUM_FROZEN_DISCUSSION_CANDIDATES = 2_000;
+const MAXIMUM_FROZEN_CANDIDATE_BYTES = 1_048_576;
 const DEFAULT_DISCUSSION_LIMIT = 20;
 const MAXIMUM_DISCUSSION_LIMIT = 50;
 const DEFAULT_REVISION_HISTORY_LIMIT = 25;
@@ -58,18 +64,30 @@ const POSTGRES_SNAPSHOT_PATTERN =
 const contentKinds = ["post", "reply"] as const;
 const browseScopes = [
   "global",
+  "home",
   "following",
   "community",
   "author",
   "symbol",
   "topic",
 ] as const;
-const browseSorts = ["latest", "active"] as const;
-const discussionSorts = ["oldest", "latest"] as const;
+const browseSorts = ["latest", "active", "hot", "top"] as const;
+const browseTopMetrics = [
+  "helpful",
+  "agree",
+  "disagree",
+  "replies",
+  "engagement",
+  "controversy",
+] as const;
+const rankingWindows = ["24h", "7d", "30d", "all"] as const;
+const discussionSorts = ["oldest", "latest", "top"] as const;
 
 export type ContentKind = (typeof contentKinds)[number];
 export type ContentBrowseScope = (typeof browseScopes)[number];
 export type ContentBrowseSort = (typeof browseSorts)[number];
+export type ContentBrowseTopMetric = (typeof browseTopMetrics)[number];
+export type ContentRankingWindow = (typeof rankingWindows)[number];
 export type DiscussionSort = (typeof discussionSorts)[number];
 export type ContentLifecycleState = "published" | "deleted";
 export type ContentDistributionState = "normal" | "limited" | "hidden";
@@ -260,6 +278,8 @@ export interface ContentBrowseInput {
   symbols?: readonly string[] | undefined;
   topic?: string | undefined;
   topics?: readonly string[] | undefined;
+  topMetric?: ContentBrowseTopMetric | undefined;
+  window?: ContentRankingWindow | undefined;
 }
 
 export interface ContentBrowsePage {
@@ -455,6 +475,8 @@ export interface NormalizedContentBrowseInput {
   symbols: string[];
   topic: string | null;
   topics: string[];
+  topMetric: ContentBrowseTopMetric | null;
+  window: ContentRankingWindow | null;
 }
 
 export interface NormalizedDiscussionInput {
@@ -488,6 +510,7 @@ interface CursorPayload {
   followEpoch: string | null;
   kind: "browse" | "discussion";
   last: CursorLast;
+  orderingVersion: string;
   snapshotId: string;
   visibilityEpoch: string;
   v: number;
@@ -501,6 +524,7 @@ interface ParsedCursor {
   lastAt: Date;
   lastCreatedAt: Date | null;
   lastId: string;
+  orderingVersion: string;
   position: number;
   snapshotId: string;
   visibilityEpoch: string;
@@ -536,11 +560,35 @@ interface BrowseCandidateRow {
   id: string;
   matched_follows: MatchedFollowProjection[];
   order_at: Date;
+  score_micros: number;
+}
+
+interface FrozenCandidateRow {
+  created_at: Date;
+  id: string;
+  order_at: Date;
+  score_micros: number;
 }
 
 interface DiscussionCandidateRow {
+  created_at: Date;
   id: string;
   order_at: Date;
+  score_micros: number;
+  serialized_bytes: number;
+}
+
+interface FrozenCandidateSnapshotRow {
+  candidates: unknown;
+}
+
+interface MatchedFollowRow {
+  content_id: string;
+  matched_follows: unknown;
+}
+
+interface DiscussionCandidateSizeRow {
+  id: string;
   serialized_bytes: number;
 }
 
@@ -769,6 +817,76 @@ function mapMatchedFollows(value: unknown): MatchedFollowProjection[] {
   return matches;
 }
 
+function usesFollowSnapshot(scope: ContentBrowseScope): boolean {
+  return scope === "following" || scope === "home";
+}
+
+function usesFrozenBrowseRanking(input: NormalizedContentBrowseInput): boolean {
+  return input.scope === "home" || input.sort === "hot" || input.sort === "top";
+}
+
+function browseRankingVersion(input: NormalizedContentBrowseInput): string {
+  if (input.scope === "home") return `home-${input.sort}-v1`;
+  if (input.scope === "following") return `following-${input.sort}-v1`;
+  if (input.sort === "hot") return "browse-hot-v1";
+  if (input.sort === "top") return "browse-top-v1";
+  return `${CONTENT_READ_ORDERING_VERSION}:${input.sort}`;
+}
+
+function discussionOrderingVersion(sort: DiscussionSort): string {
+  return sort === "top"
+    ? "discussion-top-helpful-v1"
+    : `${DISCUSSION_ORDERING_VERSION}:${sort}`;
+}
+
+function mapFrozenCandidateSnapshot(
+  value: unknown,
+  maximumCandidates: number,
+  asOf: Date,
+): FrozenCandidateRow[] {
+  if (
+    !Array.isArray(value) ||
+    value.length > maximumCandidates ||
+    Buffer.byteLength(JSON.stringify(value), "utf8") > MAXIMUM_FROZEN_CANDIDATE_BYTES
+  ) {
+    throw new ContentReadError("CONTENT_DATA_INVALID");
+  }
+  const identities = new Set<string>();
+  return value.map((entry) => {
+    if (
+      !isRecord(entry) ||
+      Object.keys(entry).sort().join(",") !==
+        "content_id,created_at,order_at,score_micros" ||
+      typeof entry.content_id !== "string" ||
+      !UUID_PATTERN.test(entry.content_id) ||
+      typeof entry.created_at !== "string" ||
+      typeof entry.order_at !== "string" ||
+      typeof entry.score_micros !== "number" ||
+      !Number.isSafeInteger(entry.score_micros)
+    ) {
+      throw new ContentReadError("CONTENT_DATA_INVALID");
+    }
+    const createdAt = new Date(entry.created_at);
+    const orderAt = new Date(entry.order_at);
+    if (
+      !Number.isFinite(createdAt.valueOf()) ||
+      !Number.isFinite(orderAt.valueOf()) ||
+      createdAt > asOf ||
+      orderAt > asOf ||
+      identities.has(entry.content_id)
+    ) {
+      throw new ContentReadError("CONTENT_DATA_INVALID");
+    }
+    identities.add(entry.content_id);
+    return {
+      created_at: createdAt,
+      id: entry.content_id,
+      order_at: orderAt,
+      score_micros: entry.score_micros,
+    };
+  });
+}
+
 function normalizeUuid(value: string, code: ContentReadErrorCode): string {
   const normalized = value.normalize("NFC").trim().toLowerCase();
   if (!UUID_PATTERN.test(normalized)) {
@@ -928,6 +1046,19 @@ export function normalizeContentBrowseInput(
   if (!browseSorts.includes(sort)) {
     throw new ContentReadError("INVALID_ARGUMENT");
   }
+  const topMetric = input.topMetric ?? null;
+  const window = input.window ?? null;
+  if (
+    (topMetric !== null && !browseTopMetrics.includes(topMetric)) ||
+    (window !== null && !rankingWindows.includes(window)) ||
+    (sort === "top" && topMetric === null) ||
+    (sort !== "top" && topMetric !== null) ||
+    ((sort === "hot" || sort === "top") && window === null) ||
+    (sort !== "hot" && sort !== "top" && window !== null) ||
+    (sort === "hot" && window === "all")
+  ) {
+    throw new ContentReadError("INVALID_ARGUMENT");
+  }
   const communityId =
     input.communityId === undefined
       ? null
@@ -943,6 +1074,7 @@ export function normalizeContentBrowseInput(
     community: communityId,
     following: null,
     global: null,
+    home: null,
     symbol,
     topic,
   } as const;
@@ -950,9 +1082,12 @@ export function normalizeContentBrowseInput(
     (value) => value !== null,
   ).length;
   if (
-    ((input.scope === "global" || input.scope === "following") &&
+    ((input.scope === "global" ||
+      input.scope === "home" ||
+      input.scope === "following") &&
       suppliedTargetCount !== 0) ||
     (input.scope !== "global" &&
+      input.scope !== "home" &&
       input.scope !== "following" &&
       (expectedTargets[input.scope] === null || suppliedTargetCount !== 1))
   ) {
@@ -979,6 +1114,8 @@ export function normalizeContentBrowseInput(
     symbols: normalizeSymbols(input.symbols),
     topic,
     topics: normalizeTopics(input.topics),
+    topMetric,
+    window,
   };
 }
 
@@ -1095,6 +1232,8 @@ function browseCursorBinding(
         symbols: input.symbols,
         topic: input.topic,
         topics: input.topics,
+        ...(input.topMetric === null ? {} : { topMetric: input.topMetric }),
+        ...(input.window === null ? {} : { window: input.window }),
       },
       viewer: viewerCursorIdentity(viewer),
     }),
@@ -1167,6 +1306,7 @@ function makeSnapshotId(
   databaseSnapshot: string,
   visibilityEpoch: string,
   followEpoch: string | null,
+  orderingVersion: string,
 ): string {
   return `crs_${keyedDigest(
     key,
@@ -1177,6 +1317,7 @@ function makeSnapshotId(
       databaseSnapshot,
       followEpoch,
       kind,
+      orderingVersion,
       visibilityEpoch,
     }),
   ).slice(0, 32)}`;
@@ -1199,7 +1340,7 @@ function decodeCursorPayload(value: unknown): CursorPayload | null {
   }
   if (
     Object.keys(value).sort().join(",") !==
-    "asOf,binding,databaseSnapshot,expiresAt,followEpoch,kind,last,snapshotId,v,visibilityEpoch"
+    "asOf,binding,databaseSnapshot,expiresAt,followEpoch,kind,last,orderingVersion,snapshotId,v,visibilityEpoch"
   ) {
     return null;
   }
@@ -1224,6 +1365,8 @@ function decodeCursorPayload(value: unknown): CursorPayload | null {
     !/^[0-9a-f]{64}$/u.test(value.binding) ||
     typeof value.snapshotId !== "string" ||
     !/^crs_[0-9a-f]{32}$/u.test(value.snapshotId) ||
+    typeof value.orderingVersion !== "string" ||
+    !/^[a-z0-9][a-z0-9:._-]{0,127}$/u.test(value.orderingVersion) ||
     typeof value.visibilityEpoch !== "string" ||
     !/^content:[1-9][0-9]{0,19}(?:;public:[1-9][0-9]{0,19})?$/u.test(
       value.visibilityEpoch,
@@ -1251,6 +1394,7 @@ function decodeCursorPayload(value: unknown): CursorPayload | null {
       id: last.id,
       position: last.position,
     },
+    orderingVersion: value.orderingVersion,
     snapshotId: value.snapshotId,
     visibilityEpoch: value.visibilityEpoch,
     v: value.v,
@@ -1324,7 +1468,7 @@ function validateConstructorOptions(options: PostgresContentReadOptions): void {
       MAXIMUM_DISCUSSION_BYTE_BUDGET,
       "discussion byte budget",
     ],
-    [options.cursorTtlSeconds, 60, 86_400, "cursor TTL"],
+    [options.cursorTtlSeconds, 60, 3_600, "cursor TTL"],
     [options.queryTimeoutMilliseconds, 100, 10_000, "query timeout"],
   ];
   for (const [value, minimum, maximum, label] of integerOptions) {
@@ -1743,8 +1887,16 @@ function snippet(value: string, maximumCodePoints = 600): string {
     : `${points.slice(0, maximumCodePoints).join("")}…`;
 }
 
-function browseReasons(input: NormalizedContentBrowseInput): string[] {
+function browseReasons(
+  input: NormalizedContentBrowseInput,
+  matchedFollows: readonly MatchedFollowProjection[],
+): string[] {
   const reasons = [`scope:${input.scope}`, `sort:${input.sort}`];
+  if (input.scope === "home") {
+    reasons.push(matchedFollows.length > 0 ? "home:following" : "home:discovery");
+  }
+  if (input.window !== null) reasons.push(`window:${input.window}`);
+  if (input.topMetric !== null) reasons.push(`metric:${input.topMetric}`);
   if (input.contentTypes.length !== 1 || input.contentTypes[0] !== "post") {
     reasons.push("filter:contentTypes");
   }
@@ -1762,6 +1914,7 @@ function toBrowseItem(
   rank: number,
   input: NormalizedContentBrowseInput,
   orderAt: Date,
+  scoreMicros: number,
   matchedFollows: MatchedFollowProjection[],
 ): ContentBrowseItem {
   const content = detail.content;
@@ -1774,10 +1927,10 @@ function toBrowseItem(
   ) {
     throw new ContentReadError("CONTENT_DATA_INVALID");
   }
-  const score =
-    input.sort === "active" || input.scope === "following"
-      ? orderAt.valueOf() / 1_000
-      : content.publishedAt.valueOf() / 1_000;
+  if (!Number.isSafeInteger(scoreMicros)) {
+    throw new ContentReadError("CONTENT_DATA_INVALID");
+  }
+  const score = scoreMicros / 1_000_000;
   const lastActivityAt = input.sort === "active" ? orderAt : content.lastActivityAt;
   return {
     author: content.author,
@@ -1799,7 +1952,7 @@ function toBrowseItem(
     replyCount: detail.replyCount,
     rootContentId: content.rootContentId,
     score,
-    selectionReasons: browseReasons(input),
+    selectionReasons: browseReasons(input, matchedFollows),
     snippetMarkdown: snippet(revision.bodyMarkdown),
     snippetPlainText: snippet(revision.bodyPlainText),
     snippetSourceRevisionId: revision.id,
@@ -1870,6 +2023,13 @@ export class PostgresContentReadService implements ContentReadService {
               and name = ${FOLLOW_GRAPH_MIGRATION_NAME}
               and checksum = ${FOLLOW_GRAPH_MIGRATION_CHECKSUM}
           )
+          and exists (
+            select 1
+            from system.schema_migrations
+            where version = ${CONTENT_RANKING_MIGRATION_VERSION}
+              and name = ${CONTENT_RANKING_MIGRATION_NAME}
+              and checksum = ${CONTENT_RANKING_V1_MIGRATION_CHECKSUM}
+          )
           and to_regclass('platform.content_items') is not null
           and to_regclass('platform.content_revisions') is not null
           and to_regclass('platform.reactions') is not null
@@ -1889,6 +2049,14 @@ export class PostgresContentReadService implements ContentReadService {
           and to_regclass('platform.follows_follower_content_target_unique') is not null
           and to_regclass('system.content_read_visibility_epochs') is not null
           and to_regclass('system.actor_follow_epochs') is not null
+          and to_regclass('system.content_ranking_candidate_snapshots') is not null
+          and to_regclass(
+            'system.content_ranking_candidate_snapshots_expiry_idx'
+          ) is not null
+          and to_regclass('platform.reactions_ranking_recent_idx') is not null
+          and to_regclass(
+            'platform.content_items_ranking_reply_recent_idx'
+          ) is not null
           and exists (
             select 1
             from pg_catalog.pg_attribute
@@ -2025,6 +2193,12 @@ export class PostgresContentReadService implements ContentReadService {
           and to_regprocedure('pg_catalog.pg_visible_in_snapshot(xid8,pg_snapshot)')
             is not null
           and to_regprocedure('public.digest(bytea,text)') is not null
+          and to_regprocedure(
+            'system.store_content_ranking_candidate_snapshot(text,bytea,text,jsonb,timestamp with time zone)'
+          ) is not null
+          and to_regprocedure(
+            'system.purge_expired_content_ranking_candidate_snapshots(integer)'
+          ) is not null
           as ready
       `;
     });
@@ -2039,9 +2213,11 @@ export class PostgresContentReadService implements ContentReadService {
   ): Promise<ContentBrowsePage> {
     assertReadAllowed(viewer, "browse_content");
     const normalized = normalizeContentBrowseInput(input, this.#defaultBrowseLimit);
-    if (normalized.scope === "following" && viewer === null) {
+    if (usesFollowSnapshot(normalized.scope) && viewer === null) {
       throw new ContentReadError("INVALID_ARGUMENT");
     }
+    const frozenRanking = usesFrozenBrowseRanking(normalized);
+    const currentOrderingVersion = browseRankingVersion(normalized);
     const binding = browseCursorBinding(this.#cursorSigningKey, viewer, normalized);
     const cursor =
       normalized.cursor === null
@@ -2049,14 +2225,27 @@ export class PostgresContentReadService implements ContentReadService {
         : this.#parseCursor(normalized.cursor, "browse", binding);
     if (
       cursor !== null &&
+      !frozenRanking &&
       normalized.scope === "following" &&
       normalized.sort === "active" &&
       cursor.lastCreatedAt === null
     ) {
       throw new ContentReadError("CURSOR_INVALID");
     }
+    if (cursor !== null && frozenRanking && cursor.lastCreatedAt === null) {
+      throw new ContentReadError("CURSOR_INVALID");
+    }
+    if (
+      cursor !== null &&
+      !frozenRanking &&
+      cursor.orderingVersion !== currentOrderingVersion
+    ) {
+      throw new ContentReadError("CURSOR_INVALID");
+    }
     const result = await this.#sql.begin(
-      "isolation level repeatable read read only",
+      cursor === null && frozenRanking
+        ? "isolation level repeatable read"
+        : "isolation level repeatable read read only",
       async (transaction) => {
         await this.#setStatementTimeout(transaction);
         const countsAsOf = await this.#databaseTime(transaction);
@@ -2068,10 +2257,9 @@ export class PostgresContentReadService implements ContentReadService {
         if (cursor !== null && cursor.visibilityEpoch !== visibilityEpoch) {
           throw new ContentReadError("SNAPSHOT_EXPIRED");
         }
-        const followEpoch =
-          normalized.scope === "following"
-            ? await this.#actorFollowEpoch(transaction, viewer!.agent.actorId)
-            : null;
+        const followEpoch = usesFollowSnapshot(normalized.scope)
+          ? await this.#actorFollowEpoch(transaction, viewer!.agent.actorId)
+          : null;
         if (cursor !== null && cursor.followEpoch !== followEpoch) {
           throw new ContentReadError("SNAPSHOT_EXPIRED");
         }
@@ -2084,15 +2272,76 @@ export class PostgresContentReadService implements ContentReadService {
         }
         const databaseSnapshot =
           cursor?.databaseSnapshot ?? (await this.#databaseSnapshot(transaction));
-        const candidates = await this.#selectBrowseCandidates(
-          transaction,
-          normalized,
-          asOf,
-          databaseSnapshot,
-          cursor,
-          viewer !== null,
-          viewer?.agent.actorId ?? null,
-        );
+        const snapshotId =
+          cursor?.snapshotId ??
+          makeSnapshotId(
+            this.#cursorSigningKey,
+            "browse",
+            binding,
+            asOf,
+            databaseSnapshot,
+            visibilityEpoch,
+            followEpoch,
+            currentOrderingVersion,
+          );
+        const expiresAt =
+          cursor?.expiresAt ?? new Date(asOf.valueOf() + this.#cursorTtlMilliseconds);
+        let candidates: BrowseCandidateRow[];
+        if (cursor !== null && frozenRanking) {
+          const frozen = await this.#loadFrozenCandidateSnapshot(
+            transaction,
+            cursor,
+            binding,
+            "browse",
+            MAXIMUM_FROZEN_BROWSE_CANDIDATES,
+          );
+          candidates = frozen
+            .slice(cursor.position, cursor.position + normalized.limit + 1)
+            .map((candidate) => ({ ...candidate, matched_follows: [] }));
+        } else {
+          candidates = await this.#selectBrowseCandidates(
+            transaction,
+            normalized,
+            asOf,
+            databaseSnapshot,
+            cursor,
+            viewer !== null,
+            viewer?.agent.actorId ?? null,
+          );
+          if (frozenRanking && candidates.length > normalized.limit) {
+            await this.#storeFrozenCandidateSnapshot(
+              transaction,
+              snapshotId,
+              binding,
+              "browse",
+              candidates,
+              expiresAt,
+              MAXIMUM_FROZEN_BROWSE_CANDIDATES,
+            );
+          }
+        }
+        if (
+          cursor !== null &&
+          frozenRanking &&
+          usesFollowSnapshot(normalized.scope) &&
+          candidates.length > 0
+        ) {
+          const matches = await this.#selectMatchedFollows(
+            transaction,
+            viewer!.agent.actorId,
+            candidates.map((candidate) => candidate.id),
+          );
+          candidates = candidates.map((candidate) => ({
+            ...candidate,
+            matched_follows: matches.get(candidate.id) ?? [],
+          }));
+          if (
+            normalized.scope === "following" &&
+            candidates.some((candidate) => candidate.matched_follows.length === 0)
+          ) {
+            throw new ContentReadError("CONTENT_DATA_INVALID");
+          }
+        }
         const pageCandidates = candidates.slice(0, normalized.limit);
         const details = await this.#hydrateContent(
           transaction,
@@ -2107,6 +2356,9 @@ export class PostgresContentReadService implements ContentReadService {
           details,
           followEpoch,
           pageCandidates,
+          orderingVersion: cursor?.orderingVersion ?? currentOrderingVersion,
+          snapshotId,
+          expiresAt,
           visibilityEpoch,
         };
       },
@@ -2125,22 +2377,10 @@ export class PostgresContentReadService implements ContentReadService {
         startingRank + index + 1,
         normalized,
         candidate.order_at,
+        candidate.score_micros,
         candidate.matched_follows,
       );
     });
-    const snapshotId =
-      cursor?.snapshotId ??
-      makeSnapshotId(
-        this.#cursorSigningKey,
-        "browse",
-        binding,
-        result.asOf,
-        result.databaseSnapshot,
-        result.visibilityEpoch,
-        result.followEpoch,
-      );
-    const expiresAt =
-      cursor?.expiresAt ?? new Date(result.asOf.valueOf() + this.#cursorTtlMilliseconds);
     const lastCandidate = result.pageCandidates.at(-1);
     return {
       countsAsOf: result.countsAsOf,
@@ -2154,16 +2394,18 @@ export class PostgresContentReadService implements ContentReadService {
                 asOf: result.asOf,
                 binding,
                 databaseSnapshot: result.databaseSnapshot,
-                expiresAt,
+                expiresAt: result.expiresAt,
                 kind: "browse",
                 lastAt: lastCandidate.order_at,
                 lastCreatedAt:
-                  normalized.scope === "following" && normalized.sort === "active"
+                  frozenRanking ||
+                  (normalized.scope === "following" && normalized.sort === "active")
                     ? lastCandidate.created_at
                     : null,
                 lastId: lastCandidate.id,
+                orderingVersion: result.orderingVersion,
                 position: startingRank + result.pageCandidates.length,
-                snapshotId,
+                snapshotId: result.snapshotId,
                 visibilityEpoch: result.visibilityEpoch,
                 followEpoch: result.followEpoch,
               })
@@ -2171,12 +2413,9 @@ export class PostgresContentReadService implements ContentReadService {
       },
       ranking: {
         asOf: result.asOf,
-        expiresAt,
-        rankingVersion:
-          normalized.scope === "following"
-            ? `following-${normalized.sort}-v1`
-            : `${CONTENT_READ_ORDERING_VERSION}:${normalized.sort}`,
-        snapshotId,
+        expiresAt: result.expiresAt,
+        rankingVersion: result.orderingVersion,
+        snapshotId: result.snapshotId,
       },
     };
   }
@@ -2330,11 +2569,20 @@ export class PostgresContentReadService implements ContentReadService {
       byteBudget: this.#defaultDiscussionByteBudget,
       limit: this.#defaultDiscussionLimit,
     });
+    const currentOrderingVersion = discussionOrderingVersion(normalized.sort);
     const binding = discussionCursorBinding(this.#cursorSigningKey, viewer, normalized);
     const cursor =
       normalized.cursor === null
         ? null
         : this.#parseCursor(normalized.cursor, "discussion", binding);
+    const frozenRanking = normalized.sort === "top";
+    if (
+      cursor !== null &&
+      !frozenRanking &&
+      cursor.orderingVersion !== currentOrderingVersion
+    ) {
+      throw new ContentReadError("CURSOR_INVALID");
+    }
     const result = await this.#sql.begin(
       "isolation level repeatable read read only",
       async (transaction) => {
@@ -2355,14 +2603,43 @@ export class PostgresContentReadService implements ContentReadService {
         );
         const databaseSnapshot =
           cursor?.databaseSnapshot ?? (await this.#databaseSnapshot(transaction));
-        const candidates = await this.#selectDiscussionCandidates(
-          transaction,
-          location.root_id,
-          normalized,
-          asOf,
-          databaseSnapshot,
-          cursor,
-        );
+        const snapshotId =
+          cursor?.snapshotId ??
+          makeSnapshotId(
+            this.#cursorSigningKey,
+            "discussion",
+            binding,
+            asOf,
+            databaseSnapshot,
+            visibilityEpoch,
+            null,
+            currentOrderingVersion,
+          );
+        const expiresAt =
+          cursor?.expiresAt ?? new Date(asOf.valueOf() + this.#cursorTtlMilliseconds);
+        let candidates: DiscussionCandidateRow[];
+        if (cursor !== null && frozenRanking) {
+          const frozen = await this.#loadFrozenCandidateSnapshot(
+            transaction,
+            cursor,
+            binding,
+            "discussion",
+            MAXIMUM_FROZEN_DISCUSSION_CANDIDATES,
+          );
+          candidates = await this.#resolveDiscussionCandidateSizes(
+            transaction,
+            frozen.slice(cursor.position, cursor.position + normalized.limit + 1),
+          );
+        } else {
+          candidates = await this.#selectDiscussionCandidates(
+            transaction,
+            location.root_id,
+            normalized,
+            asOf,
+            databaseSnapshot,
+            cursor,
+          );
+        }
         for (const candidate of candidates) {
           if (
             !Number.isInteger(candidate.serialized_bytes) ||
@@ -2390,8 +2667,11 @@ export class PostgresContentReadService implements ContentReadService {
           countsAsOf,
           databaseSnapshot,
           details,
+          expiresAt,
           location,
+          orderingVersion: cursor?.orderingVersion ?? currentOrderingVersion,
           pageCandidates,
+          snapshotId,
           visibilityEpoch,
         };
       },
@@ -2414,19 +2694,6 @@ export class PostgresContentReadService implements ContentReadService {
       detail.countsAsOf = result.countsAsOf;
       return toDiscussionNode(detail);
     });
-    const snapshotId =
-      cursor?.snapshotId ??
-      makeSnapshotId(
-        this.#cursorSigningKey,
-        "discussion",
-        binding,
-        result.asOf,
-        result.databaseSnapshot,
-        result.visibilityEpoch,
-        null,
-      );
-    const expiresAt =
-      cursor?.expiresAt ?? new Date(result.asOf.valueOf() + this.#cursorTtlMilliseconds);
     const startingPosition = cursor?.position ?? 0;
     const ancestorContext = result.ancestors.map((ancestor) => ({
       depth: asNonnegativeInteger(ancestor.depth),
@@ -2449,13 +2716,14 @@ export class PostgresContentReadService implements ContentReadService {
             asOf: result.asOf,
             binding,
             databaseSnapshot: result.databaseSnapshot,
-            expiresAt,
+            expiresAt: result.expiresAt,
             kind: "discussion",
             lastAt: candidate.order_at,
             lastCreatedAt: null,
             lastId: candidate.id,
+            orderingVersion: result.orderingVersion,
             position: startingPosition + tentativeReplies.length,
-            snapshotId,
+            snapshotId: result.snapshotId,
             visibilityEpoch: result.visibilityEpoch,
             followEpoch: null,
           })
@@ -2465,9 +2733,9 @@ export class PostgresContentReadService implements ContentReadService {
         countsAsOf: result.countsAsOf,
         ordering: {
           asOf: result.asOf,
-          expiresAt,
-          orderingVersion: `${DISCUSSION_ORDERING_VERSION}:${normalized.sort}`,
-          snapshotId,
+          expiresAt: result.expiresAt,
+          orderingVersion: result.orderingVersion,
+          snapshotId: result.snapshotId,
         },
         page: {
           hasMore: tentativeHasMore,
@@ -2502,9 +2770,9 @@ export class PostgresContentReadService implements ContentReadService {
       countsAsOf: result.countsAsOf,
       ordering: {
         asOf: result.asOf,
-        expiresAt,
-        orderingVersion: `${DISCUSSION_ORDERING_VERSION}:${normalized.sort}`,
-        snapshotId,
+        expiresAt: result.expiresAt,
+        orderingVersion: result.orderingVersion,
+        snapshotId: result.snapshotId,
       },
       page: {
         hasMore,
@@ -2515,13 +2783,14 @@ export class PostgresContentReadService implements ContentReadService {
                 asOf: result.asOf,
                 binding,
                 databaseSnapshot: result.databaseSnapshot,
-                expiresAt,
+                expiresAt: result.expiresAt,
                 kind: "discussion",
                 lastAt: last.order_at,
                 lastCreatedAt: null,
                 lastId: last.id,
+                orderingVersion: result.orderingVersion,
                 position: startingPosition + selectedReplies.length,
-                snapshotId,
+                snapshotId: result.snapshotId,
                 visibilityEpoch: result.visibilityEpoch,
                 followEpoch: null,
               })
@@ -2537,6 +2806,20 @@ export class PostgresContentReadService implements ContentReadService {
       normalized.byteBudget
     ) {
       throw new ContentReadError("CONTENT_DATA_INVALID");
+    }
+    if (cursor === null && frozenRanking && projection.page.hasMore) {
+      await this.#sql.begin("isolation level read committed", async (transaction) => {
+        await this.#setStatementTimeout(transaction);
+        await this.#storeFrozenCandidateSnapshot(
+          transaction,
+          result.snapshotId,
+          binding,
+          "discussion",
+          result.candidates,
+          result.expiresAt,
+          MAXIMUM_FROZEN_DISCUSSION_CANDIDATES,
+        );
+      });
     }
     return projection;
   }
@@ -2661,7 +2944,886 @@ export class PostgresContentReadService implements ContentReadService {
     }
   }
 
+  async #storeFrozenCandidateSnapshot(
+    sql: QuerySql,
+    snapshotId: string,
+    binding: string,
+    kind: "browse" | "discussion",
+    candidates: readonly FrozenCandidateRow[],
+    expiresAt: Date,
+    maximumCandidates: number,
+  ): Promise<void> {
+    const selected = candidates.slice(0, maximumCandidates);
+    const payload = selected.map((candidate) => ({
+      content_id: candidate.id,
+      created_at: candidate.created_at.toISOString(),
+      order_at: candidate.order_at.toISOString(),
+      score_micros: candidate.score_micros,
+    }));
+    if (
+      candidates.length > maximumCandidates ||
+      Buffer.byteLength(JSON.stringify(payload), "utf8") > MAXIMUM_FROZEN_CANDIDATE_BYTES
+    ) {
+      throw new ContentReadError("CONTENT_READ_NOT_READY");
+    }
+    try {
+      const rows = await sql<{ stored: boolean }[]>`
+        select system.store_content_ranking_candidate_snapshot(
+          ${snapshotId},
+          ${Buffer.from(binding, "hex")},
+          ${kind},
+          ${sql.json(payload)},
+          ${expiresAt}
+        ) as stored
+      `;
+      if (rows[0]?.stored !== true) {
+        throw new ContentReadError("CONTENT_DATA_INVALID");
+      }
+    } catch (error) {
+      if (error instanceof ContentReadError) throw error;
+      throw new ContentReadError("CONTENT_READ_NOT_READY", {
+        retryable: true,
+      });
+    }
+  }
+
+  async #loadFrozenCandidateSnapshot(
+    sql: QuerySql,
+    cursor: ParsedCursor,
+    binding: string,
+    kind: "browse" | "discussion",
+    maximumCandidates: number,
+  ): Promise<FrozenCandidateRow[]> {
+    const rows = await sql<FrozenCandidateSnapshotRow[]>`
+      select snapshot.candidates
+      from system.content_ranking_candidate_snapshots as snapshot
+      where snapshot.snapshot_id = ${cursor.snapshotId}
+        and snapshot.binding_hmac = ${Buffer.from(binding, "hex")}
+        and snapshot.snapshot_kind = ${kind}
+        and snapshot.expires_at > clock_timestamp()
+    `;
+    const row = rows[0];
+    if (row === undefined) {
+      throw new ContentReadError("SNAPSHOT_EXPIRED");
+    }
+    if (rows.length !== 1) {
+      throw new ContentReadError("CONTENT_DATA_INVALID");
+    }
+    const candidates = mapFrozenCandidateSnapshot(
+      row.candidates,
+      maximumCandidates,
+      cursor.asOf,
+    );
+    const previous = candidates[cursor.position - 1];
+    if (
+      cursor.position < 1 ||
+      previous === undefined ||
+      previous.id !== cursor.lastId ||
+      previous.order_at.valueOf() !== cursor.lastAt.valueOf() ||
+      (cursor.lastCreatedAt !== null &&
+        previous.created_at.valueOf() !== cursor.lastCreatedAt.valueOf())
+    ) {
+      throw new ContentReadError("CONTENT_DATA_INVALID");
+    }
+    return candidates;
+  }
+
+  async #resolveDiscussionCandidateSizes(
+    sql: QuerySql,
+    candidates: readonly FrozenCandidateRow[],
+  ): Promise<DiscussionCandidateRow[]> {
+    if (candidates.length === 0) return [];
+    const rows = await sql<DiscussionCandidateSizeRow[]>`
+      select
+        requested.id::text as id,
+        case
+          when reply.lifecycle_state = 'deleted' then ${TOMBSTONE_SERIALIZED_BYTES}
+          else revision.public_node_serialized_bytes
+        end::integer as serialized_bytes
+      from unnest(${candidates.map((candidate) => candidate.id)}::uuid[])
+        with ordinality as requested(id, position)
+      join platform.content_items as reply on reply.id = requested.id
+      left join platform.content_revisions as revision
+        on revision.id = reply.current_revision_id
+       and revision.content_id = reply.id
+      order by requested.position
+    `;
+    if (rows.length !== candidates.length) {
+      throw new ContentReadError("CONTENT_DATA_INVALID");
+    }
+    return candidates.map((candidate, index) => {
+      const row = rows[index];
+      if (row?.id !== candidate.id) {
+        throw new ContentReadError("CONTENT_DATA_INVALID");
+      }
+      return {
+        created_at: candidate.created_at,
+        id: candidate.id,
+        order_at: candidate.order_at,
+        score_micros: candidate.score_micros,
+        serialized_bytes: row.serialized_bytes,
+      };
+    });
+  }
+
+  async #selectMatchedFollows(
+    sql: QuerySql,
+    viewerActorId: string,
+    contentIds: readonly string[],
+  ): Promise<Map<string, MatchedFollowProjection[]>> {
+    if (contentIds.length === 0) return new Map();
+    const rows = await sql<MatchedFollowRow[]>`
+      with candidate_content as materialized (
+        select content.*
+        from unnest(${contentIds}::uuid[]) as requested(id)
+        join platform.content_items as content on content.id = requested.id
+      ), match_rows as (
+        select
+          content.id as content_id,
+          follow.target_type,
+          follow.target_actor_id::text as target_id,
+          follow.notification_level,
+          1 as type_rank
+        from platform.follows as follow
+        join candidate_content as content
+          on content.author_actor_id = follow.target_actor_id
+        where follow.follower_actor_id = ${viewerActorId}::uuid
+          and follow.target_type = 'actor'
+
+        union all
+
+        select
+          content.id,
+          follow.target_type,
+          symbol.ticker::text,
+          follow.notification_level,
+          2
+        from platform.follows as follow
+        join platform.symbols as symbol on symbol.id = follow.target_symbol_id
+        join platform.content_symbols as mapping
+          on mapping.symbol_id = follow.target_symbol_id
+        join platform.content_items as tagged_content
+          on tagged_content.id = mapping.content_id
+        join candidate_content as content
+          on content.id = tagged_content.id
+          or (tagged_content.kind = 'post' and content.root_id = tagged_content.id)
+        where follow.follower_actor_id = ${viewerActorId}::uuid
+          and follow.target_type = 'symbol'
+
+        union all
+
+        select
+          content.id,
+          follow.target_type,
+          topic.slug::text,
+          follow.notification_level,
+          3
+        from platform.follows as follow
+        join platform.topics as topic on topic.id = follow.target_topic_id
+        join platform.content_topics as mapping
+          on mapping.topic_id = follow.target_topic_id
+        join platform.content_items as tagged_content
+          on tagged_content.id = mapping.content_id
+        join candidate_content as content
+          on content.id = tagged_content.id
+          or (tagged_content.kind = 'post' and content.root_id = tagged_content.id)
+        where follow.follower_actor_id = ${viewerActorId}::uuid
+          and follow.target_type = 'topic'
+
+        union all
+
+        select
+          content.id,
+          follow.target_type,
+          follow.target_content_id::text,
+          follow.notification_level,
+          0
+        from platform.follows as follow
+        join platform.content_items as followed_content
+          on followed_content.id = follow.target_content_id
+        join candidate_content as content
+          on content.id = follow.target_content_id
+          or (
+            followed_content.kind = 'post'
+            and content.root_id = follow.target_content_id
+          )
+          or (
+            followed_content.kind = 'reply'
+            and content.parent_id = follow.target_content_id
+          )
+        where follow.follower_actor_id = ${viewerActorId}::uuid
+          and follow.target_type = 'content'
+      )
+      select
+        matched.content_id::text as content_id,
+        jsonb_agg(
+          jsonb_build_object(
+            'targetType', matched.target_type,
+            'targetId', matched.target_id,
+            'notificationLevel', matched.notification_level
+          ) order by matched.type_rank, matched.target_id collate "C"
+        ) as matched_follows
+      from (
+        select distinct
+          content_id,
+          target_type,
+          target_id,
+          notification_level,
+          type_rank
+        from match_rows
+      ) as matched
+      group by matched.content_id
+    `;
+    const result = new Map<string, MatchedFollowProjection[]>();
+    for (const row of rows) {
+      if (!UUID_PATTERN.test(row.content_id) || result.has(row.content_id)) {
+        throw new ContentReadError("CONTENT_DATA_INVALID");
+      }
+      result.set(row.content_id, mapMatchedFollows(row.matched_follows));
+    }
+    return result;
+  }
+
   async #selectBrowseCandidates(
+    sql: QuerySql,
+    input: NormalizedContentBrowseInput,
+    asOf: Date,
+    databaseSnapshot: string,
+    cursor: ParsedCursor | null,
+    allowSuspendedCommunities: boolean,
+    viewerActorId: string | null,
+  ): Promise<BrowseCandidateRow[]> {
+    if (!usesFrozenBrowseRanking(input)) {
+      return this.#selectChronologicalBrowseCandidates(
+        sql,
+        input,
+        asOf,
+        databaseSnapshot,
+        cursor,
+        allowSuspendedCommunities,
+        viewerActorId,
+      );
+    }
+    if (input.scope === "home" && (input.sort === "latest" || input.sort === "active")) {
+      return this.#selectHomeChronologicalBrowseCandidates(
+        sql,
+        input,
+        asOf,
+        databaseSnapshot,
+        cursor,
+        allowSuspendedCommunities,
+        viewerActorId,
+      );
+    }
+    const rankingWindowStart =
+      input.window === "24h"
+        ? new Date(asOf.valueOf() - 24 * 60 * 60 * 1_000)
+        : input.window === "7d"
+          ? new Date(asOf.valueOf() - 7 * 24 * 60 * 60 * 1_000)
+          : input.window === "30d"
+            ? new Date(asOf.valueOf() - 30 * 24 * 60 * 60 * 1_000)
+            : null;
+    const hotHalfLifeSeconds =
+      input.window === "24h"
+        ? 12 * 60 * 60
+        : input.window === "7d"
+          ? 72 * 60 * 60
+          : 168 * 60 * 60;
+    const candidateLimit = usesFrozenBrowseRanking(input)
+      ? MAXIMUM_FROZEN_BROWSE_CANDIDATES
+      : input.limit + 1;
+    const rankedOrderingQuery =
+      input.scope === "home"
+        ? sql`
+            , lane_ranked_candidates as (
+              select
+                candidate.*,
+                row_number() over (
+                  partition by candidate.is_following
+                  order by
+                    candidate.score_micros desc,
+                    candidate.unique_participants desc,
+                    candidate.created_at desc,
+                    candidate.id desc
+                ) as lane_rank
+              from scored_candidates as candidate
+            ),
+            ordered_candidates as (
+              select
+                candidate.*,
+                case
+                  when candidate.is_following then
+                    floor((candidate.lane_rank - 1)::numeric / 3) * 4
+                    + mod(candidate.lane_rank - 1, 3)
+                    + 1
+                  else (candidate.lane_rank - 1) * 4 + 4
+                end as home_position
+              from lane_ranked_candidates as candidate
+            )
+            select
+              id::text as id,
+              created_at,
+              order_at,
+              matched_follows,
+              round(
+                (${MAXIMUM_FROZEN_BROWSE_CANDIDATES + 1} - home_position)
+                * 1000000
+              )::double precision as score_micros
+            from ordered_candidates
+            order by home_position asc
+            limit ${candidateLimit}
+          `
+        : sql`
+            select
+              id::text as id,
+              created_at,
+              order_at,
+              matched_follows,
+              score_micros
+            from scored_candidates
+            order by
+              score_micros desc,
+              unique_participants desc,
+              created_at desc,
+              id desc
+            limit ${candidateLimit}
+          `;
+    const rows = await sql<BrowseCandidateRow[]>`
+      with viewer_follows as materialized (
+        select follow.*
+        from platform.follows as follow
+        where ${input.scope}::text in ('home', 'following')
+          and follow.follower_actor_id = ${viewerActorId}::uuid
+      ),
+      following_match_rows as (
+        select
+          content.id as content_id,
+          follow.target_type,
+          follow.target_actor_id::text as target_id,
+          follow.notification_level,
+          1 as type_rank
+        from viewer_follows as follow
+        join platform.content_items as content
+          on content.author_actor_id = follow.target_actor_id
+        where follow.target_type = 'actor'
+
+        union all
+
+        select
+          content.id,
+          follow.target_type,
+          symbol.ticker::text,
+          follow.notification_level,
+          2
+        from viewer_follows as follow
+        join platform.symbols as symbol
+          on symbol.id = follow.target_symbol_id
+        join platform.content_symbols as content_symbol
+          on content_symbol.symbol_id = follow.target_symbol_id
+        join platform.content_items as tagged_content
+          on tagged_content.id = content_symbol.content_id
+        join platform.content_items as content
+          on content.id = tagged_content.id
+          or (
+            tagged_content.kind = 'post'
+            and content.root_id = tagged_content.id
+          )
+        where follow.target_type = 'symbol'
+
+        union all
+
+        select
+          content.id,
+          follow.target_type,
+          topic.slug::text,
+          follow.notification_level,
+          3
+        from viewer_follows as follow
+        join platform.topics as topic
+          on topic.id = follow.target_topic_id
+        join platform.content_topics as content_topic
+          on content_topic.topic_id = follow.target_topic_id
+        join platform.content_items as tagged_content
+          on tagged_content.id = content_topic.content_id
+        join platform.content_items as content
+          on content.id = tagged_content.id
+          or (
+            tagged_content.kind = 'post'
+            and content.root_id = tagged_content.id
+          )
+        where follow.target_type = 'topic'
+
+        union all
+
+        select
+          content.id,
+          follow.target_type,
+          follow.target_content_id::text,
+          follow.notification_level,
+          0
+        from viewer_follows as follow
+        join platform.content_items as followed_content
+          on followed_content.id = follow.target_content_id
+        join platform.content_items as content
+          on content.id = follow.target_content_id
+          or (
+            followed_content.kind = 'post'
+            and content.root_id = follow.target_content_id
+          )
+          or (
+            followed_content.kind = 'reply'
+            and content.parent_id = follow.target_content_id
+          )
+        where follow.target_type = 'content'
+      ),
+      following_matches as (
+        select
+          matched.content_id,
+          jsonb_agg(
+            jsonb_build_object(
+              'targetType', matched.target_type,
+              'targetId', matched.target_id,
+              'notificationLevel', matched.notification_level
+            ) order by matched.type_rank, matched.target_id collate "C"
+          ) as matched_follows
+        from (
+          select distinct
+            content_id,
+            target_type,
+            target_id,
+            notification_level,
+            type_rank
+          from following_match_rows
+        ) as matched
+        group by matched.content_id
+      ),
+      base_candidates as materialized (
+        select
+          content.id,
+          content.kind,
+          content.created_at,
+          content.published_at,
+          case
+            when ${input.sort}::text = 'active' and content.kind = 'post' then
+              greatest(
+                coalesce((
+                  select max(content_revision.created_at)
+                  from platform.content_revisions as content_revision
+                  where content_revision.content_id = content.id
+                    and content_revision.created_at <= ${asOf}
+                    and pg_visible_in_snapshot(
+                      content_revision.content_read_created_xid,
+                      ${databaseSnapshot}::pg_snapshot
+                    )
+                ), content.published_at),
+                coalesce((
+                  select max(greatest(
+                    reply.published_at,
+                    coalesce((
+                      select max(reply_revision.created_at)
+                      from platform.content_revisions as reply_revision
+                      where reply_revision.content_id = reply.id
+                        and reply_revision.created_at <= ${asOf}
+                        and pg_visible_in_snapshot(
+                          reply_revision.content_read_created_xid,
+                          ${databaseSnapshot}::pg_snapshot
+                        )
+                    ), reply.published_at)
+                  ))
+                  from platform.content_items as reply
+                  where reply.root_id = content.id
+                    and reply.id <> content.id
+                    and reply.lifecycle_state = 'published'
+                    and reply.distribution_state = 'normal'
+                    and reply.published_at <= ${asOf}
+                    and pg_visible_in_snapshot(
+                      reply.content_read_created_xid,
+                      ${databaseSnapshot}::pg_snapshot
+                    )
+                ), content.published_at)
+              )
+            when ${input.sort}::text = 'active' then
+              greatest(
+                content.published_at,
+                coalesce((
+                  select max(content_revision.created_at)
+                  from platform.content_revisions as content_revision
+                  where content_revision.content_id = content.id
+                    and content_revision.created_at <= ${asOf}
+                    and pg_visible_in_snapshot(
+                      content_revision.content_read_created_xid,
+                      ${databaseSnapshot}::pg_snapshot
+                    )
+                ), content.published_at)
+              )
+            when ${input.scope}::text = 'following' then content.created_at
+            else content.published_at
+          end as order_at,
+          coalesce(follow_matches.matched_follows, '[]'::jsonb) as matched_follows,
+          follow_matches.matched_follows is not null as is_following
+        from platform.content_items as content
+        left join following_matches as follow_matches
+          on follow_matches.content_id = content.id
+        where content.lifecycle_state = 'published'
+          and content.distribution_state <> 'hidden'
+          and content.published_at <= ${asOf}
+          and content.created_at <= ${asOf}
+          and pg_visible_in_snapshot(
+            content.content_read_created_xid,
+            ${databaseSnapshot}::pg_snapshot
+          )
+          and (
+            content.kind = any(${input.contentTypes}::text[])
+            or (
+              ${input.scope}::text = 'following'
+              and ${input.contentTypesExplicit}::boolean = false
+              and content.kind = 'reply'
+              and exists (
+                select 1
+                from platform.follows as direct_content_follow
+                where direct_content_follow.follower_actor_id =
+                    ${viewerActorId}::uuid
+                  and direct_content_follow.target_type = 'content'
+                  and direct_content_follow.target_content_id = content.id
+              )
+            )
+          )
+          and exists (
+            select 1
+            from platform.content_items as visible_root
+            where visible_root.id = content.root_id
+              and visible_root.kind = 'post'
+              and visible_root.lifecycle_state = 'published'
+              and visible_root.distribution_state <> 'hidden'
+              and (
+                (
+                  ${input.sort}::text = 'latest'
+                  and ${input.scope}::text <> 'home'
+                )
+                or (
+                  content.distribution_state = 'normal'
+                  and visible_root.distribution_state = 'normal'
+                )
+              )
+              and exists (
+                select 1
+                from platform.communities as visible_community
+                where visible_community.deleted_at is null
+                  and (
+                    ${allowSuspendedCommunities}::boolean
+                    or visible_community.status <> 'suspended'
+                  )
+                  and (
+                    visible_community.id = visible_root.primary_community_id
+                    or exists (
+                      select 1
+                      from platform.content_additional_communities
+                        as visible_additional
+                      where visible_additional.content_id = visible_root.id
+                        and visible_additional.community_id = visible_community.id
+                    )
+                  )
+              )
+          )
+          and (
+            ${input.createdAfter}::timestamptz is null
+            or content.created_at > ${input.createdAfter}
+          )
+          and (
+            ${input.createdBefore}::timestamptz is null
+            or content.created_at < ${input.createdBefore}
+          )
+          and (
+            ${rankingWindowStart}::timestamptz is null
+            or content.published_at >= ${rankingWindowStart}
+          )
+          and (
+            cardinality(${input.authorActorIds}::uuid[]) = 0
+            or content.author_actor_id = any(${input.authorActorIds}::uuid[])
+          )
+          and (
+            cardinality(${input.symbols}::text[]) = 0
+            or exists (
+              select 1
+              from platform.content_symbols as content_symbol
+              join platform.symbols as symbol
+                on symbol.id = content_symbol.symbol_id
+              where content_symbol.content_id = content.id
+                and symbol.ticker::text = any(${input.symbols}::text[])
+            )
+          )
+          and (
+            cardinality(${input.topics}::text[]) = 0
+            or exists (
+              select 1
+              from platform.content_topics as content_topic
+              join platform.topics as topic
+                on topic.id = content_topic.topic_id
+              where content_topic.content_id = content.id
+                and topic.slug::text = any(${input.topics}::text[])
+            )
+          )
+          and (
+            ${input.scope}::text = 'global'
+            or ${input.scope}::text = 'home'
+            or (
+              ${input.scope}::text = 'author'
+              and content.author_actor_id = ${input.authorActorId}::uuid
+            )
+            or (
+              ${input.scope}::text = 'community'
+              and exists (
+                select 1
+                from platform.communities as requested_community
+                where requested_community.id = ${input.communityId}::uuid
+                  and requested_community.deleted_at is null
+                  and (
+                    ${allowSuspendedCommunities}::boolean
+                    or requested_community.status <> 'suspended'
+                  )
+              )
+              and exists (
+                select 1
+                from platform.content_items as root
+                left join platform.content_additional_communities as additional
+                  on additional.content_id = root.id
+                where root.id = content.root_id
+                  and (
+                    root.primary_community_id = ${input.communityId}::uuid
+                    or additional.community_id = ${input.communityId}::uuid
+                  )
+              )
+            )
+            or (
+              ${input.scope}::text = 'symbol'
+              and exists (
+                select 1
+                from platform.content_symbols as content_symbol
+                join platform.symbols as symbol
+                  on symbol.id = content_symbol.symbol_id
+                where content_symbol.content_id = content.id
+                  and symbol.ticker::text = ${input.symbol}::text
+              )
+            )
+            or (
+              ${input.scope}::text = 'topic'
+              and exists (
+                select 1
+                from platform.content_topics as content_topic
+                join platform.topics as topic
+                  on topic.id = content_topic.topic_id
+                where content_topic.content_id = content.id
+                  and topic.slug::text = ${input.topic}::text
+              )
+            )
+            or (
+              ${input.scope}::text = 'following'
+              and follow_matches.matched_follows is not null
+            )
+          )
+      ),
+      reaction_stats as (
+        select
+          candidate.id as content_id,
+          count(*) filter (
+            where reaction.reaction_type = 'helpful'
+          ) as helpful_count,
+          count(*) filter (
+            where reaction.reaction_type = 'agree'
+          ) as agree_count,
+          count(*) filter (
+            where reaction.reaction_type = 'disagree'
+          ) as disagree_count
+        from base_candidates as candidate
+        left join platform.reactions as reaction
+          on reaction.content_id = candidate.id
+         and reaction.created_at <= ${asOf}
+         and (
+           ${input.sort}::text = 'top'
+           or reaction.reaction_type = 'helpful'
+         )
+         and (
+           ${rankingWindowStart}::timestamptz is null
+           or reaction.created_at >= ${rankingWindowStart}
+         )
+        group by candidate.id
+      ),
+      reply_author_counts as (
+        select
+          candidate.id as content_id,
+          reply.author_actor_id,
+          count(*) as reply_count
+        from base_candidates as candidate
+        join platform.content_items as reply
+          on (
+            candidate.kind = 'post'
+            and reply.root_id = candidate.id
+            and reply.id <> candidate.id
+          )
+          or (
+            candidate.kind = 'reply'
+            and reply.parent_id = candidate.id
+          )
+        where reply.kind = 'reply'
+          and reply.lifecycle_state = 'published'
+          and reply.distribution_state = 'normal'
+          and reply.published_at <= ${asOf}
+          and (
+            ${rankingWindowStart}::timestamptz is null
+            or reply.published_at >= ${rankingWindowStart}
+          )
+          and pg_visible_in_snapshot(
+            reply.content_read_created_xid,
+            ${databaseSnapshot}::pg_snapshot
+          )
+        group by candidate.id, reply.author_actor_id
+      ),
+      reply_stats as (
+        select
+          candidate.id as content_id,
+          coalesce(sum(author_replies.reply_count), 0) as reply_count,
+          coalesce(
+            sum(least(coalesce(author_replies.reply_count, 0), 3)),
+            0
+          ) as quality_reply_count
+        from base_candidates as candidate
+        left join reply_author_counts as author_replies
+          on author_replies.content_id = candidate.id
+        group by candidate.id
+      ),
+      participant_rows as (
+        select candidate.id as content_id, reaction.actor_id
+        from base_candidates as candidate
+        join platform.reactions as reaction
+          on reaction.content_id = candidate.id
+         and reaction.created_at <= ${asOf}
+         and (
+           ${input.sort}::text = 'top'
+           or reaction.reaction_type = 'helpful'
+         )
+         and (
+           ${rankingWindowStart}::timestamptz is null
+           or reaction.created_at >= ${rankingWindowStart}
+         )
+
+        union
+
+        select reply.content_id, reply.author_actor_id
+        from reply_author_counts as reply
+      ),
+      participants as (
+        select
+          candidate.id as content_id,
+          count(participant.actor_id) as participant_count
+        from base_candidates as candidate
+        left join participant_rows as participant
+          on participant.content_id = candidate.id
+        group by candidate.id
+      ),
+      scored_candidates as (
+        select
+          candidate.id,
+          candidate.created_at,
+          candidate.order_at,
+          candidate.matched_follows,
+          candidate.is_following,
+          participants.participant_count as unique_participants,
+          case
+            when ${input.sort}::text = 'hot' then round(
+              (
+                1
+                + reaction_stats.helpful_count * 3
+                + reply_stats.quality_reply_count * 2
+                + participants.participant_count
+              )
+              * exp(
+                -ln(2.0::double precision) * greatest(
+                  extract(epoch from (${asOf}::timestamptz - candidate.published_at)),
+                  0
+                ) / ${hotHalfLifeSeconds}::double precision
+              )
+              * 1000000
+            )::double precision
+            when ${input.sort}::text = 'top' then round(
+              case ${input.topMetric}::text
+                when 'helpful' then reaction_stats.helpful_count::double precision
+                when 'agree' then reaction_stats.agree_count::double precision
+                when 'disagree' then reaction_stats.disagree_count::double precision
+                when 'replies' then reply_stats.reply_count::double precision
+                when 'engagement' then (
+                  reaction_stats.helpful_count * 3
+                  + reaction_stats.agree_count
+                  + reaction_stats.disagree_count
+                  + reply_stats.quality_reply_count * 2
+                  + participants.participant_count
+                )::double precision
+                when 'controversy' then case
+                  when reaction_stats.agree_count = 0
+                    or reaction_stats.disagree_count = 0 then 0
+                  else
+                    (
+                      2.0
+                      * least(
+                        reaction_stats.agree_count,
+                        reaction_stats.disagree_count
+                      )
+                      / (
+                        reaction_stats.agree_count
+                        + reaction_stats.disagree_count
+                      )
+                    )
+                    * ln(
+                      1
+                      + reaction_stats.agree_count
+                      + reaction_stats.disagree_count
+                    )
+                end
+                else 0
+              end * 1000000
+            )::double precision
+            else round(extract(epoch from candidate.order_at) * 1000000)
+              ::double precision
+          end as score_micros
+        from base_candidates as candidate
+        join reaction_stats on reaction_stats.content_id = candidate.id
+        join reply_stats on reply_stats.content_id = candidate.id
+        join participants on participants.content_id = candidate.id
+      )
+      ${rankedOrderingQuery}
+    `;
+    return rows.map((row) => {
+      const createdAt = asDate(row.created_at);
+      const orderAt = asDate(row.order_at);
+      const scoreMicros = row.score_micros;
+      if (
+        !UUID_PATTERN.test(row.id) ||
+        createdAt > asOf ||
+        orderAt > asOf ||
+        typeof scoreMicros !== "number" ||
+        !Number.isSafeInteger(scoreMicros)
+      ) {
+        throw new ContentReadError("CONTENT_DATA_INVALID");
+      }
+      const matchedFollows = mapMatchedFollows(row.matched_follows);
+      if (
+        (input.scope === "following" && matchedFollows.length === 0) ||
+        (input.scope !== "following" &&
+          input.scope !== "home" &&
+          matchedFollows.length !== 0)
+      ) {
+        throw new ContentReadError("CONTENT_DATA_INVALID");
+      }
+      return {
+        created_at: createdAt,
+        id: row.id,
+        matched_follows: matchedFollows,
+        order_at: orderAt,
+        score_micros: scoreMicros,
+      };
+    });
+  }
+
+  async #selectChronologicalBrowseCandidates(
     sql: QuerySql,
     input: NormalizedContentBrowseInput,
     asOf: Date,
@@ -2997,7 +4159,9 @@ export class PostgresContentReadService implements ContentReadService {
         id::text as id,
         created_at,
         order_at,
-        matched_follows
+        matched_follows,
+        round(extract(epoch from order_at) * 1000000)::double precision
+          as score_micros
       from candidates
       where (
         ${cursor?.lastAt ?? null}::timestamptz is null
@@ -3039,7 +4203,14 @@ export class PostgresContentReadService implements ContentReadService {
     return rows.map((row) => {
       const createdAt = asDate(row.created_at);
       const orderAt = asDate(row.order_at);
-      if (!UUID_PATTERN.test(row.id) || createdAt > asOf || orderAt > asOf) {
+      const scoreMicros = row.score_micros;
+      if (
+        !UUID_PATTERN.test(row.id) ||
+        createdAt > asOf ||
+        orderAt > asOf ||
+        typeof scoreMicros !== "number" ||
+        !Number.isSafeInteger(scoreMicros)
+      ) {
         throw new ContentReadError("CONTENT_DATA_INVALID");
       }
       const matchedFollows = mapMatchedFollows(row.matched_follows);
@@ -3054,6 +4225,455 @@ export class PostgresContentReadService implements ContentReadService {
         id: row.id,
         matched_follows: matchedFollows,
         order_at: orderAt,
+        score_micros: scoreMicros,
+      };
+    });
+  }
+
+  async #selectHomeChronologicalBrowseCandidates(
+    sql: QuerySql,
+    input: NormalizedContentBrowseInput,
+    asOf: Date,
+    databaseSnapshot: string,
+    cursor: ParsedCursor | null,
+    allowSuspendedCommunities: boolean,
+    viewerActorId: string | null,
+  ): Promise<BrowseCandidateRow[]> {
+    const candidateLimit =
+      input.scope === "home" ? MAXIMUM_FROZEN_BROWSE_CANDIDATES : input.limit + 1;
+    const rows = await sql<BrowseCandidateRow[]>`
+      with viewer_follows as materialized (
+        select follow.*
+        from platform.follows as follow
+        where ${input.scope}::text in ('home', 'following')
+          and follow.follower_actor_id = ${viewerActorId}::uuid
+      ),
+      following_match_rows as (
+        select
+          content.id as content_id,
+          follow.target_type,
+          follow.target_actor_id::text as target_id,
+          follow.notification_level,
+          1 as type_rank
+        from viewer_follows as follow
+        join platform.content_items as content
+          on content.author_actor_id = follow.target_actor_id
+        where follow.target_type = 'actor'
+
+        union all
+
+        select
+          content.id,
+          follow.target_type,
+          symbol.ticker::text,
+          follow.notification_level,
+          2
+        from viewer_follows as follow
+        join platform.symbols as symbol
+          on symbol.id = follow.target_symbol_id
+        join platform.content_symbols as content_symbol
+          on content_symbol.symbol_id = follow.target_symbol_id
+        join platform.content_items as tagged_content
+          on tagged_content.id = content_symbol.content_id
+        join platform.content_items as content
+          on content.id = tagged_content.id
+          or (
+            tagged_content.kind = 'post'
+            and content.root_id = tagged_content.id
+          )
+        where follow.target_type = 'symbol'
+
+        union all
+
+        select
+          content.id,
+          follow.target_type,
+          topic.slug::text,
+          follow.notification_level,
+          3
+        from viewer_follows as follow
+        join platform.topics as topic
+          on topic.id = follow.target_topic_id
+        join platform.content_topics as content_topic
+          on content_topic.topic_id = follow.target_topic_id
+        join platform.content_items as tagged_content
+          on tagged_content.id = content_topic.content_id
+        join platform.content_items as content
+          on content.id = tagged_content.id
+          or (
+            tagged_content.kind = 'post'
+            and content.root_id = tagged_content.id
+          )
+        where follow.target_type = 'topic'
+
+        union all
+
+        select
+          content.id,
+          follow.target_type,
+          follow.target_content_id::text,
+          follow.notification_level,
+          0
+        from viewer_follows as follow
+        join platform.content_items as followed_content
+          on followed_content.id = follow.target_content_id
+        join platform.content_items as content
+          on content.id = follow.target_content_id
+          or (
+            followed_content.kind = 'post'
+            and content.root_id = follow.target_content_id
+          )
+          or (
+            followed_content.kind = 'reply'
+            and content.parent_id = follow.target_content_id
+          )
+        where follow.target_type = 'content'
+      ),
+      following_matches as (
+        select
+          matched.content_id,
+          jsonb_agg(
+            jsonb_build_object(
+              'targetType', matched.target_type,
+              'targetId', matched.target_id,
+              'notificationLevel', matched.notification_level
+            ) order by matched.type_rank, matched.target_id collate "C"
+          ) as matched_follows
+        from (
+          select distinct
+            content_id,
+            target_type,
+            target_id,
+            notification_level,
+            type_rank
+          from following_match_rows
+        ) as matched
+        group by matched.content_id
+      ),
+      candidates as (
+        select
+          content.id,
+          content.created_at,
+          case
+            when ${input.sort}::text = 'active' and content.kind = 'post' then
+              greatest(
+                coalesce((
+                  select max(content_revision.created_at)
+                  from platform.content_revisions as content_revision
+                  where content_revision.content_id = content.id
+                    and content_revision.created_at <= ${asOf}
+                    and pg_visible_in_snapshot(
+                      content_revision.content_read_created_xid,
+                      ${databaseSnapshot}::pg_snapshot
+                    )
+                ), content.published_at),
+                coalesce((
+                  select max(greatest(
+                    reply.published_at,
+                    coalesce((
+                      select max(reply_revision.created_at)
+                      from platform.content_revisions as reply_revision
+                      where reply_revision.content_id = reply.id
+                        and reply_revision.created_at <= ${asOf}
+                        and pg_visible_in_snapshot(
+                          reply_revision.content_read_created_xid,
+                          ${databaseSnapshot}::pg_snapshot
+                        )
+                    ), reply.published_at)
+                  ))
+                  from platform.content_items as reply
+                  where reply.root_id = content.id
+                    and reply.id <> content.id
+                    and reply.lifecycle_state = 'published'
+                    and reply.distribution_state = 'normal'
+                    and reply.published_at <= ${asOf}
+                    and pg_visible_in_snapshot(
+                      reply.content_read_created_xid,
+                      ${databaseSnapshot}::pg_snapshot
+                    )
+                ), content.published_at)
+              )
+            when ${input.sort}::text = 'active' then
+              greatest(
+                content.published_at,
+                coalesce((
+                  select max(content_revision.created_at)
+                  from platform.content_revisions as content_revision
+                  where content_revision.content_id = content.id
+                    and content_revision.created_at <= ${asOf}
+                    and pg_visible_in_snapshot(
+                      content_revision.content_read_created_xid,
+                      ${databaseSnapshot}::pg_snapshot
+                    )
+                ), content.published_at)
+              )
+            when ${input.scope}::text = 'following' then content.created_at
+            else content.published_at
+          end as order_at,
+          coalesce(follow_matches.matched_follows, '[]'::jsonb) as matched_follows,
+          follow_matches.matched_follows is not null as is_following
+        from platform.content_items as content
+        left join following_matches as follow_matches
+          on follow_matches.content_id = content.id
+        where content.lifecycle_state = 'published'
+          and content.distribution_state <> 'hidden'
+          and content.published_at <= ${asOf}
+          and content.created_at <= ${asOf}
+          and pg_visible_in_snapshot(
+            content.content_read_created_xid,
+            ${databaseSnapshot}::pg_snapshot
+          )
+          and (
+            content.kind = any(${input.contentTypes}::text[])
+            or (
+              ${input.scope}::text = 'following'
+              and ${input.contentTypesExplicit}::boolean = false
+              and content.kind = 'reply'
+              and exists (
+                select 1
+                from platform.follows as direct_content_follow
+                where direct_content_follow.follower_actor_id =
+                    ${viewerActorId}::uuid
+                  and direct_content_follow.target_type = 'content'
+                  and direct_content_follow.target_content_id = content.id
+              )
+            )
+          )
+          and exists (
+            select 1
+            from platform.content_items as visible_root
+            where visible_root.id = content.root_id
+              and visible_root.kind = 'post'
+              and visible_root.lifecycle_state = 'published'
+              and visible_root.distribution_state <> 'hidden'
+              and (
+                (
+                  ${input.sort}::text = 'latest'
+                  and ${input.scope}::text <> 'home'
+                )
+                or (
+                  content.distribution_state = 'normal'
+                  and visible_root.distribution_state = 'normal'
+                )
+              )
+              and exists (
+                select 1
+                from platform.communities as visible_community
+                where visible_community.deleted_at is null
+                  and (
+                    ${allowSuspendedCommunities}::boolean
+                    or visible_community.status <> 'suspended'
+                  )
+                  and (
+                    visible_community.id = visible_root.primary_community_id
+                    or exists (
+                      select 1
+                      from platform.content_additional_communities
+                        as visible_additional
+                      where visible_additional.content_id = visible_root.id
+                        and visible_additional.community_id = visible_community.id
+                    )
+                  )
+              )
+          )
+          and (
+            ${input.createdAfter}::timestamptz is null
+            or content.created_at > ${input.createdAfter}
+          )
+          and (
+            ${input.createdBefore}::timestamptz is null
+            or content.created_at < ${input.createdBefore}
+          )
+          and (
+            cardinality(${input.authorActorIds}::uuid[]) = 0
+            or content.author_actor_id = any(${input.authorActorIds}::uuid[])
+          )
+          and (
+            cardinality(${input.symbols}::text[]) = 0
+            or exists (
+              select 1
+              from platform.content_symbols as content_symbol
+              join platform.symbols as symbol
+                on symbol.id = content_symbol.symbol_id
+              where content_symbol.content_id = content.id
+                and symbol.ticker::text = any(${input.symbols}::text[])
+            )
+          )
+          and (
+            cardinality(${input.topics}::text[]) = 0
+            or exists (
+              select 1
+              from platform.content_topics as content_topic
+              join platform.topics as topic
+                on topic.id = content_topic.topic_id
+              where content_topic.content_id = content.id
+                and topic.slug::text = any(${input.topics}::text[])
+            )
+          )
+          and (
+            ${input.scope}::text = 'global'
+            or ${input.scope}::text = 'home'
+            or (
+              ${input.scope}::text = 'author'
+              and content.author_actor_id = ${input.authorActorId}::uuid
+            )
+            or (
+              ${input.scope}::text = 'community'
+              and exists (
+                select 1
+                from platform.communities as requested_community
+                where requested_community.id = ${input.communityId}::uuid
+                  and requested_community.deleted_at is null
+                  and (
+                    ${allowSuspendedCommunities}::boolean
+                    or requested_community.status <> 'suspended'
+                  )
+              )
+              and exists (
+                select 1
+                from platform.content_items as root
+                left join platform.content_additional_communities as additional
+                  on additional.content_id = root.id
+                where root.id = content.root_id
+                  and (
+                    root.primary_community_id = ${input.communityId}::uuid
+                    or additional.community_id = ${input.communityId}::uuid
+                  )
+              )
+            )
+            or (
+              ${input.scope}::text = 'symbol'
+              and exists (
+                select 1
+                from platform.content_symbols as content_symbol
+                join platform.symbols as symbol
+                  on symbol.id = content_symbol.symbol_id
+                where content_symbol.content_id = content.id
+                  and symbol.ticker::text = ${input.symbol}::text
+              )
+            )
+            or (
+              ${input.scope}::text = 'topic'
+              and exists (
+                select 1
+                from platform.content_topics as content_topic
+                join platform.topics as topic
+                  on topic.id = content_topic.topic_id
+                where content_topic.content_id = content.id
+                  and topic.slug::text = ${input.topic}::text
+              )
+            )
+            or (
+              ${input.scope}::text = 'following'
+              and follow_matches.matched_follows is not null
+            )
+          )
+      ),
+      lane_ranked_candidates as (
+        select
+          candidate.*,
+          row_number() over (
+            partition by candidate.is_following
+            order by
+              candidate.order_at desc,
+              candidate.created_at desc,
+              candidate.id desc
+          ) as lane_rank
+        from candidates as candidate
+      ),
+      ordered_candidates as (
+        select
+          candidate.*,
+          case
+            when ${input.scope}::text <> 'home' then null
+            when candidate.is_following then
+              floor((candidate.lane_rank - 1)::numeric / 3) * 4
+              + mod(candidate.lane_rank - 1, 3)
+              + 1
+            else (candidate.lane_rank - 1) * 4 + 4
+          end as home_position
+        from lane_ranked_candidates as candidate
+      )
+      select
+        id::text as id,
+        created_at,
+        order_at,
+        matched_follows,
+        case
+          when ${input.scope}::text = 'home' then
+            round(
+              (${MAXIMUM_FROZEN_BROWSE_CANDIDATES + 1} - home_position)
+              * 1000000
+            )::double precision
+          else round(extract(epoch from order_at) * 1000000)::double precision
+        end as score_micros
+      from ordered_candidates
+      where (
+        ${cursor?.lastAt ?? null}::timestamptz is null
+        or (
+          ${input.sort}::text = 'active'
+          and ${input.scope}::text = 'following'
+          and (order_at, created_at, id) < (
+            ${cursor?.lastAt ?? null}::timestamptz,
+            ${cursor?.lastCreatedAt ?? null}::timestamptz,
+            ${cursor?.lastId ?? null}::uuid
+          )
+        )
+        or (
+          ${input.sort}::text = 'active'
+          and ${input.scope}::text <> 'following'
+          and (order_at, id) < (
+            ${cursor?.lastAt ?? null}::timestamptz,
+            ${cursor?.lastId ?? null}::uuid
+          )
+        )
+        or (
+          ${input.sort}::text = 'latest'
+          and (order_at, id) < (
+            ${cursor?.lastAt ?? null}::timestamptz,
+            ${cursor?.lastId ?? null}::uuid
+          )
+        )
+      )
+      order by
+        case when ${input.scope}::text = 'home' then home_position end asc,
+        case when ${input.scope}::text <> 'home' then order_at end desc,
+        case
+          when ${input.sort}::text = 'active'
+            and ${input.scope}::text = 'following'
+            then created_at
+        end desc,
+        id desc
+      limit ${candidateLimit}
+    `;
+    return rows.map((row) => {
+      const createdAt = asDate(row.created_at);
+      const orderAt = asDate(row.order_at);
+      const scoreMicros = row.score_micros;
+      if (
+        !UUID_PATTERN.test(row.id) ||
+        createdAt > asOf ||
+        orderAt > asOf ||
+        typeof scoreMicros !== "number" ||
+        !Number.isSafeInteger(scoreMicros)
+      ) {
+        throw new ContentReadError("CONTENT_DATA_INVALID");
+      }
+      const matchedFollows = mapMatchedFollows(row.matched_follows);
+      if (
+        (input.scope === "following" && matchedFollows.length === 0) ||
+        (input.scope !== "following" &&
+          input.scope !== "home" &&
+          matchedFollows.length !== 0)
+      ) {
+        throw new ContentReadError("CONTENT_DATA_INVALID");
+      }
+      return {
+        created_at: createdAt,
+        id: row.id,
+        matched_follows: matchedFollows,
+        order_at: orderAt,
+        score_micros: scoreMicros,
       };
     });
   }
@@ -3163,10 +4783,27 @@ export class PostgresContentReadService implements ContentReadService {
     databaseSnapshot: string,
     cursor: ParsedCursor | null,
   ): Promise<DiscussionCandidateRow[]> {
-    return sql<DiscussionCandidateRow[]>`
+    const candidateLimit =
+      input.sort === "top" ? MAXIMUM_FROZEN_DISCUSSION_CANDIDATES : input.limit + 1;
+    const rows = await sql<DiscussionCandidateRow[]>`
       select
         reply.id::text as id,
+        reply.created_at,
         reply.published_at as order_at,
+        case
+          when ${input.sort}::text = 'top' then
+            round(
+              (
+                select count(*)::double precision
+                from platform.reactions as reaction
+                where reaction.content_id = reply.id
+                  and reaction.reaction_type = 'helpful'
+                  and reaction.created_at <= ${asOf}
+              ) * 1000000
+            )::double precision
+          else round(extract(epoch from reply.published_at) * 1000000)
+            ::double precision
+        end as score_micros,
         case
           when reply.lifecycle_state = 'deleted' then ${TOMBSTONE_SERIALIZED_BYTES}
           else revision.public_node_serialized_bytes
@@ -3178,6 +4815,10 @@ export class PostgresContentReadService implements ContentReadService {
       where reply.root_id = ${rootId}::uuid
         and reply.kind = 'reply'
         and reply.distribution_state <> 'hidden'
+        and (
+          ${input.sort}::text <> 'top'
+          or reply.distribution_state = 'normal'
+        )
         and reply.published_at <= ${asOf}
         and pg_visible_in_snapshot(
           reply.content_read_created_xid,
@@ -3201,12 +4842,44 @@ export class PostgresContentReadService implements ContentReadService {
           )
         )
       order by
+        case when ${input.sort}::text = 'top' then (
+          select count(*)
+          from platform.reactions as reaction
+          where reaction.content_id = reply.id
+            and reaction.reaction_type = 'helpful'
+            and reaction.created_at <= ${asOf}
+        ) end desc,
         case when ${input.sort}::text = 'oldest' then reply.published_at end asc,
         case when ${input.sort}::text = 'oldest' then reply.id end asc,
         case when ${input.sort}::text = 'latest' then reply.published_at end desc,
-        case when ${input.sort}::text = 'latest' then reply.id end desc
-      limit ${input.limit + 1}
+        case when ${input.sort}::text = 'latest' then reply.id end desc,
+        case when ${input.sort}::text = 'top' then reply.published_at end desc,
+        case when ${input.sort}::text = 'top' then reply.id end desc
+      limit ${candidateLimit}
     `;
+    return rows.map((row) => {
+      const createdAt = asDate(row.created_at);
+      const orderAt = asDate(row.order_at);
+      if (
+        !UUID_PATTERN.test(row.id) ||
+        createdAt > asOf ||
+        orderAt > asOf ||
+        typeof row.score_micros !== "number" ||
+        !Number.isSafeInteger(row.score_micros) ||
+        !Number.isInteger(row.serialized_bytes) ||
+        row.serialized_bytes < 1 ||
+        row.serialized_bytes > MINIMUM_DISCUSSION_BYTE_BUDGET
+      ) {
+        throw new ContentReadError("CONTENT_DATA_INVALID");
+      }
+      return {
+        created_at: createdAt,
+        id: row.id,
+        order_at: orderAt,
+        score_micros: row.score_micros,
+        serialized_bytes: row.serialized_bytes,
+      };
+    });
   }
 
   async #selectRevisionPayload(
@@ -3881,6 +5554,7 @@ export class PostgresContentReadService implements ContentReadService {
     lastAt: Date;
     lastCreatedAt: Date | null;
     lastId: string;
+    orderingVersion: string;
     position: number;
     snapshotId: string;
     visibilityEpoch: string;
@@ -3898,6 +5572,7 @@ export class PostgresContentReadService implements ContentReadService {
         id: options.lastId,
         position: options.position,
       },
+      orderingVersion: options.orderingVersion,
       snapshotId: options.snapshotId,
       visibilityEpoch: options.visibilityEpoch,
       v: CURSOR_VERSION,
@@ -3980,6 +5655,7 @@ export class PostgresContentReadService implements ContentReadService {
           payload.databaseSnapshot,
           payload.visibilityEpoch,
           payload.followEpoch,
+          payload.orderingVersion,
         )
     ) {
       throw new ContentReadError("CURSOR_INVALID");
@@ -3995,6 +5671,7 @@ export class PostgresContentReadService implements ContentReadService {
       lastAt,
       lastCreatedAt,
       lastId: payload.last.id,
+      orderingVersion: payload.orderingVersion,
       position: payload.last.position,
       snapshotId: payload.snapshotId,
       visibilityEpoch: payload.visibilityEpoch,

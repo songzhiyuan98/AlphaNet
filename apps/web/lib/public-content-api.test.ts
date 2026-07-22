@@ -120,6 +120,28 @@ describe("public Content Web API", () => {
     expect(requestUrl(url)).toContain("content_types=post%2Creply");
   });
 
+  it("forwards bounded Hot and Helpful Top ranking policy to the public API", async () => {
+    const fetchMock = vi.fn<typeof fetch>(() =>
+      Promise.resolve(Response.json(emptyBrowseResponse)),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getPublicContent({ scope: "global", sort: "hot", window: "7d" });
+    await getPublicContent({
+      scope: "global",
+      sort: "top",
+      topMetric: "helpful",
+      window: "7d",
+    });
+
+    expect(requestUrl(fetchMock.mock.calls[0]![0])).toContain(
+      "scope=global&sort=hot&window=7d",
+    );
+    expect(requestUrl(fetchMock.mock.calls[1]![0])).toContain(
+      "scope=global&sort=top&top_metric=helpful&window=7d",
+    );
+  });
+
   it("uses stable detail and discussion paths", async () => {
     const fetchMock = vi.fn<typeof fetch>(() =>
       Promise.resolve(new Response(null, { status: 404 })),

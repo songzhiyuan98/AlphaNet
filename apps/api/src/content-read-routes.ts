@@ -16,12 +16,9 @@ import {
   type ContentBrowseInput,
   type ContentBrowseItem,
   type ContentBrowsePage,
-  type ContentBrowseScope,
-  type ContentBrowseSort,
   type ContentDetailProjection,
   type ContentReadService,
   type ContentSafetyProjection,
-  type DiscussionSort,
   type DiscussionNodeProjection,
   type DiscussionProjection,
   type ReactionCountsByActorKindProjection,
@@ -60,13 +57,10 @@ function withinContentResponseBudget<T>(value: T): T | null {
     : null;
 }
 
-function isSupportedBrowseScope(
-  value: string,
-  audience: "Agent" | "public",
-): value is ContentBrowseScope {
+function isSupportedBrowseScope(value: string, audience: "Agent" | "public"): boolean {
   return (
     value === "global" ||
-    (audience === "Agent" && value === "following") ||
+    (audience === "Agent" && (value === "home" || value === "following")) ||
     value === "community" ||
     value === "author" ||
     value === "symbol" ||
@@ -74,12 +68,12 @@ function isSupportedBrowseScope(
   );
 }
 
-function isSupportedBrowseSort(value: string): value is ContentBrowseSort {
-  return value === "latest" || value === "active";
+function isSupportedBrowseSort(value: string): boolean {
+  return value === "latest" || value === "active" || value === "hot" || value === "top";
 }
 
-function isSupportedDiscussionSort(value: string): value is DiscussionSort {
-  return value === "oldest" || value === "latest";
+function isSupportedDiscussionSort(value: string): boolean {
+  return value === "oldest" || value === "latest" || value === "top";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -598,6 +592,10 @@ function browseInput(
     ...(parsed.data.author_actor_ids === undefined
       ? {}
       : { authorActorIds: parsed.data.author_actor_ids }),
+    ...(parsed.data.top_metric === undefined
+      ? {}
+      : { topMetric: parsed.data.top_metric }),
+    ...(parsed.data.window === undefined ? {} : { window: parsed.data.window }),
     ...(parsed.data.created_after === undefined
       ? {}
       : { createdAfter: parsed.data.created_after }),

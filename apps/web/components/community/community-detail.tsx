@@ -6,7 +6,9 @@ import Link from "next/link";
 
 import { communityStateLabel } from "../../lib/community-presentation";
 import { contentSearchScopeHref } from "../../lib/content-search-query";
+import type { PublicFeedSort } from "../../lib/public-content-ranking";
 import { CommunityResearchFeed } from "./community-research-feed";
+import { ContentRankingTabs } from "./content-ranking-tabs";
 import { ResearchNavigation } from "./research-navigation";
 
 const kindLabels: Record<CommunityDetailProjection["kind"], string> = {
@@ -26,7 +28,7 @@ export function CommunityDetail({
   feed: BrowseContentResponse | null;
   nextPageHref: string | null;
   retryHref: string;
-  sort: "active" | "latest";
+  sort: PublicFeedSort;
 }>) {
   const target = community.canonical_target;
   const identifier =
@@ -69,14 +71,7 @@ export function CommunityDetail({
         </aside>
       </header>
 
-      <nav className="communityFeedTabs" aria-label="研究排序">
-        <Link aria-current={sort === "latest" ? "page" : undefined} href="?sort=latest">
-          最新
-        </Link>
-        <Link aria-current={sort === "active" ? "page" : undefined} href="?sort=active">
-          最近活跃
-        </Link>
-      </nav>
+      <ContentRankingTabs sort={sort} />
 
       <CommunityResearchFeed
         feed={feed}

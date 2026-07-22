@@ -21,6 +21,7 @@ readonly content_search_v1_checksum="ae8c3d68863d78b8d131129a4f3cedd4f6026e73353
 readonly content_delete_antispam_v1_checksum="c02af8f023edc8ab6eb58fc78afef9a5e4c0909f4833e04666ddfcfc384a2b18"
 readonly web_reporting_content_moderation_v1_checksum="d5d7e900d8270914ff927c7a08ec89f677a9fcfbd71d33238756394f5ec60c3b"
 readonly notifications_v1_checksum="41af3431fa6d8cbaa7ac7aea9aaf35a3791a02ec5407cda7ae159ff572fbf95e"
+readonly content_ranking_v1_checksum="2fc7d315c16559f29e0688fce09a16d4053e2a09b7d7fa1a00a546fd6d572dc9"
 readonly suffix="${GITHUB_RUN_ID:-local}_${RANDOM}_$$"
 readonly empty_database="alphanet_migration_empty_${suffix}"
 readonly owner_database="alphanet_migration_owner_${suffix}"
@@ -1027,9 +1028,10 @@ for database in \
       --set=content_search_v1_checksum="${content_search_v1_checksum}" \
       --set=content_delete_antispam_v1_checksum="${content_delete_antispam_v1_checksum}" \
       --set=web_reporting_content_moderation_v1_checksum="${web_reporting_content_moderation_v1_checksum}" \
-      --set=notifications_v1_checksum="${notifications_v1_checksum}" <<'SQL'
+      --set=notifications_v1_checksum="${notifications_v1_checksum}" \
+      --set=content_ranking_v1_checksum="${content_ranking_v1_checksum}" <<'SQL'
 SELECT
-  (SELECT count(*) FROM system.schema_migrations) = 16
+  (SELECT count(*) FROM system.schema_migrations) = 17
   AND EXISTS (
     SELECT 1
     FROM system.schema_migrations
@@ -1110,6 +1112,13 @@ SELECT
       AND name = 'notifications_v1'
       AND checksum = :'notifications_v1_checksum'
   )
+  AND EXISTS (
+    SELECT 1
+    FROM system.schema_migrations
+    WHERE version = '000017'
+      AND name = 'content_ranking_v1'
+      AND checksum = :'content_ranking_v1_checksum'
+  )
   AND (
     SELECT count(*) = 4
     FROM pg_class AS relation
@@ -1140,6 +1149,85 @@ SELECT
     'system.set_notification_read_state(uuid,uuid,boolean)'
   ) IS NOT NULL
   AND to_regprocedure('system.mark_all_notifications_read(uuid)') IS NOT NULL
+  AND to_regclass('system.content_ranking_candidate_snapshots') IS NOT NULL
+  AND to_regclass(
+    'system.content_ranking_candidate_snapshots_expiry_idx'
+  ) IS NOT NULL
+  AND to_regclass('platform.reactions_ranking_recent_idx') IS NOT NULL
+  AND to_regclass(
+    'platform.content_items_ranking_reply_recent_idx'
+  ) IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+    FROM pg_proc AS routine
+    JOIN pg_namespace AS namespace
+      ON namespace.oid = routine.pronamespace
+    WHERE namespace.nspname = 'system'
+      AND routine.proname = 'store_content_ranking_candidate_snapshot'
+      AND pg_get_function_identity_arguments(routine.oid) =
+        'candidate_snapshot_id text, candidate_binding_hmac bytea, candidate_kind text, candidate_candidates jsonb, candidate_expires_at timestamp with time zone'
+      AND routine.prosecdef
+      AND 'search_path=pg_catalog' = ANY (routine.proconfig)
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM pg_proc AS routine
+    JOIN pg_namespace AS namespace
+      ON namespace.oid = routine.pronamespace
+    WHERE namespace.nspname = 'system'
+      AND routine.proname =
+        'purge_expired_content_ranking_candidate_snapshots'
+      AND pg_get_function_identity_arguments(routine.oid) =
+        'candidate_batch_size integer'
+      AND routine.prosecdef
+      AND 'search_path=pg_catalog' = ANY (routine.proconfig)
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM pg_proc AS routine
+    JOIN pg_namespace AS namespace
+      ON namespace.oid = routine.pronamespace
+    CROSS JOIN LATERAL aclexplode(
+      coalesce(routine.proacl, acldefault('f', routine.proowner))
+    ) AS privilege
+    WHERE namespace.nspname = 'system'
+      AND routine.proname IN (
+        'store_content_ranking_candidate_snapshot',
+        'purge_expired_content_ranking_candidate_snapshots'
+      )
+      AND privilege.grantee = 0
+      AND privilege.privilege_type = 'EXECUTE'
+  )
+  AND (
+    SELECT count(*) = 5
+    FROM pg_constraint AS constraint_record
+    WHERE constraint_record.convalidated
+      AND constraint_record.conname IN (
+        'content_ranking_candidate_snapshots_id',
+        'content_ranking_candidate_snapshots_binding',
+        'content_ranking_candidate_snapshots_kind',
+        'content_ranking_candidate_snapshots_candidates',
+        'content_ranking_candidate_snapshots_retention'
+      )
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'system'
+      AND table_name = 'content_ranking_candidate_snapshots'
+      AND column_name IN (
+        'query',
+        'query_text',
+        'title',
+        'body',
+        'body_markdown',
+        'body_plain_text',
+        'prompt',
+        'snippet',
+        'owner_id',
+        'credential_id'
+      )
+  )
   AND (
     SELECT count(*) = 8
     FROM pg_class AS relation
@@ -1868,4 +1956,4 @@ SQL
   fi
 done
 
-echo "Empty, Owner-schema, and published Agent-v1 paths all reach the Notifications v1 schema."
+echo "Empty, Owner-schema, and published Agent-v1 paths all reach the Content Ranking v1 schema."
