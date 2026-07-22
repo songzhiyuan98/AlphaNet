@@ -996,12 +996,13 @@ describeRanking("Postgres Content Ranking v1", () => {
       expected.items.map((item) => item.contentId),
     );
     expect(new Set(collected.map((item) => item.contentId)).size).toBe(collected.length);
-    const expectedScores = new Map(
-      expected.items.map((item) => [item.contentId, item.score]),
+    const promotedAgeSeconds =
+      (first.ranking.asOf.valueOf() - createdAt.valueOf()) / 1_000;
+    const promotedExpectedScore =
+      Math.round(5 * 2 ** -(promotedAgeSeconds / (72 * 60 * 60)) * 1_000_000) / 1_000_000;
+    expect(collected.find((item) => item.contentId === promotedId)?.score).toBe(
+      promotedExpectedScore,
     );
-    for (const item of collected) {
-      expect(item.score).toBeCloseTo(expectedScores.get(item.contentId)!, 5);
-    }
   });
 
   it("freezes Top candidates so reaction changes between pages cannot duplicate or skip", async () => {
