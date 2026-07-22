@@ -2647,7 +2647,6 @@ export class PostgresResearchWriteService implements ResearchWriteService {
           digestBytes,
           id: idempotencyId,
           idempotencyKey,
-          now,
           operation: command.operation,
           ownerId: context.owner.id,
           principalScopeKey,
@@ -2682,7 +2681,6 @@ export class PostgresResearchWriteService implements ResearchWriteService {
           403,
           outcome,
           null,
-          now,
         );
         return outcome;
       }
@@ -2920,7 +2918,6 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         digestBytes,
         id: idempotencyId,
         idempotencyKey,
-        now,
         operation: command.operation,
         ownerId: context.owner.id,
         principalScopeKey,
@@ -2991,7 +2988,6 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       digestBytes: input.digestBytes,
       id: idempotencyId,
       idempotencyKey: input.idempotencyKey,
-      now: input.now,
       operation: input.command.operation,
       ownerId: input.context.owner.id,
       principalScopeKey: input.principalScopeKey,
@@ -3149,7 +3145,6 @@ export class PostgresResearchWriteService implements ResearchWriteService {
             200,
             outcome,
             persisted.contentId,
-            input.now,
           );
           return outcome;
         },
@@ -3214,7 +3209,6 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         error.statusCode,
         outcome,
         null,
-        input.now,
       );
       return outcome;
     }
@@ -3249,7 +3243,6 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       digestBytes: input.digestBytes,
       id: idempotencyId,
       idempotencyKey: input.idempotencyKey,
-      now: input.now,
       operation: input.command.operation,
       ownerId: input.context.owner.id,
       principalScopeKey: input.principalScopeKey,
@@ -3333,7 +3326,6 @@ export class PostgresResearchWriteService implements ResearchWriteService {
             200,
             outcome,
             persisted.contentId,
-            input.now,
           );
           return outcome;
         },
@@ -3377,7 +3369,6 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         error.statusCode,
         outcome,
         null,
-        input.now,
       );
       return outcome;
     }
@@ -3711,13 +3702,11 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       digestBytes: Buffer;
       id: string;
       idempotencyKey: string;
-      now: Date;
       operation: ResearchWriteOperation;
       ownerId: string;
       principalScopeKey: string;
     },
   ): Promise<void> {
-    const expiresAt = new Date(input.now.valueOf() + this.#idempotencyRetentionMs);
     await transaction`
       insert into platform.idempotency_records (
         id,
@@ -3734,7 +3723,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         updated_at,
         expires_at
       )
-      values (
+      select
         ${input.id},
         ${input.principalScopeKey},
         ${input.ownerId},
@@ -3745,10 +3734,13 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         ${input.idempotencyKey},
         ${input.digestBytes},
         'in_progress',
-        ${input.now},
-        ${input.now},
-        ${expiresAt}
-      )
+        database_time.value,
+        database_time.value,
+        database_time.value
+          + ${this.#idempotencyRetentionMs} * interval '1 millisecond'
+      from (
+        select clock_timestamp() as value
+      ) as database_time
     `;
   }
 
@@ -3778,7 +3770,6 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       digestBytes: input.digestBytes,
       id: idempotencyId,
       idempotencyKey: input.idempotencyKey,
-      now: input.now,
       operation: input.command.operation,
       ownerId: input.context.owner.id,
       principalScopeKey: input.principalScopeKey,
@@ -3817,7 +3808,6 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       input.error.statusCode,
       outcome,
       null,
-      input.now,
     );
     return outcome;
   }
@@ -6017,7 +6007,6 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       201,
       outcome,
       persisted.contentId,
-      input.now,
     );
     return outcome;
   }
@@ -6130,9 +6119,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     responseCode: number,
     outcome: ResearchWriteOutcome,
     resourceId: string | null,
-    now: Date,
   ): Promise<void> {
-    const minimumExpiry = new Date(now.valueOf() + IDEMPOTENCY_MIN_RETENTION_MS);
     await transaction`
       update platform.idempotency_records
       set status = ${status},
@@ -6141,9 +6128,16 @@ export class PostgresResearchWriteService implements ResearchWriteService {
             serializeOutcome(outcome) as unknown as postgres.JSONValue,
           )},
           resource_id = ${resourceId},
-          terminal_at = ${now},
-          expires_at = greatest(expires_at, ${minimumExpiry}),
-          updated_at = ${now}
+          terminal_at = greatest(first_received_at, database_time.value),
+          expires_at = greatest(
+            expires_at,
+            greatest(first_received_at, database_time.value)
+              + ${IDEMPOTENCY_MIN_RETENTION_MS} * interval '1 millisecond'
+          ),
+          updated_at = greatest(first_received_at, database_time.value)
+      from (
+        select clock_timestamp() as value
+      ) as database_time
       where id = ${id}
         and status = 'in_progress'
         and terminal_at is null

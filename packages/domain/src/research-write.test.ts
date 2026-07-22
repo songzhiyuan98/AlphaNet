@@ -1785,12 +1785,22 @@ describe("PostgresResearchWriteService", () => {
     expect(auditInsert?.values).toContain(outboxEventId);
 
     const reserve = sqlIndex(harness, "insert into platform.idempotency_records");
+    const reserveQuery = harness.queries[reserve];
     const content = sqlIndex(harness, "insert into platform.content_items");
     const outbox = sqlIndex(harness, "insert into system.outbox_events");
     const audit = sqlIndex(harness, "insert into platform.action_logs");
     const terminal = harness.queries.findLastIndex((query) =>
       query.text.includes("update platform.idempotency_records"),
     );
+    const terminalQuery = harness.queries[terminal];
+    expect(reserveQuery?.text).toContain("select clock_timestamp() as value");
+    expect(reserveQuery?.text).toContain("database_time.value");
+    expect(reserveQuery?.values).not.toContain(now);
+    expect(terminalQuery?.text).toContain(
+      "terminal_at = greatest(first_received_at, database_time.value)",
+    );
+    expect(terminalQuery?.text).toContain("select clock_timestamp() as value");
+    expect(terminalQuery?.values).not.toContain(now);
     expect(reserve).toBeLessThan(content);
     expect(content).toBeLessThan(outbox);
     expect(outbox).toBeLessThan(audit);

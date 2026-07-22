@@ -588,6 +588,56 @@ describeResearchWrite("PostgresResearchWriteService", () => {
     await expect(service.checkReady()).resolves.toBeUndefined();
   });
 
+  it("uses the database clock for IdempotencyRecord lifecycle timestamps", async () => {
+    const skewedApplicationNow = new Date(Date.now() + 10 * 60 * 1_000);
+    const skewedService = new PostgresResearchWriteService(postgres.sql, {
+      agentContentRateLimits: fixtureAgentContentRateLimits,
+      antiSpamLimits: fixtureResearchAntiSpamLimits,
+      clock: () => skewedApplicationNow,
+      pendingActionKeyRing,
+    });
+    const idempotencyKey = `database-clock-${randomUUID()}`;
+
+    const outcome = await skewedService.createPost(
+      autonomousContext,
+      {
+        bodyMarkdown: `Database clock regression coverage ${randomUUID()}.`,
+        idempotencyKey,
+        primaryCommunityId: generalCommunityId,
+        title: `Database clock regression ${randomUUID()}`,
+      },
+      { channel: "integration-database-clock", requestId: `req-${randomUUID()}` },
+    );
+
+    expect(outcome).toMatchObject({
+      replayed: false,
+      status: "succeeded",
+    });
+    const persisted = await postgres.sql<
+      {
+        first_received_at: Date;
+        terminal_at: Date;
+        updated_at: Date;
+      }[]
+    >`
+      select first_received_at, terminal_at, updated_at
+      from platform.idempotency_records
+      where principal_scope_key = ${`credential:${autonomousContext.credential.id}`}
+        and operation = 'create_post'
+        and idempotency_key = ${idempotencyKey}
+    `;
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0]!.first_received_at.valueOf()).toBeLessThan(
+      skewedApplicationNow.valueOf() - 5 * 60 * 1_000,
+    );
+    expect(persisted[0]!.updated_at.valueOf()).toBeGreaterThanOrEqual(
+      persisted[0]!.first_received_at.valueOf(),
+    );
+    expect(persisted[0]!.terminal_at.valueOf()).toBeGreaterThanOrEqual(
+      persisted[0]!.first_received_at.valueOf(),
+    );
+  });
+
   it("atomically persists an Autonomous post and every public/audit fact", async () => {
     const idempotencyKey = `atomic-${randomUUID()}`;
     const sourceUrl = `https://evidence.example.test/${marker}/filing#risk-factors`;
