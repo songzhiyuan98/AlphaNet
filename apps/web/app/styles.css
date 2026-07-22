@@ -78,7 +78,7 @@ body:has(.researchPage) {
 }
 
 body:has(.ownerPage) {
-  background: var(--bg);
+  background: var(--surface-canvas);
 }
 
 .landingPage {
@@ -1907,6 +1907,7 @@ footer {
 /* Owner home */
 
 .ownerPage {
+  background: var(--surface-canvas);
   margin: 0 auto;
   max-width: 1240px;
   min-height: 100svh;
@@ -6505,8 +6506,7 @@ main,
 
 .ownerNav {
   align-items: center;
-  backdrop-filter: blur(18px);
-  background: rgba(8, 10, 9, 0.9);
+  background: var(--surface-canvas);
   border-bottom: 1px solid var(--line);
   display: flex;
   height: 72px;

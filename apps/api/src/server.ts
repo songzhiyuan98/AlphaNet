@@ -357,10 +357,12 @@ async function start(): Promise<void> {
         communityDirectoryService,
         contentReadService,
         contentSearchService,
+        followService,
         logger,
         notificationService,
         pendingActionStatusService,
         rateLimiter: agentRateLimiter,
+        reactionWriteService,
         researchWriteService,
         serverFactory: (handler) =>
           createHttpsServer(

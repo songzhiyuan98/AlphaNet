@@ -4,7 +4,10 @@ import {
   SetFollowPathParamsSchema,
   SetFollowRequestSchema,
   SetFollowWriteResultSchema,
+  type FollowListRequest,
   type FollowListResponse,
+  type SetFollowPathParams,
+  type SetFollowRequest,
   type SetFollowWriteResult,
   type V1ErrorDetail,
 } from "@alphanet/contracts";
@@ -77,7 +80,23 @@ function publicError(error: FollowWriteOutcome["error"]): V1ErrorDetail | null {
 function serializeWriteOutcome(
   request: FastifyRequest,
   outcome: FollowWriteOutcome,
+  expected: AgentSetFollowInput,
 ): SetFollowWriteResult | null {
+  const expectedTargetId =
+    expected.target_type === "symbol"
+      ? expected.target_id.toUpperCase()
+      : expected.target_id.toLowerCase();
+  if (
+    outcome.result !== null &&
+    (outcome.result.targetType !== expected.target_type ||
+      outcome.result.targetId !== expectedTargetId ||
+      outcome.result.active !== expected.active ||
+      (expected.active &&
+        expected.notification_level !== undefined &&
+        outcome.result.notificationLevel !== expected.notification_level))
+  ) {
+    return null;
+  }
   const parsed = SetFollowWriteResultSchema.safeParse({
     decision: outcome.decision,
     error: publicError(outcome.error),
@@ -98,6 +117,8 @@ function serializeWriteOutcome(
   });
   return parsed.success ? parsed.data : null;
 }
+
+export type AgentSetFollowInput = SetFollowPathParams & SetFollowRequest;
 
 function serializeListPage(
   request: FastifyRequest,
@@ -203,6 +224,73 @@ function sendFollowError(
   );
 }
 
+export async function handleAgentListFollows(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  service: Pick<FollowService, "listFollows">,
+  context: Parameters<FollowService["listFollows"]>[0],
+  input: FollowListRequest,
+): Promise<unknown> {
+  try {
+    const page = await service.listFollows(context, {
+      ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+      ...(input.limit === undefined ? {} : { limit: input.limit }),
+      ...(input.target_type === undefined ? {} : { targetType: input.target_type }),
+    });
+    const response = serializeListPage(request, page);
+    if (response === null) {
+      request.log.error(
+        { itemCount: page.items.length },
+        "Follow list violated its Agent response contract",
+      );
+      return sendFollowError(request, reply, new Error("projection invalid"));
+    }
+    return response;
+  } catch (error) {
+    return sendFollowError(request, reply, error);
+  }
+}
+
+export async function handleAgentSetFollow(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  service: Pick<FollowService, "setFollow">,
+  context: Parameters<FollowService["setFollow"]>[0],
+  input: AgentSetFollowInput,
+  channel: "mcp" | "rest",
+): Promise<unknown> {
+  try {
+    const outcome = await service.setFollow(
+      context,
+      {
+        active: input.active,
+        idempotencyKey: input.idempotency_key,
+        ...(input.notification_level === undefined
+          ? {}
+          : { notificationLevel: input.notification_level }),
+        targetId: input.target_id,
+        targetType: input.target_type,
+      },
+      { channel, requestId: request.id },
+    );
+    const response = serializeWriteOutcome(request, outcome, input);
+    if (response === null) {
+      request.log.error(
+        { decision: outcome.decision, status: outcome.status },
+        "Follow write violated its Agent response contract",
+      );
+      return sendFollowError(request, reply, new Error("projection invalid"));
+    }
+    if (outcome.status === "succeeded") {
+      return reply.code(200).send(response);
+    }
+    applyRetryAfter(reply, outcome.error?.retryAfterMs ?? null);
+    return reply.code(statusForError(outcome.error?.code)).send(response);
+  } catch (error) {
+    return sendFollowError(request, reply, error);
+  }
+}
+
 export function registerFollowRoutes(
   app: FastifyInstance,
   options: FollowRouteOptions,
@@ -236,29 +324,13 @@ export function registerFollowRoutes(
       if (!parsed.success) {
         return validationFailed(request, reply, "INVALID_ARGUMENT");
       }
-      try {
-        const page = await options.service.listFollows(
-          listAuthorization.getAuthorization(request).context,
-          {
-            ...(parsed.data.cursor === undefined ? {} : { cursor: parsed.data.cursor }),
-            ...(parsed.data.limit === undefined ? {} : { limit: parsed.data.limit }),
-            ...(parsed.data.target_type === undefined
-              ? {}
-              : { targetType: parsed.data.target_type }),
-          },
-        );
-        const response = serializeListPage(request, page);
-        if (response === null) {
-          request.log.error(
-            { itemCount: page.items.length },
-            "Follow list violated its public response contract",
-          );
-          return sendFollowError(request, reply, new Error("projection invalid"));
-        }
-        return response;
-      } catch (error) {
-        return sendFollowError(request, reply, error);
-      }
+      return handleAgentListFollows(
+        request,
+        reply,
+        options.service,
+        listAuthorization.getAuthorization(request).context,
+        parsed.data,
+      );
     },
   );
 
@@ -289,37 +361,14 @@ export function registerFollowRoutes(
       if (!body.success) {
         return validationFailed(request, reply, "VALIDATION_ERROR");
       }
-
-      try {
-        const outcome = await options.service.setFollow(
-          writeAuthorization.getAuthorization(request).context,
-          {
-            active: body.data.active,
-            idempotencyKey: body.data.idempotency_key,
-            ...(body.data.notification_level === undefined
-              ? {}
-              : { notificationLevel: body.data.notification_level }),
-            targetId: path.data.target_id,
-            targetType: path.data.target_type,
-          },
-          { channel: "rest", requestId: request.id },
-        );
-        const response = serializeWriteOutcome(request, outcome);
-        if (response === null) {
-          request.log.error(
-            { decision: outcome.decision, status: outcome.status },
-            "Follow write violated its public response contract",
-          );
-          return sendFollowError(request, reply, new Error("projection invalid"));
-        }
-        if (outcome.status === "succeeded") {
-          return reply.code(200).send(response);
-        }
-        applyRetryAfter(reply, outcome.error?.retryAfterMs ?? null);
-        return reply.code(statusForError(outcome.error?.code)).send(response);
-      } catch (error) {
-        return sendFollowError(request, reply, error);
-      }
+      return handleAgentSetFollow(
+        request,
+        reply,
+        options.service,
+        writeAuthorization.getAuthorization(request).context,
+        { ...path.data, ...body.data },
+        "rest",
+      );
     },
   );
 }

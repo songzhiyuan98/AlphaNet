@@ -6,7 +6,9 @@ import {
   AgentContextResponseSchema,
   BrowseContentResponseSchema,
   CreatePostWriteResultSchema,
+  DeleteContentWriteResultSchema,
   FindCommunitiesResponseSchema,
+  FollowListResponseSchema,
   GetActionStatusResponseSchema,
   GetCommunityResponseSchema,
   GetContentResponseSchema,
@@ -14,6 +16,9 @@ import {
   ListNotificationsResponseSchema,
   ReplyToContentWriteResultSchema,
   SearchContentResponseSchema,
+  SetFollowWriteResultSchema,
+  SetReactionWriteResultSchema,
+  UpdateContentWriteResultSchema,
 } from "../../packages/contracts/src/index.js";
 import type {
   AgentCredentialContext,
@@ -24,7 +29,10 @@ import type {
   ContentDetailProjection,
   ContentSearchPage,
   DiscussionProjection,
+  FollowListPage,
+  FollowWriteOutcome,
   NotificationListPage,
+  ReactionWriteOutcome,
   RemoteMcpAuthorityService,
   ResearchWriteOutcome,
 } from "../../packages/domain/src/index.js";
@@ -33,6 +41,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createPrivateMcpApp } from "../../apps/api/src/private-mcp-app.js";
 import { createBrowseContentTool } from "../../apps/mcp/src/browse-content-tool.js";
 import { createCreatePostTool } from "../../apps/mcp/src/create-post-tool.js";
+import { createDeleteContentTool } from "../../apps/mcp/src/delete-content-tool.js";
 import { createFindCommunitiesTool } from "../../apps/mcp/src/find-communities-tool.js";
 import { createGetActionStatusTool } from "../../apps/mcp/src/get-action-status-tool.js";
 import { createGetAgentContextTool } from "../../apps/mcp/src/get-agent-context-tool.js";
@@ -43,10 +52,14 @@ import {
   createInternalMcpApiClient,
   type InternalApiRequestTransport,
 } from "../../apps/mcp/src/internal-api-client.js";
+import { createListFollowsTool } from "../../apps/mcp/src/list-follows-tool.js";
 import { createListNotificationsTool } from "../../apps/mcp/src/list-notifications-tool.js";
 import type { McpToolExecutionContext } from "../../apps/mcp/src/protocol.js";
 import { createReplyToContentTool } from "../../apps/mcp/src/reply-to-content-tool.js";
 import { createSearchContentTool } from "../../apps/mcp/src/search-content-tool.js";
+import { createSetFollowTool } from "../../apps/mcp/src/set-follow-tool.js";
+import { createSetReactionTool } from "../../apps/mcp/src/set-reaction-tool.js";
+import { createUpdateContentTool } from "../../apps/mcp/src/update-content-tool.js";
 
 const ids = {
   action: "action:pending@2026",
@@ -55,6 +68,7 @@ const ids = {
   community: "community:semiconductors@v1",
   content: "content:amd?case=base",
   credential: "60000000-0000-4000-8000-000000000006",
+  follow: "50000000-0000-4000-8000-000000000005",
   grant: "70000000-0000-4000-8000-000000000007",
   owner: "80000000-0000-4000-8000-000000000008",
   policy: "90000000-0000-4000-8000-000000000009",
@@ -62,6 +76,7 @@ const ids = {
   reply: "content:amd-reply@1",
   replyRevision: "revision:amd-reply@1",
   topic: "b0000000-0000-4000-8000-00000000000b",
+  updateRevision: "revision:amd@2",
 } as const;
 const now = new Date("2026-07-22T12:00:00.000Z");
 const keyRing: McpActorAssertionKeyRing = {
@@ -76,6 +91,8 @@ const scopes = [
   "notifications:read",
   "actions:read",
   "content:write",
+  "reaction:write",
+  "follow:write",
 ] as const;
 const context: AgentCredentialContext = {
   agent: {
@@ -433,6 +450,99 @@ function successfulReplyOutcome(): Extract<
   };
 }
 
+function successfulUpdateOutcome(): Extract<
+  ResearchWriteOutcome,
+  { operation: "update_content" }
+> {
+  return {
+    decision: "allow",
+    error: null,
+    operation: "update_content",
+    pendingAction: null,
+    replayed: false,
+    result: {
+      contentId: ids.content,
+      resourceVersion: 2,
+      revisionId: ids.updateRevision,
+    },
+    status: "succeeded",
+  };
+}
+
+function successfulDeleteOutcome(): Extract<
+  ResearchWriteOutcome,
+  { operation: "delete_content" }
+> {
+  return {
+    decision: "allow",
+    error: null,
+    operation: "delete_content",
+    pendingAction: null,
+    replayed: false,
+    result: {
+      contentId: ids.content,
+      lifecycleState: "deleted",
+      resourceVersion: 3,
+    },
+    status: "succeeded",
+  };
+}
+
+function successfulReactionOutcome(): ReactionWriteOutcome {
+  return {
+    decision: "allow",
+    error: null,
+    operation: "set_reaction",
+    pendingAction: null,
+    replayed: false,
+    result: {
+      contentId: ids.content,
+      reactionCounts: { agree: 2, disagree: 1, helpful: 6 },
+      viewerState: { following: false, reactions: ["helpful"] },
+    },
+    status: "succeeded",
+  };
+}
+
+function successfulFollowOutcome(): FollowWriteOutcome {
+  return {
+    decision: "allow",
+    error: null,
+    operation: "set_follow",
+    pendingAction: null,
+    replayed: false,
+    result: {
+      active: true,
+      notificationLevel: "new_posts",
+      targetId: "AMD",
+      targetType: "symbol",
+      updatedAt: now,
+    },
+    status: "succeeded",
+  };
+}
+
+function followListPage(): FollowListPage {
+  return {
+    items: [
+      {
+        createdAt: new Date("2026-07-21T12:00:00.000Z"),
+        followId: ids.follow,
+        notificationLevel: "new_posts",
+        targetId: "AMD",
+        targetType: "symbol",
+        updatedAt: now,
+      },
+    ],
+    ordering: {
+      asOf: now,
+      orderingVersion: "follow-list-v1",
+      snapshotId: "follow-snapshot:phase-b",
+    },
+    page: { hasMore: false, limit: 5, nextCursor: null },
+  };
+}
+
 function executionContext(requestId: string): McpToolExecutionContext {
   return {
     authorization: {
@@ -457,7 +567,7 @@ afterEach(async () => {
 });
 
 describe("Remote MCP social-loop private bridge", () => {
-  it("runs all eleven tools through the real assertion client and private API", async () => {
+  it("runs all sixteen tools through the real assertion client and private API", async () => {
     const consumeReplay = vi.fn<McpActorAssertionReplayStore["consume"]>(() =>
       Promise.resolve(true),
     );
@@ -474,6 +584,11 @@ describe("Remote MCP social-loop private bridge", () => {
     const getActionStatus = vi.fn(() => Promise.resolve(pendingAction()));
     const createPost = vi.fn(() => Promise.resolve(pendingCreatePostOutcome()));
     const replyToContent = vi.fn(() => Promise.resolve(successfulReplyOutcome()));
+    const updateContent = vi.fn(() => Promise.resolve(successfulUpdateOutcome()));
+    const deleteContent = vi.fn(() => Promise.resolve(successfulDeleteOutcome()));
+    const setReaction = vi.fn(() => Promise.resolve(successfulReactionOutcome()));
+    const setFollow = vi.fn(() => Promise.resolve(successfulFollowOutcome()));
+    const listFollows = vi.fn(() => Promise.resolve(followListPage()));
     const app = await createPrivateMcpApp({
       actorAuthenticator: {
         authority: { authenticateActorContext },
@@ -491,15 +606,19 @@ describe("Remote MCP social-loop private bridge", () => {
         getDiscussion,
       },
       contentSearchService: { searchContent },
+      followService: { listFollows, setFollow },
       notificationService: { listAgentNotifications },
       now: () => now,
       pendingActionStatusService: { getActionStatus },
       rateLimiter: {
         consume: () => Promise.resolve({ allowed: true, retryAfter: null }),
       },
+      reactionWriteService: { setReaction },
       researchWriteService: {
         createPost,
+        deleteContent,
         replyToContent,
+        updateContent,
       },
       transportIdentityGuard: () => ({
         authentication: "mutual_tls",
@@ -632,6 +751,68 @@ describe("Remote MCP social-loop private bridge", () => {
       replyArguments,
       executionContext(replyRequestId),
     );
+    const updateRequestId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const updateArguments = {
+      content_id: ids.content,
+      edit_summary: "Refreshes the downside evidence and source framing.",
+      expected_version: 1,
+      idempotency_key: "phase-b-update-content",
+      patch: {
+        body_markdown: "## Revised case\n\nNew evidence narrows the expected range.",
+        symbols: ["AMD"],
+        title: "AMD data-center scenarios, revised",
+        topics: ["data-center"],
+      },
+    };
+    const updateResult = await createUpdateContentTool(internalApiClient).execute(
+      updateArguments,
+      executionContext(updateRequestId),
+    );
+    const deleteRequestId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const deleteArguments = {
+      content_id: ids.content,
+      expected_version: 2,
+      idempotency_key: "phase-b-delete-content",
+      mode: "soft" as const,
+      reason: "The revised thesis has been superseded.",
+    };
+    const deleteResult = await createDeleteContentTool(internalApiClient).execute(
+      deleteArguments,
+      executionContext(deleteRequestId),
+    );
+    const reactionRequestId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const reactionArguments = {
+      active: true,
+      content_id: ids.content,
+      idempotency_key: "phase-b-set-reaction",
+      reaction: "helpful" as const,
+    };
+    const reactionResult = await createSetReactionTool(internalApiClient).execute(
+      reactionArguments,
+      executionContext(reactionRequestId),
+    );
+    const followRequestId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    const followArguments = {
+      active: true,
+      idempotency_key: "phase-b-set-follow",
+      notification_level: "new_posts" as const,
+      target_id: "amd",
+      target_type: "symbol" as const,
+    };
+    const followResult = await createSetFollowTool(internalApiClient).execute(
+      followArguments,
+      executionContext(followRequestId),
+    );
+    const listFollowsRequestId = "12121212-1212-4121-8121-121212121212";
+    const listFollowsArguments = {
+      cursor: "follow-cursor:page=2",
+      limit: 5,
+      target_type: "symbol" as const,
+    };
+    const listFollowsResult = await createListFollowsTool(internalApiClient).execute(
+      listFollowsArguments,
+      executionContext(listFollowsRequestId),
+    );
 
     expect(AgentContextResponseSchema.parse(agentResult.payload).request_id).toBe(
       agentRequestId,
@@ -680,6 +861,47 @@ describe("Remote MCP social-loop private bridge", () => {
       result: { content_id: ids.reply, root_content_id: ids.content },
       status: "succeeded",
     });
+    expect(UpdateContentWriteResultSchema.parse(updateResult.payload)).toMatchObject({
+      request_id: updateRequestId,
+      result: {
+        content_id: ids.content,
+        resource_version: 2,
+        revision_id: ids.updateRevision,
+      },
+      status: "succeeded",
+    });
+    expect(DeleteContentWriteResultSchema.parse(deleteResult.payload)).toMatchObject({
+      request_id: deleteRequestId,
+      result: {
+        content_id: ids.content,
+        lifecycle_state: "deleted",
+        resource_version: 3,
+      },
+      status: "succeeded",
+    });
+    expect(SetReactionWriteResultSchema.parse(reactionResult.payload)).toMatchObject({
+      request_id: reactionRequestId,
+      result: {
+        content_id: ids.content,
+        viewer_state: { reactions: ["helpful"] },
+      },
+      status: "succeeded",
+    });
+    expect(SetFollowWriteResultSchema.parse(followResult.payload)).toMatchObject({
+      request_id: followRequestId,
+      result: {
+        active: true,
+        notification_level: "new_posts",
+        target_id: "AMD",
+        target_type: "symbol",
+      },
+      status: "succeeded",
+    });
+    expect(FollowListResponseSchema.parse(listFollowsResult.payload)).toMatchObject({
+      items: [{ follow_id: ids.follow, target_id: "AMD", target_type: "symbol" }],
+      page: { limit: 5 },
+      request_id: listFollowsRequestId,
+    });
     expect(bridgedRequests.map((request) => request.method)).toEqual([
       "GET",
       "POST",
@@ -690,6 +912,11 @@ describe("Remote MCP social-loop private bridge", () => {
       "POST",
       "POST",
       "GET",
+      "POST",
+      "POST",
+      "POST",
+      "POST",
+      "POST",
       "POST",
       "POST",
     ]);
@@ -705,6 +932,29 @@ describe("Remote MCP social-loop private bridge", () => {
       `/internal/mcp/v1/actions/${encodeURIComponent(ids.action)}`,
       "/internal/mcp/v1/posts",
       "/internal/mcp/v1/replies",
+      "/internal/mcp/v1/content/update",
+      "/internal/mcp/v1/content/delete",
+      "/internal/mcp/v1/reactions",
+      "/internal/mcp/v1/follows",
+      "/internal/mcp/v1/follows/list",
+    ]);
+    expect(bridgedRequests.map((request) => request.headers["x-request-id"])).toEqual([
+      agentRequestId,
+      findRequestId,
+      communityRequestId,
+      browseRequestId,
+      searchRequestId,
+      contentRequestId,
+      discussionRequestId,
+      notificationRequestId,
+      actionRequestId,
+      createRequestId,
+      replyRequestId,
+      updateRequestId,
+      deleteRequestId,
+      reactionRequestId,
+      followRequestId,
+      listFollowsRequestId,
     ]);
     expect(bridgedRequests[5]?.url.searchParams.get("revision_id")).toBe(ids.revision);
     expect(bridgedRequests[5]?.url.searchParams.get("include_revision_history")).toBe(
@@ -738,6 +988,21 @@ describe("Remote MCP social-loop private bridge", () => {
     );
     expect(JSON.parse(bridgedRequests[10]!.body!.toString("utf8"))).toEqual(
       replyArguments,
+    );
+    expect(JSON.parse(bridgedRequests[11]!.body!.toString("utf8"))).toEqual(
+      updateArguments,
+    );
+    expect(JSON.parse(bridgedRequests[12]!.body!.toString("utf8"))).toEqual(
+      deleteArguments,
+    );
+    expect(JSON.parse(bridgedRequests[13]!.body!.toString("utf8"))).toEqual(
+      reactionArguments,
+    );
+    expect(JSON.parse(bridgedRequests[14]!.body!.toString("utf8"))).toEqual(
+      followArguments,
+    );
+    expect(JSON.parse(bridgedRequests[15]!.body!.toString("utf8"))).toEqual(
+      listFollowsArguments,
     );
     expect(searchCommunities).toHaveBeenCalledWith(
       context,
@@ -789,7 +1054,60 @@ describe("Remote MCP social-loop private bridge", () => {
       }),
       { channel: "mcp", requestId: replyRequestId },
     );
-    expect(authenticateActorContext).toHaveBeenCalledTimes(11);
-    expect(consumeReplay).toHaveBeenCalledTimes(11);
+    expect(updateContent).toHaveBeenCalledWith(
+      context,
+      {
+        contentId: ids.content,
+        editSummary: "Refreshes the downside evidence and source framing.",
+        expectedVersion: 1,
+        idempotencyKey: "phase-b-update-content",
+        patch: {
+          bodyMarkdown: "## Revised case\n\nNew evidence narrows the expected range.",
+          symbols: ["AMD"],
+          title: "AMD data-center scenarios, revised",
+          topics: ["data-center"],
+        },
+      },
+      { channel: "mcp", requestId: updateRequestId },
+    );
+    expect(deleteContent).toHaveBeenCalledWith(
+      context,
+      {
+        contentId: ids.content,
+        expectedVersion: 2,
+        idempotencyKey: "phase-b-delete-content",
+        mode: "soft",
+        reason: "The revised thesis has been superseded.",
+      },
+      { channel: "mcp", requestId: deleteRequestId },
+    );
+    expect(setReaction).toHaveBeenCalledWith(
+      context,
+      {
+        active: true,
+        contentId: ids.content,
+        idempotencyKey: "phase-b-set-reaction",
+        reaction: "helpful",
+      },
+      { channel: "mcp", requestId: reactionRequestId },
+    );
+    expect(setFollow).toHaveBeenCalledWith(
+      context,
+      {
+        active: true,
+        idempotencyKey: "phase-b-set-follow",
+        notificationLevel: "new_posts",
+        targetId: "amd",
+        targetType: "symbol",
+      },
+      { channel: "mcp", requestId: followRequestId },
+    );
+    expect(listFollows).toHaveBeenCalledWith(context, {
+      cursor: "follow-cursor:page=2",
+      limit: 5,
+      targetType: "symbol",
+    });
+    expect(authenticateActorContext).toHaveBeenCalledTimes(16);
+    expect(consumeReplay).toHaveBeenCalledTimes(16);
   });
 });

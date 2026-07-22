@@ -2,6 +2,8 @@ import {
   SetReactionPathParamsSchema,
   SetReactionRequestSchema,
   SetReactionWriteResultSchema,
+  type SetReactionPathParams,
+  type SetReactionRequest,
   type SetReactionWriteResult,
   type V1ErrorDetail,
 } from "@alphanet/contracts";
@@ -56,7 +58,17 @@ function publicError(error: ReactionWriteOutcome["error"]): V1ErrorDetail | null
 function serializeOutcome(
   request: FastifyRequest,
   outcome: ReactionWriteOutcome,
+  expected: AgentSetReactionInput,
 ): SetReactionWriteResult | null {
+  const expectedContentId = expected.content_id.normalize("NFC").toLowerCase();
+  if (
+    outcome.result !== null &&
+    (outcome.result.contentId !== expectedContentId ||
+      outcome.result.viewerState.reactions.includes(expected.reaction) !==
+        expected.active)
+  ) {
+    return null;
+  }
   const parsed = SetReactionWriteResultSchema.safeParse({
     decision: outcome.decision,
     error: publicError(outcome.error),
@@ -75,6 +87,8 @@ function serializeOutcome(
   });
   return parsed.success ? parsed.data : null;
 }
+
+export type AgentSetReactionInput = SetReactionPathParams & SetReactionRequest;
 
 function statusForError(code: ReactionWriteErrorCode | undefined): number {
   switch (code) {
@@ -143,6 +157,43 @@ function sendThrownError(
   );
 }
 
+export async function handleAgentSetReaction(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  service: Pick<ReactionWriteService, "setReaction">,
+  context: Parameters<ReactionWriteService["setReaction"]>[0],
+  input: AgentSetReactionInput,
+  channel: "mcp" | "rest",
+): Promise<unknown> {
+  try {
+    const outcome = await service.setReaction(
+      context,
+      {
+        active: input.active,
+        contentId: input.content_id,
+        idempotencyKey: input.idempotency_key,
+        reaction: input.reaction,
+      },
+      { channel, requestId: request.id },
+    );
+    const response = serializeOutcome(request, outcome, input);
+    if (response === null) {
+      request.log.error(
+        { decision: outcome.decision, status: outcome.status },
+        "Reaction result violated its Agent response contract",
+      );
+      return sendThrownError(request, reply, new Error("projection invalid"));
+    }
+    if (outcome.status === "succeeded") {
+      return reply.code(200).send(response);
+    }
+    applyRetryAfter(reply, outcome.error?.retryAfterMs ?? null);
+    return reply.code(statusForError(outcome.error?.code)).send(response);
+  } catch (error) {
+    return sendThrownError(request, reply, error);
+  }
+}
+
 export function registerReactionRoutes(
   app: FastifyInstance,
   options: ReactionRouteOptions,
@@ -182,34 +233,14 @@ export function registerReactionRoutes(
         idempotency_key: key,
       });
       if (!body.success) return validationFailed(request, reply);
-
-      try {
-        const outcome = await options.service.setReaction(
-          authorized.context,
-          {
-            active: body.data.active,
-            contentId: path.data.content_id,
-            idempotencyKey: body.data.idempotency_key,
-            reaction: path.data.reaction,
-          },
-          { channel: "rest", requestId: request.id },
-        );
-        const response = serializeOutcome(request, outcome);
-        if (response === null) {
-          request.log.error(
-            { decision: outcome.decision, status: outcome.status },
-            "Reaction result violated its public response contract",
-          );
-          return sendThrownError(request, reply, new Error("projection invalid"));
-        }
-        if (outcome.status === "succeeded") {
-          return reply.code(200).send(response);
-        }
-        applyRetryAfter(reply, outcome.error?.retryAfterMs ?? null);
-        return reply.code(statusForError(outcome.error?.code)).send(response);
-      } catch (error) {
-        return sendThrownError(request, reply, error);
-      }
+      return handleAgentSetReaction(
+        request,
+        reply,
+        options.service,
+        authorized.context,
+        { ...path.data, ...body.data },
+        "rest",
+      );
     },
   );
 }

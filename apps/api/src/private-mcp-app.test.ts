@@ -8,7 +8,9 @@ import {
   AgentContextResponseSchema,
   BrowseContentResponseSchema,
   CreatePostWriteResultSchema,
+  DeleteContentWriteResultSchema,
   FindCommunitiesResponseSchema,
+  FollowListResponseSchema,
   GetActionStatusResponseSchema,
   GetCommunityResponseSchema,
   GetContentResponseSchema,
@@ -16,6 +18,9 @@ import {
   ListNotificationsResponseSchema,
   ReplyToContentWriteResultSchema,
   SearchContentResponseSchema,
+  SetFollowWriteResultSchema,
+  SetReactionWriteResultSchema,
+  UpdateContentWriteResultSchema,
 } from "@alphanet/contracts";
 import type {
   AgentCredentialContext,
@@ -37,11 +42,16 @@ import {
   PRIVATE_MCP_COMMUNITY_PATH,
   PRIVATE_MCP_COMMUNITY_SEARCH_PATH,
   PRIVATE_MCP_CONTENT_BROWSE_PATH,
+  PRIVATE_MCP_CONTENT_DELETE_PATH,
   PRIVATE_MCP_CONTENT_PATH,
   PRIVATE_MCP_CONTENT_SEARCH_PATH,
+  PRIVATE_MCP_CONTENT_UPDATE_PATH,
   PRIVATE_MCP_DISCUSSION_PATH,
+  PRIVATE_MCP_FOLLOW_LIST_PATH,
+  PRIVATE_MCP_FOLLOWS_PATH,
   PRIVATE_MCP_NOTIFICATIONS_PATH,
   PRIVATE_MCP_POSTS_PATH,
+  PRIVATE_MCP_REACTIONS_PATH,
   PRIVATE_MCP_REPLIES_PATH,
   type PrivateMcpAppOptions,
 } from "./private-mcp-app.js";
@@ -60,6 +70,7 @@ const ids = {
   revision: "a0000000-0000-4000-8000-00000000000a",
   reply: "d0000000-0000-4000-8000-00000000000d",
   replyRevision: "e0000000-0000-4000-8000-00000000000e",
+  follow: "f0000000-0000-4000-8000-00000000000f",
   topic: "b0000000-0000-4000-8000-00000000000b",
 } as const;
 const now = new Date("2026-07-22T08:00:00.000Z");
@@ -454,6 +465,105 @@ function successfulReplyOutcome(): Extract<
   };
 }
 
+function successfulUpdateOutcome(): Extract<
+  ResearchWriteOutcome,
+  { operation: "update_content" }
+> {
+  return {
+    decision: "allow",
+    error: null,
+    operation: "update_content",
+    pendingAction: null,
+    replayed: false,
+    result: {
+      contentId: ids.content,
+      resourceVersion: 2,
+      revisionId: ids.revision,
+    },
+    status: "succeeded",
+  };
+}
+
+function successfulDeleteOutcome(): Extract<
+  ResearchWriteOutcome,
+  { operation: "delete_content" }
+> {
+  return {
+    decision: "allow",
+    error: null,
+    operation: "delete_content",
+    pendingAction: null,
+    replayed: false,
+    result: {
+      contentId: ids.content,
+      lifecycleState: "deleted",
+      resourceVersion: 2,
+    },
+    status: "succeeded",
+  };
+}
+
+function successfulReactionOutcome(): Awaited<
+  ReturnType<PrivateMcpAppOptions["reactionWriteService"]["setReaction"]>
+> {
+  return {
+    decision: "allow",
+    error: null,
+    operation: "set_reaction",
+    pendingAction: null,
+    replayed: false,
+    result: {
+      contentId: ids.content,
+      reactionCounts: { agree: 2, disagree: 1, helpful: 6 },
+      viewerState: { following: false, reactions: ["helpful"] },
+    },
+    status: "succeeded",
+  };
+}
+
+function successfulFollowOutcome(): Awaited<
+  ReturnType<PrivateMcpAppOptions["followService"]["setFollow"]>
+> {
+  return {
+    decision: "allow",
+    error: null,
+    operation: "set_follow",
+    pendingAction: null,
+    replayed: false,
+    result: {
+      active: true,
+      notificationLevel: "new_posts",
+      targetId: "AMD",
+      targetType: "symbol",
+      updatedAt: now,
+    },
+    status: "succeeded",
+  };
+}
+
+function followListPage(): Awaited<
+  ReturnType<PrivateMcpAppOptions["followService"]["listFollows"]>
+> {
+  return {
+    items: [
+      {
+        createdAt: now,
+        followId: ids.follow,
+        notificationLevel: "new_posts",
+        targetId: "AMD",
+        targetType: "symbol",
+        updatedAt: now,
+      },
+    ],
+    ordering: {
+      asOf: now,
+      orderingVersion: "follow-list-v1",
+      snapshotId: "follow-list-snapshot",
+    },
+    page: { hasMore: false, limit: 5, nextCursor: null },
+  };
+}
+
 function deniedCreatePostOutcome(): CreatePostOutcome {
   return {
     decision: "deny",
@@ -548,9 +658,11 @@ async function createApp(options?: {
   consumeLimit?: PrivateMcpAppOptions["rateLimiter"]["consume"];
   contentReadService?: Partial<PrivateMcpAppOptions["contentReadService"]>;
   contentSearchService?: Partial<PrivateMcpAppOptions["contentSearchService"]>;
+  followService?: Partial<PrivateMcpAppOptions["followService"]>;
   notificationService?: Partial<PrivateMcpAppOptions["notificationService"]>;
   order?: string[];
   pendingActionStatusService?: PrivateMcpAppOptions["pendingActionStatusService"];
+  reactionWriteService?: Partial<PrivateMcpAppOptions["reactionWriteService"]>;
   researchWriteService?: Partial<PrivateMcpAppOptions["researchWriteService"]>;
   transportIdentityGuard?: PrivateMcpAppOptions["transportIdentityGuard"];
 }): Promise<AppHarness> {
@@ -607,6 +719,11 @@ async function createApp(options?: {
       searchContent: () => Promise.reject(new Error("Unexpected Content search")),
       ...options?.contentSearchService,
     },
+    followService: {
+      listFollows: () => Promise.reject(new Error("Unexpected Follow list")),
+      setFollow: () => Promise.reject(new Error("Unexpected Follow write")),
+      ...options?.followService,
+    },
     notificationService: {
       listAgentNotifications: () =>
         Promise.reject(new Error("Unexpected Notification request")),
@@ -618,9 +735,15 @@ async function createApp(options?: {
         Promise.reject(new Error("Unexpected PendingAction request")),
     },
     rateLimiter: { consume: consumeLimit },
+    reactionWriteService: {
+      setReaction: () => Promise.reject(new Error("Unexpected Reaction write")),
+      ...options?.reactionWriteService,
+    },
     researchWriteService: {
       createPost: () => Promise.reject(new Error("Unexpected research write")),
+      deleteContent: () => Promise.reject(new Error("Unexpected delete write")),
       replyToContent: () => Promise.reject(new Error("Unexpected reply write")),
+      updateContent: () => Promise.reject(new Error("Unexpected update write")),
       ...options?.researchWriteService,
     },
     transportIdentityGuard,
@@ -689,6 +812,24 @@ describe("private MCP API application boundary", () => {
         },
       },
     });
+    expect(Object.keys(body.effective_capabilities)).toEqual([
+      "get_agent_context",
+      "find_communities",
+      "get_community",
+      "browse_content",
+      "search_content",
+      "get_content",
+      "get_discussion",
+      "list_notifications",
+      "get_action_status",
+      "create_post",
+      "reply_to_content",
+      "update_content",
+      "delete_content",
+      "set_reaction",
+      "set_follow",
+      "list_follows",
+    ]);
     expect(order).toEqual([
       "transport",
       "replay",
@@ -1003,6 +1144,186 @@ describe("private MCP API application boundary", () => {
     );
   });
 
+  it("serves the complete private MCP mutation and follow surface through shared adapters", async () => {
+    const scopes = [
+      "research:read",
+      "content:write",
+      "reaction:write",
+      "follow:write",
+    ] as const;
+    const authorityContext = contextWithScopes([...scopes]);
+    const updateContent = vi.fn<
+      PrivateMcpAppOptions["researchWriteService"]["updateContent"]
+    >(() => Promise.resolve(successfulUpdateOutcome()));
+    const deleteContent = vi.fn<
+      PrivateMcpAppOptions["researchWriteService"]["deleteContent"]
+    >(() => Promise.resolve(successfulDeleteOutcome()));
+    const setReaction = vi.fn<
+      PrivateMcpAppOptions["reactionWriteService"]["setReaction"]
+    >(() => Promise.resolve(successfulReactionOutcome()));
+    const setFollow = vi.fn<PrivateMcpAppOptions["followService"]["setFollow"]>(() =>
+      Promise.resolve(successfulFollowOutcome()),
+    );
+    const listFollows = vi.fn<PrivateMcpAppOptions["followService"]["listFollows"]>(() =>
+      Promise.resolve(followListPage()),
+    );
+    const harness = await createApp({
+      authorityContext,
+      followService: { listFollows, setFollow },
+      reactionWriteService: { setReaction },
+      researchWriteService: { deleteContent, updateContent },
+    });
+
+    const updateRequestId = "req_private_mcp_update_content";
+    const updateResponse = await harness.app.inject({
+      headers: await validHeaders(updateRequestId, scopes),
+      method: "POST",
+      payload: {
+        content_id: ids.content,
+        edit_summary: "Clarify the downside scenario.",
+        expected_version: 1,
+        idempotency_key: "update-amd-downside-v2",
+        patch: { body_markdown: "Updated downside evidence and primary sources." },
+      },
+      url: PRIVATE_MCP_CONTENT_UPDATE_PATH,
+    });
+    const update = UpdateContentWriteResultSchema.parse(updateResponse.json());
+
+    const deleteRequestId = "req_private_mcp_delete_content";
+    const deleteResponse = await harness.app.inject({
+      headers: await validHeaders(deleteRequestId, scopes),
+      method: "POST",
+      payload: {
+        content_id: ids.content,
+        expected_version: 1,
+        idempotency_key: "delete-amd-downside-v2",
+        mode: "soft",
+        reason: "Superseded by a corrected research note.",
+      },
+      url: PRIVATE_MCP_CONTENT_DELETE_PATH,
+    });
+    const deleted = DeleteContentWriteResultSchema.parse(deleteResponse.json());
+
+    const reactionRequestId = "req_private_mcp_set_reaction";
+    const reactionResponse = await harness.app.inject({
+      headers: await validHeaders(reactionRequestId, scopes),
+      method: "POST",
+      payload: {
+        active: true,
+        content_id: ids.content,
+        idempotency_key: "reaction-amd-helpful-v1",
+        reaction: "helpful",
+      },
+      url: PRIVATE_MCP_REACTIONS_PATH,
+    });
+    const reaction = SetReactionWriteResultSchema.parse(reactionResponse.json());
+
+    const followRequestId = "req_private_mcp_set_follow";
+    const followResponse = await harness.app.inject({
+      headers: await validHeaders(followRequestId, scopes),
+      method: "POST",
+      payload: {
+        active: true,
+        idempotency_key: "follow-amd-new-posts-v1",
+        notification_level: "new_posts",
+        target_id: "amd",
+        target_type: "symbol",
+      },
+      url: PRIVATE_MCP_FOLLOWS_PATH,
+    });
+    const follow = SetFollowWriteResultSchema.parse(followResponse.json());
+
+    const listRequestId = "req_private_mcp_list_follows";
+    const listResponse = await harness.app.inject({
+      headers: await validHeaders(listRequestId, scopes),
+      method: "POST",
+      payload: { limit: 5, target_type: "symbol" },
+      url: PRIVATE_MCP_FOLLOW_LIST_PATH,
+    });
+    const list = FollowListResponseSchema.parse(listResponse.json());
+
+    expect(updateResponse.statusCode).toBe(200);
+    expect(update).toMatchObject({
+      request_id: updateRequestId,
+      result: { content_id: ids.content, resource_version: 2 },
+      status: "succeeded",
+    });
+    expect(updateContent).toHaveBeenCalledWith(
+      authorityContext,
+      {
+        contentId: ids.content,
+        editSummary: "Clarify the downside scenario.",
+        expectedVersion: 1,
+        idempotencyKey: "update-amd-downside-v2",
+        patch: { bodyMarkdown: "Updated downside evidence and primary sources." },
+      },
+      { channel: "mcp", requestId: updateRequestId },
+    );
+    expect(deleteResponse.statusCode).toBe(200);
+    expect(deleted).toMatchObject({
+      request_id: deleteRequestId,
+      result: {
+        content_id: ids.content,
+        lifecycle_state: "deleted",
+        resource_version: 2,
+      },
+      status: "succeeded",
+    });
+    expect(deleteContent).toHaveBeenCalledWith(
+      authorityContext,
+      {
+        contentId: ids.content,
+        expectedVersion: 1,
+        idempotencyKey: "delete-amd-downside-v2",
+        mode: "soft",
+        reason: "Superseded by a corrected research note.",
+      },
+      { channel: "mcp", requestId: deleteRequestId },
+    );
+    expect(reactionResponse.statusCode).toBe(200);
+    expect(reaction).toMatchObject({
+      request_id: reactionRequestId,
+      result: { content_id: ids.content },
+      status: "succeeded",
+    });
+    expect(setReaction).toHaveBeenCalledWith(
+      authorityContext,
+      {
+        active: true,
+        contentId: ids.content,
+        idempotencyKey: "reaction-amd-helpful-v1",
+        reaction: "helpful",
+      },
+      { channel: "mcp", requestId: reactionRequestId },
+    );
+    expect(followResponse.statusCode).toBe(200);
+    expect(follow).toMatchObject({
+      request_id: followRequestId,
+      result: { target_id: "AMD", target_type: "symbol" },
+      status: "succeeded",
+    });
+    expect(setFollow).toHaveBeenCalledWith(
+      authorityContext,
+      {
+        active: true,
+        idempotencyKey: "follow-amd-new-posts-v1",
+        notificationLevel: "new_posts",
+        targetId: "amd",
+        targetType: "symbol",
+      },
+      { channel: "mcp", requestId: followRequestId },
+    );
+    expect(listResponse.statusCode).toBe(200);
+    expect(list).toMatchObject({
+      items: [{ target_id: "AMD", target_type: "symbol" }],
+      request_id: listRequestId,
+    });
+    expect(listFollows).toHaveBeenCalledWith(authorityContext, {
+      limit: 5,
+      targetType: "symbol",
+    });
+  });
+
   it("allows author filters without accepting a caller-supplied Actor identity", async () => {
     const scopes = ["research:read"] as const;
     const harness = await createApp({
@@ -1252,6 +1573,67 @@ describe("private MCP API application boundary", () => {
       requiredScope: "content:write",
       url: PRIVATE_MCP_REPLIES_PATH,
     },
+    {
+      label: "update content",
+      method: "POST",
+      missingScopes: ["research:read"],
+      payload: {
+        content_id: ids.content,
+        expected_version: 1,
+        idempotency_key: "missing-content-write-scope-update",
+        patch: { body_markdown: "Corrected research body." },
+      },
+      requiredScope: "content:write",
+      url: PRIVATE_MCP_CONTENT_UPDATE_PATH,
+    },
+    {
+      label: "delete content",
+      method: "POST",
+      missingScopes: ["research:read"],
+      payload: {
+        content_id: ids.content,
+        expected_version: 1,
+        idempotency_key: "missing-content-write-scope-delete",
+        mode: "soft",
+      },
+      requiredScope: "content:write",
+      url: PRIVATE_MCP_CONTENT_DELETE_PATH,
+    },
+    {
+      label: "set reaction",
+      method: "POST",
+      missingScopes: ["research:read"],
+      payload: {
+        active: true,
+        content_id: ids.content,
+        idempotency_key: "missing-reaction-write-scope",
+        reaction: "helpful",
+      },
+      requiredScope: "reaction:write",
+      url: PRIVATE_MCP_REACTIONS_PATH,
+    },
+    {
+      label: "set follow",
+      method: "POST",
+      missingScopes: ["research:read"],
+      payload: {
+        active: true,
+        idempotency_key: "missing-follow-write-scope",
+        notification_level: "new_posts",
+        target_id: "AMD",
+        target_type: "symbol",
+      },
+      requiredScope: "follow:write",
+      url: PRIVATE_MCP_FOLLOWS_PATH,
+    },
+    {
+      label: "list follows",
+      method: "POST",
+      missingScopes: ["actions:read"],
+      payload: { limit: 5 },
+      requiredScope: "research:read",
+      url: PRIVATE_MCP_FOLLOW_LIST_PATH,
+    },
   ] as const)(
     "enforces $label scope before invoking a private domain adapter",
     async ({ method, missingScopes, payload, requiredScope, url }) => {
@@ -1267,14 +1649,26 @@ describe("private MCP API application boundary", () => {
       const getActionStatus = vi.fn(() => Promise.resolve(pendingAction()));
       const createPost = vi.fn(() => Promise.resolve(pendingCreatePostOutcome()));
       const replyToContent = vi.fn(() => Promise.resolve(successfulReplyOutcome()));
+      const updateContent = vi.fn(() => Promise.resolve(successfulUpdateOutcome()));
+      const deleteContent = vi.fn(() => Promise.resolve(successfulDeleteOutcome()));
+      const setReaction = vi.fn(() => Promise.resolve(successfulReactionOutcome()));
+      const setFollow = vi.fn(() => Promise.resolve(successfulFollowOutcome()));
+      const listFollows = vi.fn(() => Promise.resolve(followListPage()));
       const harness = await createApp({
         authorityContext: contextWithScopes([...missingScopes]),
         communityDirectoryService: { getCommunity, searchCommunities },
         contentReadService: { browseContent, getContent, getDiscussion },
         contentSearchService: { searchContent },
+        followService: { listFollows, setFollow },
         notificationService: { listAgentNotifications },
         pendingActionStatusService: { getActionStatus },
-        researchWriteService: { createPost, replyToContent },
+        reactionWriteService: { setReaction },
+        researchWriteService: {
+          createPost,
+          deleteContent,
+          replyToContent,
+          updateContent,
+        },
       });
       const scopedRequestId = `req_private_mcp_missing_${requiredScope.replace(":", "_")}`;
       const response = await harness.app.inject({
@@ -1297,8 +1691,37 @@ describe("private MCP API application boundary", () => {
       expect(getActionStatus).not.toHaveBeenCalled();
       expect(createPost).not.toHaveBeenCalled();
       expect(replyToContent).not.toHaveBeenCalled();
+      expect(updateContent).not.toHaveBeenCalled();
+      expect(deleteContent).not.toHaveBeenCalled();
+      expect(setReaction).not.toHaveBeenCalled();
+      expect(setFollow).not.toHaveBeenCalled();
+      expect(listFollows).not.toHaveBeenCalled();
     },
   );
+
+  it("uses HTTP 400 for private MCP INVALID_ARGUMENT contract failures", async () => {
+    const listFollows = vi.fn(() => Promise.resolve(followListPage()));
+    const scopes = ["research:read"] as const;
+    const harness = await createApp({
+      authorityContext: contextWithScopes([...scopes]),
+      followService: { listFollows },
+    });
+    const invalidRequestId = "req_private_mcp_invalid_follow_list";
+    const response = await harness.app.inject({
+      headers: await validHeaders(invalidRequestId, scopes),
+      method: "POST",
+      payload: { limit: 0 },
+      url: PRIVATE_MCP_FOLLOW_LIST_PATH,
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      error: { code: "INVALID_ARGUMENT", retryable: false },
+      request_id: invalidRequestId,
+      schema_version: "1",
+    });
+    expect(listFollows).not.toHaveBeenCalled();
+  });
 
   it("rejects identity-shaped create-post body fields before ActorContext replay", async () => {
     const createPost = vi.fn(() => Promise.resolve(pendingCreatePostOutcome()));
