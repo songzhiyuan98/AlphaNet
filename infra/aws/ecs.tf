@@ -39,6 +39,7 @@ locals {
     { name = "SEARCH_EMBEDDING_TIMEOUT_MS", value = "5000" },
     { name = "MCP_INTERNAL_API_ENABLED", value = tostring(local.mcp_runtime_enabled) },
     { name = "MCP_INTERNAL_API_PORT", value = tostring(local.mcp_internal_api_port) },
+    { name = "MCP_OAUTH_OWNER_CONSENT_ENABLED", value = "false" },
   ])
 
   web_environment = concat(local.common_service_environment, [
@@ -46,6 +47,7 @@ locals {
     { name = "API_INTERNAL_URL", value = "http://api.${aws_service_discovery_private_dns_namespace.main.name}:4000" },
     { name = "SSR_ALLOW_MISSING_CLIENT_IP", value = "false" },
     { name = "GOOGLE_AUTH_ENABLED", value = tostring(var.google_oauth_enabled) },
+    { name = "MCP_OAUTH_OWNER_CONSENT_ENABLED", value = "false" },
     # The Web image is built with an empty public API URL so browser calls stay
     # on the CloudFront cookie origin. This runtime value documents that contract.
     { name = "NEXT_PUBLIC_API_URL", value = "" },

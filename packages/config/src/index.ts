@@ -906,6 +906,91 @@ const OptionalRemoteMcpOAuthUrlSchema = z.preprocess(
     .optional(),
 );
 
+const OptionalRemoteMcpOAuthResourceUrlSchema = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  z
+    .string()
+    .min(1)
+    .max(500)
+    .refine(
+      (value) => Buffer.byteLength(value, "utf8") <= 500,
+      "must not exceed 500 UTF-8 bytes",
+    )
+    .refine(
+      isCanonicalRemoteMcpOAuthUrl,
+      "must be a canonical HTTPS URL (or loopback HTTP URL) without credentials, query, or fragment",
+    )
+    .optional(),
+);
+
+const McpOAuthOwnerConsentEnvironmentFields = {
+  MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64: OptionalMcpIndependentKeyBase64Schema,
+  MCP_OAUTH_CONTINUATION_KEY_BASE64: OptionalMcpIndependentKeyBase64Schema,
+  MCP_OAUTH_OWNER_CONSENT_ENABLED: BooleanStringSchema.default(false),
+  MCP_OAUTH_RESOURCE: OptionalRemoteMcpOAuthResourceUrlSchema,
+} satisfies z.ZodRawShape;
+
+type McpOAuthOwnerConsentValidationTarget = {
+  MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64?: Buffer | undefined;
+  MCP_OAUTH_CONTINUATION_KEY_BASE64?: Buffer | undefined;
+  MCP_OAUTH_OWNER_CONSENT_ENABLED: boolean;
+  MCP_OAUTH_RESOURCE?: string | undefined;
+  NODE_ENV: z.infer<typeof NodeEnvironmentSchema>;
+};
+
+function validateMcpOAuthOwnerConsentEnvironment(
+  value: McpOAuthOwnerConsentValidationTarget,
+  context: z.RefinementCtx,
+): void {
+  const tuple = [
+    value.MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64,
+    value.MCP_OAUTH_CONTINUATION_KEY_BASE64,
+    value.MCP_OAUTH_RESOURCE,
+  ];
+  const tupleRequired =
+    value.MCP_OAUTH_OWNER_CONSENT_ENABLED || tuple.some((entry) => entry !== undefined);
+
+  if (tupleRequired && tuple.some((entry) => entry === undefined)) {
+    context.addIssue({
+      code: "custom",
+      message:
+        "the authorization binding key, continuation key, and canonical MCP resource must be configured together",
+      path: ["MCP_OAUTH_OWNER_CONSENT_ENABLED"],
+    });
+  }
+
+  if (
+    buffersEqual(
+      value.MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64,
+      value.MCP_OAUTH_CONTINUATION_KEY_BASE64,
+    )
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "authorization binding and continuation keys must be independent",
+      path: ["MCP_OAUTH_CONTINUATION_KEY_BASE64"],
+    });
+  }
+
+  if (value.MCP_OAUTH_RESOURCE !== undefined) {
+    const resource = new URL(value.MCP_OAUTH_RESOURCE);
+    if (resource.pathname !== "/mcp") {
+      context.addIssue({
+        code: "custom",
+        message: "must use the canonical /mcp resource path",
+        path: ["MCP_OAUTH_RESOURCE"],
+      });
+    }
+    if (value.NODE_ENV === "production" && resource.protocol !== "https:") {
+      context.addIssue({
+        code: "custom",
+        message: "must use https in production",
+        path: ["MCP_OAUTH_RESOURCE"],
+      });
+    }
+  }
+}
+
 function isCanonicalMcpInternalApiOrigin(value: string): boolean {
   try {
     const url = new URL(value);
@@ -1201,6 +1286,7 @@ export const ApiEnvironmentSchema = CommonServiceEnvironmentSchema.extend({
   ...AdminApiEnvironmentFields,
   ...AgentCredentialEnvironmentFields,
   ...McpInternalApiEnvironmentFields,
+  ...McpOAuthOwnerConsentEnvironmentFields,
   ...PendingActionCryptoEnvironmentFields,
   ...SearchEmbeddingEnvironmentFields,
   API_TRUSTED_PROXY_CIDRS: TrustedProxyListSchema,
@@ -1218,6 +1304,7 @@ export const ApiEnvironmentSchema = CommonServiceEnvironmentSchema.extend({
   validateAuthEnvironment(value, context);
   validateAdminApiEnvironment(value, context);
   validateMcpInternalApiEnvironment(value, context);
+  validateMcpOAuthOwnerConsentEnvironment(value, context);
   validatePendingActionCryptoEnvironment(value, context);
   validateProductionPostgresTransport(value, context);
   validateProductionRedisTransport(value, context);

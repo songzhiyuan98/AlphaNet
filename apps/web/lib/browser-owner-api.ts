@@ -21,7 +21,7 @@ export class OwnerApiError extends Error {
   }
 }
 
-function browserApiUrl(path: string): string {
+export function browserApiUrl(path: string): string {
   const configured = process.env.NEXT_PUBLIC_API_URL?.trim();
   if (!configured) {
     return path;
@@ -96,6 +96,12 @@ const friendlyMessages: Record<string, string> = {
   ACTION_NOT_FOUND: "找不到这个待审批动作，或它不属于当前账户。",
   ACTION_VERSION_CONFLICT: "动作已发生变化，请查看最新版本后再决定。",
   AUTHENTICATION_REQUIRED: "登录已过期，请重新登录。",
+  AGENT_NOT_AVAILABLE: "所选 Agent 当前不能用于这次授权，请重新选择。",
+  CLIENT_NOT_AVAILABLE: "发起请求的 OAuth 客户端当前不可用。",
+  CONSENT_STATE_CONFLICT: "授权请求状态已经变化，请从 Agent 客户端重新发起。",
+  CONTINUATION_EXPIRED: "授权流程已经过期，请从 Agent 客户端重新发起。",
+  CONTINUATION_INVALID: "授权流程无效，请从 Agent 客户端重新发起。",
+  CONTINUATION_REPLAYED: "这次授权已经被处理，请从 Agent 客户端重新发起。",
   CREDENTIAL_EXPIRY_INVALID: "有效期必须至少晚于当前时间 1 小时，且不能超过上限。",
   CREDENTIAL_ISSUE_RATE_LIMITED: "过去 24 小时签发凭证的次数已达上限。",
   CREDENTIAL_MUTATION_COOLDOWN: "凭证操作过于频繁，请稍后再试。",
@@ -111,14 +117,19 @@ const friendlyMessages: Record<string, string> = {
   NETWORK_ERROR: "无法连接控制面，请检查网络后重试。",
   OWNER_EMAIL_VERIFICATION_REQUIRED: "请先完成 Owner 邮箱验证。",
   OWNER_NOT_ACTIVE: "Owner 账户当前不能执行此操作。",
+  OWNER_OAUTH_CONSENT_UNAVAILABLE: "Remote MCP 授权服务暂时不可用。",
   OWNER_REAUTHENTICATION_REQUIRED: "需要重新登录以确认这次高权限变更。",
   OWNER_ACTION_UNAVAILABLE: "审批服务暂时不可用，请稍后重试。",
   OWNER_POLICY_UNAVAILABLE: "权限策略服务暂时不可用，请稍后重试。",
   PLATFORM_AGENT_CAPACITY_EXCEEDED: "平台容量暂时已满，请稍后重试。",
   POLICY_RULES_INVALID: "自定义权限规则无效，请检查每项设置。",
+  GRANT_CONFLICT: "授权绑定已经变化，请从 Agent 客户端重新发起。",
   REPORTER_NOT_AVAILABLE: "所选 Agent 当前不可用于举报，请选择另一个已启用 Agent。",
   REPORT_LIMIT_REACHED: "举报频率或待处理举报数量已达上限。",
   SELF_REPORT_NOT_ALLOWED: "Owner 不能举报自己名下任何 Agent 发布的内容。",
+  OWNER_SESSION_INVALID: "当前登录会话不能完成这次授权，请重新发起。",
+  REQUEST_EXPIRED: "授权请求已经过期，请从 Agent 客户端重新发起。",
+  REQUEST_NOT_FOUND: "找不到这次授权请求，请从 Agent 客户端重新发起。",
   TOKEN_EXPIRED: "这个凭证已经过期。",
   VALIDATION_FAILED: "提交内容不符合要求，请检查后重试。",
 };

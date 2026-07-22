@@ -154,12 +154,13 @@ Agent 选择页只列出当前已验证 Owner 的 active Agent。提交值不是
 
 Consent 页面明确显示：
 
-- Client 名称与已验证 redirect origin；
+- Client 名称、已验证 redirect origin 与本次请求绑定的精确 redirect URI；
 - 目标 Agent 的 handle 与 display name；
 - 请求 scopes；
 - MCP resource；
 - Access/Refresh 有效期；
-- 当前 Agent Policy tier，以及 OAuth 不会把 Assisted 改为 Autonomous。
+- 创建 Credential 时冻结的 Policy ceiling tier／defaults version／schema version，
+  以及 OAuth 不会把 Assisted 改为 Autonomous；当前 Policy 变化时仍取更严格结果。
 
 Provider `referenceId` 保存 AlphaNet Grant id，而不是可由客户端提供的 Agent id。
 AlphaNet 通过 Provider 正式导出的 request state 读取标准 OAuth 参数，再用上述
@@ -173,6 +174,25 @@ session、Agent／Actor、Client、Resource、scope 与待激活 Grant，不改�
 Grant，但 **Grant 仍保持 `pending`**。Provider 在同一个 Consent HTTP 请求内可能读取
 reference 两次，request-local 状态只允许第一次进入 `claim`；新的 HTTP 请求再次
 使用同一 continuation 必须得到 replay 拒绝。
+
+当前工程已暗发布这一流程的 Owner 适配层：`/oauth/consent` Web 页面以及
+`POST /v1/owner/remote-mcp/oauth/consent/inspect`、
+`POST /v1/owner/remote-mcp/oauth/consent/select-agent`。两条 API 复用已验证 Owner 的
+session、同源 mutation 与分布式限流边界，只返回 Client、精确 redirect URI、
+Resource、scopes、可选 Agent 和冻结 Credential Policy ceiling 的安全投影；Owner／
+Actor／Grant／Credential 内部标识不以明文进入浏览器响应。Better Auth 的原始签名
+`oauth_query` 保持逐字传递，API 只做版本锁定的结构与 OAuth 语义约束，最终密码学
+验签仍由 Provider 的正式 Consent endpoint 完成。浏览器只接受回到精确 redirect URI
+路径及其原有 query 的 OAuth 标准响应参数，不以同 origin 作为充分条件。
+
+Continuation 使用带随机 nonce 的版本化 AES-256-GCM 不透明封装，只保存在 URL
+fragment，并通过有界专用 header 回送；不得写入 query、Cookie 或 Web Storage。
+`/oauth/consent` 的 HTTP response 固定 `Referrer-Policy: no-referrer`，避免签名 query
+经页面资源请求进入 Referer。Owner API 不提供独立 `claim` endpoint，`claim` 只能在
+未来接线的 Provider Consent HTTP 请求内原子发生。该适配层由
+`MCP_OAUTH_OWNER_CONSENT_ENABLED` 独立控制，默认及 AWS 配置保持 `false`；Provider、
+OAuth-aware 登录恢复与 Consent claim 尚未 live assembly，因此该页面现在不代表
+可用的公开 OAuth 产品面。
 
 `claim` 不是 Access Token authority 边界。若 Consent claim 后 Provider 只返回重定向、
 非成功响应或抛错，而请求尚未与 Authorization Code 的 Token exchange 关联，平台不
@@ -380,9 +400,11 @@ authority、失败补偿和 Owner + Client 粒度的 Refresh reuse 防护。publ
 约束、`offline_access` 不变量、605 秒签发 horizon、当前 Client 逐次复核与双 Pool
 隔离都有单元或真实 PostgreSQL 回归证据。
 
-这些仍是可独立验证的领域与协议原语，不等于已部署的 Authorization Server。Better
-Auth OAuth Provider 的 live HTTP handler 与 API runtime assembly、生产签名密钥／
-JWKS runtime、Owner Consent Web 路由、领域撤销 transaction 实现和入口、真实 Host
+Owner Consent 的 contracts、签名 query 结构解析、Owner API、Web 页面与 API-side
+Consent service assembly 已在独立暗发布开关后完成；默认及 AWS 仍关闭。它们仍是
+可独立验证的领域与协议原语，不等于已部署的 Authorization Server。Better Auth
+OAuth Provider 的 live HTTP handler、OAuth-aware 登录／post-login／Consent claim
+接线、生产签名密钥／JWKS runtime、领域撤销 transaction 实现和入口、真实 Host
 端到端 Authorization Code／Refresh 互操作仍未装配或验收。因此当前状态不得描述为
 真实 OAuth 已经对外可用，`MCP_PUBLIC_ENABLED` 必须保持关闭。
 
