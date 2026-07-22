@@ -37,6 +37,8 @@ locals {
     { name = "SEARCH_EMBEDDING_MODEL_ID", value = var.search_embedding_model_id },
     { name = "SEARCH_EMBEDDING_DIMENSIONS", value = "512" },
     { name = "SEARCH_EMBEDDING_TIMEOUT_MS", value = "5000" },
+    { name = "MCP_INTERNAL_API_ENABLED", value = tostring(local.mcp_runtime_enabled) },
+    { name = "MCP_INTERNAL_API_PORT", value = tostring(local.mcp_internal_api_port) },
   ])
 
   web_environment = concat(local.common_service_environment, [
@@ -53,9 +55,15 @@ locals {
     { name = "HOST", value = "0.0.0.0" },
     { name = "PORT", value = "4100" },
     { name = "MCP_ALLOWED_HOSTS", value = local.mcp_allowed_hosts },
+    { name = "MCP_RUNTIME_ENABLED", value = tostring(local.mcp_runtime_enabled) },
     { name = "MCP_PUBLIC_ENABLED", value = tostring(var.mcp_public_enabled) },
-    { name = "MCP_RESOURCE", value = var.mcp_public_enabled ? "${local.public_origin}/mcp" : "" },
+    { name = "MCP_RESOURCE", value = local.mcp_resource },
     { name = "MCP_TRUSTED_PROXY_CIDRS", value = join(",", values(local.public_subnet_cidrs)) },
+    { name = "MCP_OAUTH_ISSUER", value = local.mcp_runtime_enabled ? var.mcp_oauth_issuer : "" },
+    { name = "MCP_OAUTH_JWKS_URI", value = local.mcp_runtime_enabled ? var.mcp_oauth_jwks_uri : "" },
+    { name = "MCP_INTERNAL_API_URL", value = local.mcp_runtime_enabled ? "https://${local.mcp_internal_api_dns_name}:${local.mcp_internal_api_port}" : "" },
+    { name = "MCP_INTERNAL_API_TIMEOUT_MS", value = "5000" },
+    { name = "MCP_INTERNAL_API_MAX_RESPONSE_BYTES", value = "4194304" },
   ])
 
   worker_environment = concat(local.common_service_environment, [
@@ -81,26 +89,50 @@ locals {
     worker = local.worker_environment
   }
 
-  api_secrets = concat([
-    { name = "DATABASE_URL", valueFrom = "${local.application_secret_arn}:DATABASE_URL::" },
-    { name = "REDIS_URL", valueFrom = "${local.application_secret_arn}:REDIS_URL::" },
-    { name = "BETTER_AUTH_SECRET", valueFrom = "${local.application_secret_arn}:BETTER_AUTH_SECRET::" },
-    { name = "SSR_INTERNAL_REQUEST_SECRET", valueFrom = "${local.application_secret_arn}:SSR_INTERNAL_REQUEST_SECRET::" },
-    { name = "AGENT_API_KEY_PEPPER", valueFrom = "${local.application_secret_arn}:AGENT_API_KEY_PEPPER::" },
-    { name = "PENDING_ACTION_ENCRYPTION_KEY", valueFrom = "${local.application_secret_arn}:PENDING_ACTION_ENCRYPTION_KEY::" },
-    { name = "COMMUNITY_CURSOR_SIGNING_KEY", valueFrom = "${local.application_secret_arn}:COMMUNITY_CURSOR_SIGNING_KEY::" },
-    { name = "RESEND_API_KEY", valueFrom = "${local.application_secret_arn}:RESEND_API_KEY::" },
-    ], var.google_oauth_enabled ? [
-    { name = "AUTH_GOOGLE_CLIENT_ID", valueFrom = "${local.application_secret_arn}:AUTH_GOOGLE_CLIENT_ID::" },
-    { name = "AUTH_GOOGLE_CLIENT_SECRET", valueFrom = "${local.application_secret_arn}:AUTH_GOOGLE_CLIENT_SECRET::" },
+  api_secrets = concat(
+    [
+      { name = "DATABASE_URL", valueFrom = "${local.application_secret_arn}:DATABASE_URL::" },
+      { name = "REDIS_URL", valueFrom = "${local.application_secret_arn}:REDIS_URL::" },
+      { name = "BETTER_AUTH_SECRET", valueFrom = "${local.application_secret_arn}:BETTER_AUTH_SECRET::" },
+      { name = "SSR_INTERNAL_REQUEST_SECRET", valueFrom = "${local.application_secret_arn}:SSR_INTERNAL_REQUEST_SECRET::" },
+      { name = "AGENT_API_KEY_PEPPER", valueFrom = "${local.application_secret_arn}:AGENT_API_KEY_PEPPER::" },
+      { name = "PENDING_ACTION_ENCRYPTION_KEY", valueFrom = "${local.application_secret_arn}:PENDING_ACTION_ENCRYPTION_KEY::" },
+      { name = "COMMUNITY_CURSOR_SIGNING_KEY", valueFrom = "${local.application_secret_arn}:COMMUNITY_CURSOR_SIGNING_KEY::" },
+      { name = "RESEND_API_KEY", valueFrom = "${local.application_secret_arn}:RESEND_API_KEY::" },
+    ],
+    local.mcp_runtime_enabled ? [
+      { name = "MCP_INTERNAL_API_SERVER_CERT_PEM_BASE64", valueFrom = "${local.application_secret_arn}:MCP_INTERNAL_API_SERVER_CERT_PEM_BASE64::" },
+      { name = "MCP_INTERNAL_API_SERVER_KEY_PEM_BASE64", valueFrom = "${local.application_secret_arn}:MCP_INTERNAL_API_SERVER_KEY_PEM_BASE64::" },
+      { name = "MCP_INTERNAL_API_CLIENT_CA_PEM_BASE64", valueFrom = "${local.application_secret_arn}:MCP_INTERNAL_API_CLIENT_CA_PEM_BASE64::" },
+      { name = "MCP_INTERNAL_API_ALLOWED_CLIENT_CERT_SHA256_FINGERPRINTS", valueFrom = "${local.application_secret_arn}:MCP_INTERNAL_API_ALLOWED_CLIENT_CERT_SHA256_FINGERPRINTS::" },
+      { name = "MCP_ACTOR_ASSERTION_CURRENT_KEY_VERSION", valueFrom = "${local.application_secret_arn}:MCP_ACTOR_ASSERTION_CURRENT_KEY_VERSION::" },
+      { name = "MCP_ACTOR_ASSERTION_CURRENT_KEY_BASE64", valueFrom = "${local.application_secret_arn}:MCP_ACTOR_ASSERTION_CURRENT_KEY_BASE64::" },
+      { name = "MCP_ACTOR_ASSERTION_PREVIOUS_KEYS", valueFrom = "${local.application_secret_arn}:MCP_ACTOR_ASSERTION_PREVIOUS_KEYS::" },
+      { name = "MCP_ACTOR_ASSERTION_REPLAY_DIGEST_KEY_BASE64", valueFrom = "${local.application_secret_arn}:MCP_ACTOR_ASSERTION_REPLAY_DIGEST_KEY_BASE64::" },
+      { name = "MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64", valueFrom = "${local.application_secret_arn}:MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64::" },
+    ] : [],
+    var.google_oauth_enabled ? [
+      { name = "AUTH_GOOGLE_CLIENT_ID", valueFrom = "${local.application_secret_arn}:AUTH_GOOGLE_CLIENT_ID::" },
+      { name = "AUTH_GOOGLE_CLIENT_SECRET", valueFrom = "${local.application_secret_arn}:AUTH_GOOGLE_CLIENT_SECRET::" },
     ] : [],
   )
 
   task_secrets = {
     api = local.api_secrets
-    mcp = [
-      { name = "REDIS_URL", valueFrom = "${local.application_secret_arn}:REDIS_URL::" },
-    ]
+    mcp = concat(
+      [
+        { name = "REDIS_URL", valueFrom = "${local.application_secret_arn}:REDIS_URL::" },
+      ],
+      local.mcp_runtime_enabled ? [
+        { name = "MCP_INTERNAL_API_CLIENT_CERT_PEM_BASE64", valueFrom = "${local.application_secret_arn}:MCP_INTERNAL_API_CLIENT_CERT_PEM_BASE64::" },
+        { name = "MCP_INTERNAL_API_CLIENT_KEY_PEM_BASE64", valueFrom = "${local.application_secret_arn}:MCP_INTERNAL_API_CLIENT_KEY_PEM_BASE64::" },
+        { name = "MCP_INTERNAL_API_SERVER_CA_PEM_BASE64", valueFrom = "${local.application_secret_arn}:MCP_INTERNAL_API_SERVER_CA_PEM_BASE64::" },
+        { name = "MCP_ACTOR_ASSERTION_CURRENT_KEY_VERSION", valueFrom = "${local.application_secret_arn}:MCP_ACTOR_ASSERTION_CURRENT_KEY_VERSION::" },
+        { name = "MCP_ACTOR_ASSERTION_CURRENT_KEY_BASE64", valueFrom = "${local.application_secret_arn}:MCP_ACTOR_ASSERTION_CURRENT_KEY_BASE64::" },
+        { name = "MCP_ACTOR_ASSERTION_PREVIOUS_KEYS", valueFrom = "${local.application_secret_arn}:MCP_ACTOR_ASSERTION_PREVIOUS_KEYS::" },
+        { name = "MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64", valueFrom = "${local.application_secret_arn}:MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64::" },
+      ] : [],
+    )
     web = [
       { name = "SSR_INTERNAL_REQUEST_SECRET", valueFrom = "${local.application_secret_arn}:SSR_INTERNAL_REQUEST_SECRET::" },
     ]
@@ -244,13 +276,20 @@ resource "aws_ecs_task_definition" "service" {
         essential   = true
         environment = local.task_environment[each.key]
         secrets     = local.task_secrets[each.key]
-        portMappings = contains(keys(local.load_balanced_services), each.key) ? [{
-          name          = each.key
-          containerPort = local.load_balanced_services[each.key].container_port
-          hostPort      = local.load_balanced_services[each.key].container_port
-          protocol      = "tcp"
-          appProtocol   = "http"
-        }] : []
+        portMappings = concat(
+          contains(keys(local.load_balanced_services), each.key) ? [{
+            name          = each.key
+            containerPort = local.load_balanced_services[each.key].container_port
+            hostPort      = local.load_balanced_services[each.key].container_port
+            protocol      = "tcp"
+          }] : [],
+          each.key == "api" && local.mcp_runtime_enabled ? [{
+            name          = "mcp-internal"
+            containerPort = local.mcp_internal_api_port
+            hostPort      = local.mcp_internal_api_port
+            protocol      = "tcp"
+          }] : [],
+        )
         linuxParameters = {
           initProcessEnabled = true
         }
@@ -290,6 +329,15 @@ resource "aws_ecs_task_definition" "service" {
     precondition {
       condition     = startswith(var.image_overrides[each.key], "${data.aws_ecr_repository.service[each.key].repository_url}@sha256:")
       error_message = "${each.key} image_overrides must reference its exact shared AlphaNet ECR repository by digest."
+    }
+
+    precondition {
+      condition = (
+        each.key != "mcp" ||
+        !local.mcp_runtime_enabled ||
+        (var.domain_name != "" && var.mcp_oauth_issuer != "" && var.mcp_oauth_jwks_uri != "")
+      )
+      error_message = "An enabled MCP runtime requires a fixed custom domain_name plus mcp_oauth_issuer and mcp_oauth_jwks_uri."
     }
   }
 

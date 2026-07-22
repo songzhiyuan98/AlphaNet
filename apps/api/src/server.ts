@@ -1,8 +1,11 @@
 import { createHmac } from "node:crypto";
+import { createServer as createHttpsServer } from "node:https";
 
 import {
   createAlphaNetAuthRuntime,
+  createMcpActorAssertionKeyRing,
   createOidcJwtVerifier,
+  RedisMcpActorAssertionReplayStore,
   RedisRateLimitStorage,
   type AlphaNetAuthRuntime,
   type AlphaNetEmailDeliveryConfig,
@@ -27,6 +30,7 @@ import {
   PostgresOwnerPendingActionService,
   PostgresPendingActionStatusService,
   PostgresReactionWriteService,
+  PostgresRemoteMcpAuthorityService,
   PostgresResearchWriteService,
 } from "@alphanet/domain";
 import { AwsBedrockInvokeModelTransport } from "@alphanet/integrations";
@@ -38,6 +42,8 @@ import {
   PostgresAdminSecurityAudit,
 } from "./admin-postgres.js";
 import type { AdminRequestRuntime } from "./admin-request.js";
+import { createPrivateMcpApp } from "./private-mcp-app.js";
+import { createPrivateMcpTlsIdentityGuard } from "./private-mcp-transport.js";
 import { createSearchIndexContractDependency } from "./search-readiness.js";
 
 async function start(): Promise<void> {
@@ -218,6 +224,7 @@ async function start(): Promise<void> {
       : { mode: "local-preview" };
   let authRuntime: AlphaNetAuthRuntime | undefined;
   let app: Awaited<ReturnType<typeof createApiApp>> | undefined;
+  let privateMcpApp: Awaited<ReturnType<typeof createPrivateMcpApp>> | undefined;
   try {
     // PostgreSQL also verifies that bind parameters cannot be logged. Redis is
     // connected before listen so the first public request does not fail closed
@@ -283,6 +290,71 @@ async function start(): Promise<void> {
       version: environment.APP_VERSION,
     });
 
+    if (environment.MCP_INTERNAL_API_ENABLED) {
+      const serverCertificate = environment.MCP_INTERNAL_API_SERVER_CERT_PEM_BASE64;
+      const serverPrivateKey = environment.MCP_INTERNAL_API_SERVER_KEY_PEM_BASE64;
+      const clientCertificateAuthority =
+        environment.MCP_INTERNAL_API_CLIENT_CA_PEM_BASE64;
+      const actorCurrentVersion = environment.MCP_ACTOR_ASSERTION_CURRENT_KEY_VERSION;
+      const actorCurrentKey = environment.MCP_ACTOR_ASSERTION_CURRENT_KEY_BASE64;
+      const replayDigestKey = environment.MCP_ACTOR_ASSERTION_REPLAY_DIGEST_KEY_BASE64;
+      const allowedClientCertificateFingerprints =
+        environment.MCP_INTERNAL_API_ALLOWED_CLIENT_CERT_SHA256_FINGERPRINTS;
+      if (
+        !serverCertificate ||
+        !serverPrivateKey ||
+        !clientCertificateAuthority ||
+        actorCurrentVersion === undefined ||
+        !actorCurrentKey ||
+        !replayDigestKey ||
+        allowedClientCertificateFingerprints.length < 1
+      ) {
+        throw new Error("Private MCP API configuration is incomplete");
+      }
+      const actorAssertionKeyRing = createMcpActorAssertionKeyRing({
+        currentKey: actorCurrentKey,
+        currentVersion: actorCurrentVersion,
+        previousKeys: Object.fromEntries(
+          Object.entries(environment.MCP_ACTOR_ASSERTION_PREVIOUS_KEYS).map(
+            ([version, entry]) => [
+              Number(version),
+              {
+                key: entry.keyBase64,
+                verificationExpiresAt: entry.verificationExpiresAt,
+              },
+            ],
+          ),
+        ),
+      });
+      privateMcpApp = await createPrivateMcpApp({
+        actorAuthenticator: {
+          authority: new PostgresRemoteMcpAuthorityService(postgres.sql),
+          keyRing: actorAssertionKeyRing,
+          replayStore: new RedisMcpActorAssertionReplayStore(redis.client, {
+            digestKey: replayDigestKey,
+          }),
+        },
+        logger,
+        rateLimiter: agentRateLimiter,
+        serverFactory: (handler) =>
+          createHttpsServer(
+            {
+              ca: clientCertificateAuthority,
+              cert: serverCertificate,
+              honorCipherOrder: true,
+              key: serverPrivateKey,
+              minVersion: "TLSv1.2",
+              rejectUnauthorized: true,
+              requestCert: true,
+            },
+            handler,
+          ),
+        transportIdentityGuard: createPrivateMcpTlsIdentityGuard({
+          allowedClientCertificateFingerprints,
+        }),
+      });
+    }
+
     let closing = false;
     const shutdown = async (signal: string) => {
       if (closing || !app) {
@@ -290,7 +362,11 @@ async function start(): Promise<void> {
       }
       closing = true;
       logger.info({ signal }, "shutting down");
-      await app.close();
+      try {
+        await privateMcpApp?.close();
+      } finally {
+        await app.close();
+      }
     };
 
     process.once("SIGINT", () => {
@@ -300,16 +376,30 @@ async function start(): Promise<void> {
       void shutdown("SIGTERM");
     });
 
-    await app.listen({
-      host: environment.HOST,
-      port: environment.PORT,
-    });
+    if (privateMcpApp) {
+      await privateMcpApp.listen({
+        host: environment.HOST,
+        port: environment.MCP_INTERNAL_API_PORT,
+      });
+      logger.info(
+        {
+          host: environment.HOST,
+          port: environment.MCP_INTERNAL_API_PORT,
+        },
+        "Private MCP mTLS API listening",
+      );
+    }
+    await app.listen({ host: environment.HOST, port: environment.PORT });
   } catch (error) {
-    if (app) {
-      await app.close();
-    } else {
-      await authRuntime?.close();
-      await closeDependencies(dependencies);
+    try {
+      await privateMcpApp?.close();
+    } finally {
+      if (app) {
+        await app.close();
+      } else {
+        await authRuntime?.close();
+        await closeDependencies(dependencies);
+      }
     }
     throw error;
   }

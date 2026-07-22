@@ -1,4 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
+import { X509Certificate } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
   EnvironmentValidationError,
@@ -26,6 +32,131 @@ const baseEnvironment = {
   REDIS_URL: "redis://localhost:6379",
 };
 const adminAuditSubjectDigestKey = "1".repeat(64);
+
+interface TlsFixture {
+  clientCertificateBase64: string;
+  clientFingerprint: string;
+  clientPrivateKeyBase64: string;
+  serverCertificateBase64: string;
+  serverPrivateKeyBase64: string;
+}
+
+let tlsFixtureDirectory: string | undefined;
+let tlsFixture: TlsFixture | undefined;
+
+function generateSelfSignedIdentity(directory: string, name: string): void {
+  execFileSync(
+    "openssl",
+    [
+      "req",
+      "-x509",
+      "-newkey",
+      "rsa:2048",
+      "-sha256",
+      "-nodes",
+      "-days",
+      "2",
+      "-subj",
+      `/CN=alphanet-${name}-test`,
+      "-keyout",
+      join(directory, `${name}.key.pem`),
+      "-out",
+      join(directory, `${name}.cert.pem`),
+    ],
+    { stdio: "ignore" },
+  );
+}
+
+beforeAll(() => {
+  tlsFixtureDirectory = mkdtempSync(join(tmpdir(), "alphanet-config-mtls-"));
+  generateSelfSignedIdentity(tlsFixtureDirectory, "server");
+  generateSelfSignedIdentity(tlsFixtureDirectory, "client");
+  const serverCertificate = readFileSync(join(tlsFixtureDirectory, "server.cert.pem"));
+  const clientCertificate = readFileSync(join(tlsFixtureDirectory, "client.cert.pem"));
+  tlsFixture = {
+    clientCertificateBase64: clientCertificate.toString("base64"),
+    clientFingerprint: new X509Certificate(clientCertificate).fingerprint256.replaceAll(
+      ":",
+      "",
+    ),
+    clientPrivateKeyBase64: readFileSync(
+      join(tlsFixtureDirectory, "client.key.pem"),
+    ).toString("base64"),
+    serverCertificateBase64: serverCertificate.toString("base64"),
+    serverPrivateKeyBase64: readFileSync(
+      join(tlsFixtureDirectory, "server.key.pem"),
+    ).toString("base64"),
+  };
+});
+
+afterAll(() => {
+  if (tlsFixtureDirectory !== undefined) {
+    rmSync(tlsFixtureDirectory, { force: true, recursive: true });
+  }
+});
+
+function getTlsFixture(): TlsFixture {
+  if (tlsFixture === undefined) {
+    throw new Error("TLS fixture was not initialized");
+  }
+  return tlsFixture;
+}
+
+function independentKeyBase64(seed: number): string {
+  return Buffer.from(
+    Array.from({ length: 32 }, (_, index) => (seed + index * 17) % 256),
+  ).toString("base64");
+}
+
+const actorCurrentKeyBase64 = independentKeyBase64(1);
+const actorPreviousKeyBase64 = independentKeyBase64(2);
+const actorReplayDigestKeyBase64 = independentKeyBase64(3);
+const accessTokenJtiDigestKeyBase64 = independentKeyBase64(4);
+
+function validActorAssertionEnvironment() {
+  return {
+    MCP_ACTOR_ASSERTION_CURRENT_KEY_BASE64: actorCurrentKeyBase64,
+    MCP_ACTOR_ASSERTION_CURRENT_KEY_VERSION: "2",
+    MCP_ACTOR_ASSERTION_PREVIOUS_KEYS: JSON.stringify({
+      1: {
+        keyBase64: actorPreviousKeyBase64,
+        verificationExpiresAt: "2030-01-01T00:00:00.000Z",
+      },
+    }),
+  } as const;
+}
+
+function validMcpRuntimeEnvironment() {
+  const fixture = getTlsFixture();
+  return {
+    ...validActorAssertionEnvironment(),
+    MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64: accessTokenJtiDigestKeyBase64,
+    MCP_INTERNAL_API_CLIENT_CERT_PEM_BASE64: fixture.clientCertificateBase64,
+    MCP_INTERNAL_API_CLIENT_KEY_PEM_BASE64: fixture.clientPrivateKeyBase64,
+    MCP_INTERNAL_API_SERVER_CA_PEM_BASE64: fixture.serverCertificateBase64,
+    MCP_INTERNAL_API_URL: "https://127.0.0.1:4443",
+    MCP_OAUTH_ISSUER: "http://127.0.0.1:5556/",
+    MCP_OAUTH_JWKS_URI: "http://127.0.0.1:5556/jwks.json",
+    MCP_RESOURCE: "http://127.0.0.1:4100/mcp",
+    MCP_RUNTIME_ENABLED: "true",
+    REDIS_URL: baseEnvironment.REDIS_URL,
+  } as const;
+}
+
+function validMcpInternalApiEnvironment() {
+  const fixture = getTlsFixture();
+  return {
+    ...baseEnvironment,
+    ...validActorAssertionEnvironment(),
+    MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64: accessTokenJtiDigestKeyBase64,
+    MCP_ACTOR_ASSERTION_REPLAY_DIGEST_KEY_BASE64: actorReplayDigestKeyBase64,
+    MCP_INTERNAL_API_ALLOWED_CLIENT_CERT_SHA256_FINGERPRINTS: fixture.clientFingerprint,
+    MCP_INTERNAL_API_CLIENT_CA_PEM_BASE64: fixture.clientCertificateBase64,
+    MCP_INTERNAL_API_ENABLED: "true",
+    MCP_INTERNAL_API_SERVER_CERT_PEM_BASE64: fixture.serverCertificateBase64,
+    MCP_INTERNAL_API_SERVER_KEY_PEM_BASE64: fixture.serverPrivateKeyBase64,
+  } as const;
+}
 
 describe("environment parsing", () => {
   it("coerces bounded numeric values and applies safe defaults", () => {
@@ -147,6 +278,10 @@ describe("environment parsing", () => {
     expect(result.SEARCH_EMBEDDING_MODEL_ID).toBe("amazon.titan-embed-text-v2:0");
     expect(result.SEARCH_EMBEDDING_DIMENSIONS).toBe(512);
     expect(result.SEARCH_EMBEDDING_TIMEOUT_MS).toBe(5_000);
+    expect(result.MCP_INTERNAL_API_ENABLED).toBe(false);
+    expect(result.MCP_INTERNAL_API_PORT).toBe(4_443);
+    expect(result.MCP_ACTOR_ASSERTION_CURRENT_KEY_BASE64).toBeUndefined();
+    expect(result.MCP_ACTOR_ASSERTION_PREVIOUS_KEYS).toEqual({});
   });
 
   it("enables the Admin API only with an atomic strong workforce OIDC configuration", () => {
@@ -401,6 +536,301 @@ describe("environment parsing", () => {
   });
 });
 
+describe("Remote MCP private transport environment parsing", () => {
+  it("keeps private API secrets optional while the listener is disabled", () => {
+    const result = loadApiEnvironment(baseEnvironment);
+
+    expect(result.MCP_INTERNAL_API_ENABLED).toBe(false);
+    expect(result.MCP_INTERNAL_API_PORT).toBe(4_443);
+    expect(result.MCP_INTERNAL_API_SERVER_CERT_PEM_BASE64).toBeUndefined();
+    expect(result.MCP_ACTOR_ASSERTION_REPLAY_DIGEST_KEY_BASE64).toBeUndefined();
+    expect(result.MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64).toBeUndefined();
+  });
+
+  it("loads and normalizes the complete private API mTLS and assertion tuple", () => {
+    const input = validMcpInternalApiEnvironment();
+    const result = loadApiEnvironment(input);
+
+    expect(result.MCP_INTERNAL_API_ENABLED).toBe(true);
+    expect(Buffer.isBuffer(result.MCP_INTERNAL_API_SERVER_CERT_PEM_BASE64)).toBe(true);
+    expect(Buffer.isBuffer(result.MCP_INTERNAL_API_SERVER_KEY_PEM_BASE64)).toBe(true);
+    expect(Buffer.isBuffer(result.MCP_INTERNAL_API_CLIENT_CA_PEM_BASE64)).toBe(true);
+    expect(result.MCP_INTERNAL_API_ALLOWED_CLIENT_CERT_SHA256_FINGERPRINTS).toEqual([
+      input.MCP_INTERNAL_API_ALLOWED_CLIENT_CERT_SHA256_FINGERPRINTS,
+    ]);
+    expect(result.MCP_ACTOR_ASSERTION_CURRENT_KEY_VERSION).toBe(2);
+    expect(Buffer.isBuffer(result.MCP_ACTOR_ASSERTION_CURRENT_KEY_BASE64)).toBe(true);
+    expect(result.MCP_ACTOR_ASSERTION_PREVIOUS_KEYS["1"]?.verificationExpiresAt).toEqual(
+      new Date("2030-01-01T00:00:00.000Z"),
+    );
+    expect(Buffer.isBuffer(result.MCP_ACTOR_ASSERTION_REPLAY_DIGEST_KEY_BASE64)).toBe(
+      true,
+    );
+    expect(Buffer.isBuffer(result.MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64)).toBe(true);
+  });
+
+  it("accepts a complete preloaded private API tuple without enabling its listener", () => {
+    const result = loadApiEnvironment({
+      ...validMcpInternalApiEnvironment(),
+      MCP_INTERNAL_API_ENABLED: "false",
+    });
+
+    expect(result.MCP_INTERNAL_API_ENABLED).toBe(false);
+    expect(result.MCP_INTERNAL_API_SERVER_CERT_PEM_BASE64).toBeInstanceOf(Buffer);
+  });
+
+  it("fails closed on incomplete listener, mTLS, assertion, or replay tuples", () => {
+    const complete = validMcpInternalApiEnvironment();
+    const invalidInputs = [
+      { ...baseEnvironment, MCP_INTERNAL_API_ENABLED: "true" },
+      { ...complete, MCP_INTERNAL_API_SERVER_CERT_PEM_BASE64: undefined },
+      { ...complete, MCP_INTERNAL_API_SERVER_KEY_PEM_BASE64: undefined },
+      { ...complete, MCP_INTERNAL_API_CLIENT_CA_PEM_BASE64: undefined },
+      {
+        ...complete,
+        MCP_INTERNAL_API_ALLOWED_CLIENT_CERT_SHA256_FINGERPRINTS: "",
+      },
+      { ...complete, MCP_ACTOR_ASSERTION_CURRENT_KEY_VERSION: undefined },
+      { ...complete, MCP_ACTOR_ASSERTION_CURRENT_KEY_BASE64: undefined },
+      { ...complete, MCP_ACTOR_ASSERTION_REPLAY_DIGEST_KEY_BASE64: undefined },
+      { ...complete, MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64: undefined },
+    ];
+
+    for (const input of invalidInputs) {
+      expect(() => loadApiEnvironment(input)).toThrow(EnvironmentValidationError);
+    }
+  });
+
+  it("rejects invalid TLS material, a mismatched key, and non-canonical fingerprints", () => {
+    const complete = validMcpInternalApiEnvironment();
+    const fixture = getTlsFixture();
+    const invalidCertificate = Buffer.from("not a PEM certificate").toString("base64");
+
+    expect(() =>
+      loadApiEnvironment({
+        ...complete,
+        MCP_INTERNAL_API_SERVER_CERT_PEM_BASE64: invalidCertificate,
+      }),
+    ).toThrow(EnvironmentValidationError);
+    expect(() =>
+      loadApiEnvironment({
+        ...complete,
+        MCP_INTERNAL_API_SERVER_KEY_PEM_BASE64: fixture.clientPrivateKeyBase64,
+      }),
+    ).toThrow(EnvironmentValidationError);
+    expect(() =>
+      loadApiEnvironment({
+        ...complete,
+        MCP_INTERNAL_API_ALLOWED_CLIENT_CERT_SHA256_FINGERPRINTS:
+          fixture.clientFingerprint.toLowerCase(),
+      }),
+    ).toThrow(EnvironmentValidationError);
+    expect(() =>
+      loadApiEnvironment({
+        ...complete,
+        MCP_INTERNAL_API_ALLOWED_CLIENT_CERT_SHA256_FINGERPRINTS: `${fixture.clientFingerprint},${fixture.clientFingerprint}`,
+      }),
+    ).toThrow(EnvironmentValidationError);
+  });
+
+  it("requires a dedicated listener port and independent assertion secrets", () => {
+    const complete = validMcpInternalApiEnvironment();
+
+    expect(() =>
+      loadApiEnvironment({
+        ...complete,
+        MCP_INTERNAL_API_PORT: "4000",
+      }),
+    ).toThrow(EnvironmentValidationError);
+    expect(() =>
+      loadApiEnvironment({
+        ...complete,
+        MCP_ACTOR_ASSERTION_REPLAY_DIGEST_KEY_BASE64: actorCurrentKeyBase64,
+      }),
+    ).toThrow(EnvironmentValidationError);
+    expect(() =>
+      loadApiEnvironment({
+        ...complete,
+        MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64: actorReplayDigestKeyBase64,
+      }),
+    ).toThrow(EnvironmentValidationError);
+    expect(() =>
+      loadApiEnvironment({
+        ...complete,
+        MCP_ACTOR_ASSERTION_PREVIOUS_KEYS: JSON.stringify({
+          1: {
+            keyBase64: actorCurrentKeyBase64,
+            verificationExpiresAt: "2030-01-01T00:00:00.000Z",
+          },
+        }),
+      }),
+    ).toThrow(EnvironmentValidationError);
+  });
+
+  it("normalizes previous-key cutoffs without requiring them to remain in the future", () => {
+    const complete = validMcpInternalApiEnvironment();
+    const previousEntry = {
+      keyBase64: actorPreviousKeyBase64,
+      verificationExpiresAt: "2030-01-01T00:00:00.000Z",
+    };
+    const expired = loadApiEnvironment({
+      ...complete,
+      MCP_ACTOR_ASSERTION_PREVIOUS_KEYS: JSON.stringify({
+        1: {
+          keyBase64: actorPreviousKeyBase64,
+          verificationExpiresAt: "2020-01-01T00:00:00.000Z",
+        },
+      }),
+    });
+    expect(expired.MCP_ACTOR_ASSERTION_PREVIOUS_KEYS["1"]?.verificationExpiresAt).toEqual(
+      new Date("2020-01-01T00:00:00.000Z"),
+    );
+
+    expect(() =>
+      loadApiEnvironment({
+        ...complete,
+        MCP_ACTOR_ASSERTION_PREVIOUS_KEYS: JSON.stringify({
+          1: {
+            keyBase64: actorPreviousKeyBase64,
+            verificationExpiresAt: "2030-01-01T00:00:00Z",
+          },
+        }),
+      }),
+    ).toThrow(EnvironmentValidationError);
+    expect(() =>
+      loadApiEnvironment({
+        ...complete,
+        MCP_ACTOR_ASSERTION_PREVIOUS_KEYS: `{"1":${JSON.stringify(previousEntry)},"1":${JSON.stringify(previousEntry)}}`,
+      }),
+    ).toThrow(EnvironmentValidationError);
+    expect(() =>
+      loadApiEnvironment({
+        ...complete,
+        MCP_ACTOR_ASSERTION_CURRENT_KEY_VERSION: "1",
+      }),
+    ).toThrow(EnvironmentValidationError);
+  });
+
+  it("keeps MCP runtime independent from public exposure and decodes its full tuple", () => {
+    const result = loadMcpEnvironment(validMcpRuntimeEnvironment());
+
+    expect(result.MCP_RUNTIME_ENABLED).toBe(true);
+    expect(result.MCP_PUBLIC_ENABLED).toBe(false);
+    expect(result.MCP_INTERNAL_API_URL).toBe("https://127.0.0.1:4443");
+    expect(result.MCP_INTERNAL_API_TIMEOUT_MS).toBe(5_000);
+    expect(result.MCP_INTERNAL_API_MAX_RESPONSE_BYTES).toBe(4 * 1_024 * 1_024);
+    expect(Buffer.isBuffer(result.MCP_INTERNAL_API_CLIENT_CERT_PEM_BASE64)).toBe(true);
+    expect(Buffer.isBuffer(result.MCP_INTERNAL_API_CLIENT_KEY_PEM_BASE64)).toBe(true);
+    expect(Buffer.isBuffer(result.MCP_INTERNAL_API_SERVER_CA_PEM_BASE64)).toBe(true);
+    expect(Buffer.isBuffer(result.MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64)).toBe(true);
+  });
+
+  it("allows a complete runtime tuple to be preloaded while runtime remains disabled", () => {
+    const result = loadMcpEnvironment({
+      ...validMcpRuntimeEnvironment(),
+      MCP_RUNTIME_ENABLED: "false",
+    });
+
+    expect(result.MCP_RUNTIME_ENABLED).toBe(false);
+    expect(result.MCP_RESOURCE).toBe("http://127.0.0.1:4100/mcp");
+  });
+
+  it("requires runtime before public exposure and rejects every partial runtime tuple", () => {
+    const complete = validMcpRuntimeEnvironment();
+    expect(() =>
+      loadMcpEnvironment({
+        ...complete,
+        MCP_PUBLIC_ENABLED: "true",
+        MCP_RUNTIME_ENABLED: "false",
+      }),
+    ).toThrow(EnvironmentValidationError);
+
+    const requiredKeys = [
+      "MCP_RESOURCE",
+      "MCP_OAUTH_ISSUER",
+      "MCP_OAUTH_JWKS_URI",
+      "MCP_INTERNAL_API_URL",
+      "MCP_INTERNAL_API_CLIENT_CERT_PEM_BASE64",
+      "MCP_INTERNAL_API_CLIENT_KEY_PEM_BASE64",
+      "MCP_INTERNAL_API_SERVER_CA_PEM_BASE64",
+      "MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64",
+      "MCP_ACTOR_ASSERTION_CURRENT_KEY_BASE64",
+      "MCP_ACTOR_ASSERTION_CURRENT_KEY_VERSION",
+    ] as const;
+    for (const key of requiredKeys) {
+      expect(() =>
+        loadMcpEnvironment({
+          ...complete,
+          [key]: undefined,
+        }),
+      ).toThrow(EnvironmentValidationError);
+    }
+  });
+
+  it("rejects non-canonical internal and OAuth URLs and cleartext production OAuth", () => {
+    const complete = validMcpRuntimeEnvironment();
+    for (const override of [
+      { MCP_INTERNAL_API_URL: "http://127.0.0.1:4443" },
+      { MCP_INTERNAL_API_URL: "https://127.0.0.1:4443/internal/mcp" },
+      { MCP_OAUTH_ISSUER: "http://oauth.internal/" },
+      { MCP_OAUTH_JWKS_URI: "https://oauth.example/jwks.json?version=1" },
+      { MCP_RESOURCE: "https://MCP.alphanet.example/mcp" },
+    ]) {
+      expect(() => loadMcpEnvironment({ ...complete, ...override })).toThrow(
+        EnvironmentValidationError,
+      );
+    }
+    expect(() =>
+      loadMcpEnvironment({
+        ...complete,
+        NODE_ENV: "production",
+        REDIS_URL: "rediss://cache.example.com:6379/0",
+      }),
+    ).toThrow(EnvironmentValidationError);
+  });
+
+  it("bounds the internal client and rejects mismatched or reused key material", () => {
+    const complete = validMcpRuntimeEnvironment();
+    const fixture = getTlsFixture();
+    expect(() =>
+      loadMcpEnvironment({ ...complete, MCP_INTERNAL_API_TIMEOUT_MS: "99" }),
+    ).toThrow(EnvironmentValidationError);
+    expect(() =>
+      loadMcpEnvironment({ ...complete, MCP_INTERNAL_API_TIMEOUT_MS: "30000" }),
+    ).toThrow(EnvironmentValidationError);
+    expect(() =>
+      loadMcpEnvironment({ ...complete, MCP_INTERNAL_API_MAX_RESPONSE_BYTES: "1023" }),
+    ).toThrow(EnvironmentValidationError);
+    expect(() =>
+      loadMcpEnvironment({
+        ...complete,
+        MCP_INTERNAL_API_CLIENT_KEY_PEM_BASE64: fixture.serverPrivateKeyBase64,
+      }),
+    ).toThrow(EnvironmentValidationError);
+    expect(() =>
+      loadMcpEnvironment({
+        ...complete,
+        MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64: actorCurrentKeyBase64,
+      }),
+    ).toThrow(EnvironmentValidationError);
+    expect(() =>
+      loadMcpEnvironment({
+        ...complete,
+        MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64: Buffer.alloc(32).toString("base64"),
+      }),
+    ).toThrow(EnvironmentValidationError);
+    expect(() =>
+      loadMcpEnvironment({
+        ...complete,
+        MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64: accessTokenJtiDigestKeyBase64.replace(
+          /=+$/,
+          "",
+        ),
+      }),
+    ).toThrow(EnvironmentValidationError);
+  });
+});
+
 describe("Owner authentication environment parsing", () => {
   it("loads the safe local-preview configuration and bounded capacity defaults", () => {
     const result = loadAuthEnvironment(localAuthEnvironment);
@@ -552,6 +982,7 @@ describe("Owner authentication environment parsing", () => {
       REDIS_URL: "rediss://alphanet-runtime:secret@cache.example.com:6379/0",
     });
     expect(mcp.REDIS_URL).toMatch(/^rediss:/);
+    expect(mcp.MCP_RUNTIME_ENABLED).toBe(false);
     expect(mcp.MCP_PUBLIC_ENABLED).toBe(false);
     expect(mcp.MCP_RESOURCE).toBeUndefined();
   });
@@ -565,22 +996,22 @@ describe("Owner authentication environment parsing", () => {
     ).toThrow(EnvironmentValidationError);
 
     const local = loadMcpEnvironment({
+      ...validMcpRuntimeEnvironment(),
       MCP_PUBLIC_ENABLED: "true",
-      MCP_RESOURCE: "http://127.0.0.1:4100/mcp",
-      REDIS_URL: baseEnvironment.REDIS_URL,
     });
     expect(local.MCP_RESOURCE).toBe("http://127.0.0.1:4100/mcp");
 
     expect(() =>
       loadMcpEnvironment({
+        ...validMcpRuntimeEnvironment(),
         MCP_PUBLIC_ENABLED: "true",
         MCP_RESOURCE: "https://MCP.alphanet.example/mcp",
-        REDIS_URL: baseEnvironment.REDIS_URL,
       }),
     ).toThrow(EnvironmentValidationError);
 
     expect(() =>
       loadMcpEnvironment({
+        ...validMcpRuntimeEnvironment(),
         MCP_PUBLIC_ENABLED: "true",
         MCP_RESOURCE: "https://mcp.alphanet.example/mcp",
         NODE_ENV: "production",
@@ -589,8 +1020,11 @@ describe("Owner authentication environment parsing", () => {
     ).toThrow(EnvironmentValidationError);
 
     const production = loadMcpEnvironment({
+      ...validMcpRuntimeEnvironment(),
       MCP_PUBLIC_ENABLED: "true",
       MCP_RESOURCE: "https://mcp.alphanet.example/mcp",
+      MCP_OAUTH_ISSUER: "https://auth.alphanet.example/",
+      MCP_OAUTH_JWKS_URI: "https://auth.alphanet.example/jwks.json",
       MCP_TRUSTED_PROXY_CIDRS: "10.20.0.0/16,fd00:1234::/48",
       NODE_ENV: "production",
       REDIS_URL: "rediss://alphanet-runtime:secret@cache.example.com:6379/0",

@@ -6,29 +6,32 @@ import {
   AgentPolicyRulesSchema,
   RotateCredentialRequestSchema,
   UpdateAgentRequestSchema,
-  type AgentContextResponse,
   type AgentCredentialSummary,
-  type AgentEffectiveCapabilities,
   type AgentPolicySummary,
-  type V1ErrorDetail,
   type OwnerAgentSummary,
   type PublicAgentProfileResponse,
-  type V1ErrorResponse,
 } from "@alphanet/contracts";
 import {
   AgentConnectionError,
   type AgentActivationReason,
   type AgentConnectionService,
-  type AgentCredentialContext,
   type AgentOperation,
   type AgentPolicyView,
   type CredentialView,
-  evaluateAgentOperation,
   materializeAgentPolicyRules,
   type OwnerAgentView,
 } from "@alphanet/domain";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
+
+import { projectAgentContext } from "./agent-context-projection.js";
+import {
+  agentBearerCredential,
+  authorizeAuthenticatedAgentRequest,
+} from "./agent-request.js";
+import { v1Error } from "./v1-error.js";
+
+export { v1Error } from "./v1-error.js";
 
 export interface AgentConnectionRouteOptions {
   allowedOrigins: readonly string[];
@@ -68,34 +71,6 @@ function toSessionHeaders(request: FastifyRequest): Headers {
     headers.set("user-agent", userAgent);
   }
   return headers;
-}
-
-export function v1Error(
-  request: FastifyRequest,
-  options: {
-    code: string;
-    message: string;
-    retryable?: boolean | undefined;
-    retryAt?: Date | undefined;
-    details?: V1ErrorDetail["details"] | undefined;
-  },
-): V1ErrorResponse {
-  const retryAfterMilliseconds = options.retryAt
-    ? Math.max(1, options.retryAt.valueOf() - Date.now())
-    : null;
-  return {
-    error: {
-      code: options.code,
-      message: options.message,
-      retryable: options.retryable ?? false,
-      details:
-        options.details ??
-        (options.retryAt ? { retry_at: options.retryAt.toISOString() } : null),
-      retry_after_ms: retryAfterMilliseconds,
-    },
-    request_id: request.id,
-    schema_version: "1",
-  };
 }
 
 function validationFailed(request: FastifyRequest, reply: FastifyReply): FastifyReply {
@@ -346,92 +321,6 @@ function activationResult(reason: AgentActivationReason | null) {
         ? ("owner_active_agent_quota_exceeded" as const)
         : ("global_active_agent_capacity_exceeded" as const),
   };
-}
-
-function capability(available: boolean, decision: "allow" | "require_approval" | "deny") {
-  return { available, default_decision: decision };
-}
-
-function effectiveCapabilities(
-  context: AgentCredentialContext,
-  availableOperations: readonly AgentOperation[] = ["get_agent_context"],
-): AgentEffectiveCapabilities {
-  const available = new Set<AgentOperation>(availableOperations);
-  const decision = (
-    operation: Parameters<typeof evaluateAgentOperation>[0]["operation"],
-  ) =>
-    evaluateAgentOperation({
-      credentialPolicyCeiling: context.credential.policyCeiling,
-      credentialPolicyCeilingDefaultsVersion:
-        context.credential.policyCeilingDefaultsVersion,
-      credentialPolicyCeilingRules: context.credential.policyCeilingRules,
-      credentialPolicyCeilingSchemaVersion: context.credential.policyCeilingSchemaVersion,
-      operation,
-      policyDefaultsVersion: context.agent.policy.defaultsVersion,
-      policyRules: context.agent.policy.rules,
-      policySchemaVersion: context.agent.policy.schemaVersion,
-      policyTier: context.agent.policy.tier,
-      scopes: context.credential.scopes,
-    }).decision;
-
-  return {
-    get_agent_context: capability(available.has("get_agent_context"), "allow"),
-    find_communities: capability(
-      available.has("find_communities"),
-      decision("find_communities"),
-    ),
-    get_community: capability(available.has("get_community"), decision("get_community")),
-    browse_content: capability(
-      available.has("browse_content"),
-      decision("browse_content"),
-    ),
-    search_content: capability(
-      available.has("search_content"),
-      decision("search_content"),
-    ),
-    get_content: capability(available.has("get_content"), decision("get_content")),
-    get_discussion: capability(
-      available.has("get_discussion"),
-      decision("get_discussion"),
-    ),
-    list_notifications: capability(
-      available.has("list_notifications"),
-      decision("list_notifications"),
-    ),
-    get_action_status: capability(
-      available.has("get_action_status"),
-      decision("get_action_status"),
-    ),
-    create_post: capability(available.has("create_post"), decision("create_post")),
-    reply_to_content: capability(
-      available.has("reply_to_content"),
-      decision("reply_to_content"),
-    ),
-    update_content: capability(
-      available.has("update_content"),
-      decision("update_content"),
-    ),
-    delete_content: capability(
-      available.has("delete_content"),
-      decision("delete_content"),
-    ),
-    set_reaction: capability(available.has("set_reaction"), decision("set_reaction")),
-    set_follow: capability(available.has("set_follow"), decision("set_follow")),
-    list_follows: capability(available.has("list_follows"), decision("list_follows")),
-  };
-}
-
-function bearerToken(request: FastifyRequest): string | null {
-  const url = new URL(request.url, "http://alphanet.invalid");
-  if (["access_token", "api_key", "token"].some((name) => url.searchParams.has(name))) {
-    return null;
-  }
-  const authorization = request.headers.authorization;
-  if (!authorization) {
-    return null;
-  }
-  const match = /^Bearer ([^\s]+)$/.exec(authorization);
-  return match?.[1] ?? null;
 }
 
 export function registerAgentConnectionRoutes(
@@ -701,7 +590,7 @@ export function registerAgentConnectionRoutes(
     ) {
       return reply;
     }
-    const token = bearerToken(request);
+    const token = agentBearerCredential(request);
     if (!token) {
       return reply.code(401).send(
         v1Error(request, {
@@ -712,49 +601,23 @@ export function registerAgentConnectionRoutes(
     }
     try {
       const context = await options.service.authenticateStaticApiKey(token);
-      if (
-        !(await consumeLimit(
-          request,
-          reply,
-          options,
-          `credential:${context.credential.id}:agent-context`,
-          { max: 120, window: 60 },
-        ))
-      ) {
+      const authorization = await authorizeAuthenticatedAgentRequest(
+        request,
+        reply,
+        context,
+        {
+          operation: "get_agent_context",
+          policyEnforcement: "domain",
+          ...(options.rateLimiter ? { rateLimiter: options.rateLimiter } : {}),
+        },
+      );
+      if (!authorization) {
         return reply;
       }
-      const now = new Date();
-      const response: AgentContextResponse = {
-        schema_version: "1",
-        request_id: request.id,
-        agent: {
-          id: context.agent.id,
-          actor_id: context.agent.actorId,
-          handle: context.agent.handle,
-          display_name: context.agent.displayName,
-        },
-        owner: { id: context.owner.id },
-        credential: {
-          id: context.credential.id,
-          name: context.credential.name,
-          scopes: context.credential.scopes,
-          audience: context.credential.audience,
-          expires_at: context.credential.expiresAt?.toISOString() ?? null,
-        },
-        permission_tier: context.agent.policy.tier,
-        policy_version: `${context.agent.policy.id}:${context.agent.policy.version}`,
-        effective_capabilities: effectiveCapabilities(
-          context,
-          options.availableOperations,
-        ),
-        quota: {
-          status: "not_projected",
-          window_ends_at: null,
-          writes_remaining: null,
-        },
-        server_time: now.toISOString(),
-      };
-      return response;
+      return projectAgentContext(authorization.context, {
+        availableOperations: options.availableOperations,
+        requestId: request.id,
+      });
     } catch (error) {
       return sendConnectionError(request, reply, error);
     }

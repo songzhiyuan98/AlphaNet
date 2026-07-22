@@ -5,6 +5,7 @@ import type { Request } from "express";
 
 const maximumForwardedChainLength = 1_024;
 const maximumForwardedAddresses = 20;
+const trustedViewerIpHeader = "x-alphanet-viewer-ip";
 
 export class InvalidForwardedForError extends Error {
   constructor() {
@@ -40,6 +41,23 @@ function forwardedAddresses(value: string | string[] | undefined): string[] | nu
   return addresses;
 }
 
+function singleRawHeader(
+  request: Request,
+  expectedName: string,
+): string | null | undefined {
+  const values: string[] = [];
+  for (let index = 0; index < request.rawHeaders.length; index += 2) {
+    const name = request.rawHeaders[index];
+    const value = request.rawHeaders[index + 1];
+    if (name?.toLowerCase() === expectedName && typeof value === "string") {
+      values.push(value);
+    }
+  }
+  const normalized = request.headers[expectedName];
+  if (values.length === 0 && normalized === undefined) return undefined;
+  return values.length === 1 && normalized === values[0] ? values[0]! : null;
+}
+
 /**
  * Resolves the first untrusted address from the right of the ALB/proxy chain.
  * X-Forwarded-For is ignored unless the direct socket peer is trusted.
@@ -59,7 +77,22 @@ export function createMcpClientIpResolver(
     }
 
     const forwardedHeader = request.headers["x-forwarded-for"];
-    if (forwardedHeader === undefined || !trustProxy(peerAddress, 0)) {
+    if (!trustProxy(peerAddress, 0)) {
+      return normalizedAddress(peerAddress);
+    }
+
+    // CloudFront overwrites this header with event.viewer.ip before the
+    // request reaches the origin. Trust it only from the configured ALB peer;
+    // this avoids treating the CloudFront origin node as the rate-limit actor.
+    const trustedViewerIp = singleRawHeader(request, trustedViewerIpHeader);
+    if (trustedViewerIp === null || (trustedViewerIp && isIP(trustedViewerIp) === 0)) {
+      throw new InvalidForwardedForError();
+    }
+    if (trustedViewerIp) {
+      return normalizedAddress(trustedViewerIp);
+    }
+
+    if (forwardedHeader === undefined) {
       return normalizedAddress(peerAddress);
     }
 

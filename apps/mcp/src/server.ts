@@ -11,6 +11,7 @@ import { createLogger } from "@alphanet/observability";
 import { createMcpApp } from "./app.js";
 import { createMcpClientIpResolver } from "./client-ip.js";
 import { configureMcpHttpServer, shutdownMcpHttpServer } from "./lifecycle.js";
+import { createMcpRuntimeAssembly } from "./runtime-assembly.js";
 
 async function start(): Promise<void> {
   const environment = loadMcpEnvironment();
@@ -19,23 +20,26 @@ async function start(): Promise<void> {
     environment: environment.NODE_ENV,
     level: environment.LOG_LEVEL,
   });
-  const dependencies: HealthDependency[] = [createRedisDependency(environment.REDIS_URL)];
+  const redis = createRedisDependency(environment.REDIS_URL, {
+    critical: environment.MCP_RUNTIME_ENABLED,
+  });
+  const dependencies: HealthDependency[] = [redis];
   let mcp: ReturnType<typeof createMcpApp> | undefined;
   let httpServer: ReturnType<typeof createServer> | undefined;
   try {
-    if (environment.MCP_PUBLIC_ENABLED) {
-      throw new Error(
-        "Public MCP cannot start until OAuth verification, rate limits, and real tools are wired",
-      );
+    if (environment.MCP_RUNTIME_ENABLED) {
+      // Connect before listening so the first authenticated request cannot
+      // race the Redis-backed protection boundary during process warm-up.
+      await redis.check();
     }
+    const runtime = createMcpRuntimeAssembly(environment, redis.client);
     mcp = createMcpApp({
+      ...runtime,
       allowedHosts: parseCommaSeparated(environment.MCP_ALLOWED_HOSTS),
       dependencies,
       host: environment.HOST,
       logger,
-      publicEnabled: environment.MCP_PUBLIC_ENABLED,
       resolveClientIp: createMcpClientIpResolver(environment.MCP_TRUSTED_PROXY_CIDRS),
-      ...(environment.MCP_RESOURCE ? { resource: environment.MCP_RESOURCE } : {}),
       version: environment.APP_VERSION,
     });
     httpServer = createServer(mcp.app);
@@ -50,7 +54,12 @@ async function start(): Promise<void> {
     });
 
     logger.info(
-      { host: environment.HOST, port: environment.PORT },
+      {
+        host: environment.HOST,
+        port: environment.PORT,
+        publicExposureEnabled: environment.MCP_PUBLIC_ENABLED,
+        runtimeEnabled: environment.MCP_RUNTIME_ENABLED,
+      },
       "MCP service listening",
     );
 

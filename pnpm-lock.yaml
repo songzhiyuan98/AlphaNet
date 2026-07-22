@@ -98,6 +98,9 @@ importers:
 
   apps/mcp:
     dependencies:
+      '@alphanet/auth':
+        specifier: workspace:*
+        version: link:../../packages/auth
       '@alphanet/config':
         specifier: workspace:*
         version: link:../../packages/config

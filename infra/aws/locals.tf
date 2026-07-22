@@ -39,6 +39,15 @@ locals {
     toset(["web", "api"]),
     var.mcp_public_enabled ? toset(["mcp"]) : toset([])
   )
+  alb_attached_service_configs = {
+    for service, config in local.load_balanced_services : service => config
+    if contains(local.alb_attached_services, service)
+  }
+  # Public exposure is a one-way promotion of the already-proven private
+  # runtime. Setting mcp_public_enabled can therefore never leave the runtime
+  # itself disabled.
+  mcp_runtime_enabled   = var.mcp_runtime_enabled || var.mcp_public_enabled
+  mcp_internal_api_port = 4443
 
   ecr_repository_prefix = var.ecr_repository_prefix
   ecr_repository_names = {
@@ -62,6 +71,8 @@ locals {
     "mcp",
     var.mcp_additional_allowed_hosts,
   ]))
+  mcp_internal_api_dns_name = "api.${aws_service_discovery_private_dns_namespace.main.name}"
+  mcp_resource              = local.mcp_runtime_enabled ? "${local.public_origin}/mcp" : ""
 
   github_oidc_subjects = var.github_oidc_subjects
 

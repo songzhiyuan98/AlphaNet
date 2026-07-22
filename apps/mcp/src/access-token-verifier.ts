@@ -1,3 +1,6 @@
+import { timingSafeEqual } from "node:crypto";
+
+import { digestInboundMcpTokenJti } from "@alphanet/auth";
 import { AGENT_SCOPES, type AgentScope } from "@alphanet/contracts";
 import {
   InvalidTokenError,
@@ -24,6 +27,8 @@ export interface RemoteMcpAccessTokenVerifierConfig {
   jwksUrl: string;
   /** Exact RFC 8707 resource identifier for this MCP deployment. */
   resource: string;
+  /** Independent 32-byte HMAC key used to bind the signed token jti to its digest. */
+  tokenJtiDigestKey: Uint8Array;
 }
 
 export interface RemoteMcpAccessTokenVerifierDependencies {
@@ -79,10 +84,17 @@ function canonicalOAuthUrl(value: string, field: string, resource: boolean): URL
   return url;
 }
 
-function validateConfig(config: RemoteMcpAccessTokenVerifierConfig): void {
+function validateConfig(config: RemoteMcpAccessTokenVerifierConfig): Uint8Array {
   canonicalOAuthUrl(config.issuer, "issuer", false);
   canonicalOAuthUrl(config.jwksUrl, "jwksUrl", false);
   canonicalOAuthUrl(config.resource, "resource", true);
+  if (
+    !(config.tokenJtiDigestKey instanceof Uint8Array) ||
+    config.tokenJtiDigestKey.byteLength !== 32
+  ) {
+    throw new Error("tokenJtiDigestKey must contain exactly 32 bytes");
+  }
+  return Uint8Array.from(config.tokenJtiDigestKey);
 }
 
 function canonicalUuid(value: unknown): value is string {
@@ -95,6 +107,14 @@ function canonicalTokenJtiDigest(value: unknown): value is string {
   }
   const decoded = Buffer.from(value, "base64url");
   return decoded.byteLength === 32 && decoded.toString("base64url") === value;
+}
+
+function tokenJtiDigestMatches(jti: string, providedDigest: string, key: Uint8Array) {
+  const expectedDigest = digestInboundMcpTokenJti(jti, key);
+  return timingSafeEqual(
+    Buffer.from(providedDigest, "base64url"),
+    Buffer.from(expectedDigest, "base64url"),
+  );
 }
 
 function canonicalClientId(value: unknown): value is string {
@@ -186,6 +206,7 @@ function validatePayload(
   payload: JWTPayload,
   issuer: string,
   resource: string,
+  tokenJtiDigestKey: Uint8Array,
 ): ValidatedAccessTokenPayload | null {
   const scopes = validatedDomainScopes(payload["scope"]);
   if (
@@ -204,6 +225,11 @@ function validatePayload(
     payload.exp - payload.iat !== REMOTE_MCP_ACCESS_TOKEN_TTL_SECONDS ||
     !canonicalTokenJtiDigest(payload["token_jti_digest"]) ||
     !scopes
+  ) {
+    return null;
+  }
+  if (
+    !tokenJtiDigestMatches(payload.jti, payload["token_jti_digest"], tokenJtiDigestKey)
   ) {
     return null;
   }
@@ -265,7 +291,7 @@ export function createRemoteMcpAccessTokenVerifier(
   config: RemoteMcpAccessTokenVerifierConfig,
   dependencies: RemoteMcpAccessTokenVerifierDependencies = {},
 ): OAuthTokenVerifier {
-  validateConfig(config);
+  const tokenJtiDigestKey = validateConfig(config);
   const issuer = config.issuer;
   const resource = config.resource;
   const now = dependencies.now;
@@ -309,7 +335,7 @@ export function createRemoteMcpAccessTokenVerifier(
         throw jwksDependencyFailure(error) ? verificationUnavailable() : invalidToken();
       }
 
-      const validated = validatePayload(payload, issuer, resource);
+      const validated = validatePayload(payload, issuer, resource, tokenJtiDigestKey);
       if (!validated) {
         throw invalidToken();
       }

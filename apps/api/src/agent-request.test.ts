@@ -92,9 +92,13 @@ interface RequestHarness {
 
 function requestHarness(options?: {
   authorization?: string | undefined;
+  rawHeaders?: readonly string[] | undefined;
   url?: string | undefined;
 }): RequestHarness {
   const errorLog = vi.fn();
+  const rawHeaders =
+    options?.rawHeaders ??
+    (options?.authorization ? ["authorization", options.authorization] : []);
   return {
     errorLog,
     request: {
@@ -102,6 +106,7 @@ function requestHarness(options?: {
       id: "request-1",
       ip: "203.0.113.10",
       log: { error: errorLog },
+      raw: { rawHeaders },
       url: options?.url ?? "/v1/test",
     } as unknown as FastifyRequest,
   };
@@ -161,6 +166,7 @@ async function runBoundary(options: {
   context?: AgentCredentialContext;
   operation?: AgentOperation;
   policyEnforcement?: AgentRequestBoundaryOptions["policyEnforcement"];
+  rawHeaders?: readonly string[] | undefined;
   rateLimitCategory?: AgentRequestBoundaryOptions["rateLimitCategory"];
   rateLimiter?: AgentRequestRateLimiter;
   service?: Pick<AgentConnectionService, "authenticateStaticApiKey">;
@@ -168,6 +174,7 @@ async function runBoundary(options: {
 }) {
   const request = requestHarness({
     authorization: options.authorization,
+    ...(options.rawHeaders ? { rawHeaders: options.rawHeaders } : {}),
     url: options.url,
   });
   const reply = replyHarness();
@@ -364,7 +371,16 @@ describe("authorizeAgentRequest", () => {
     expect(authenticateStaticApiKey).not.toHaveBeenCalled();
   });
 
-  it.each(["access_token", "api_key", "token", "ToKeN"])(
+  it.each([
+    "access_token",
+    "access-token",
+    "accessToken",
+    "api_key",
+    "api-key",
+    "apiKey",
+    "token",
+    "ToKeN",
+  ])(
     "rejects the %s query credential even when a valid header is present",
     async (parameter) => {
       const limiter = allowAllLimiter();
@@ -383,6 +399,48 @@ describe("authorizeAgentRequest", () => {
       expect(JSON.stringify(request.errorLog.mock.calls)).not.toContain("do-not-use");
     },
   );
+
+  it.each([
+    {
+      label: "duplicate Authorization fields",
+      rawHeaders: [
+        "Authorization",
+        `Bearer ${apiKey}`,
+        "Authorization",
+        `Bearer ${apiKey}`,
+      ],
+    },
+    {
+      label: "differently-cased duplicate Authorization fields",
+      rawHeaders: [
+        "Authorization",
+        `Bearer ${apiKey}`,
+        "authorization",
+        `Bearer ${apiKey}`,
+      ],
+    },
+    {
+      label: "a comma-folded Authorization field",
+      rawHeaders: ["Authorization", `Bearer ${apiKey}, Bearer ${apiKey}`],
+    },
+    {
+      label: "an obsolete line-folded Authorization field",
+      rawHeaders: ["Authorization", `Bearer ${apiKey}\r\n continuation`],
+    },
+  ])("rejects $label from raw headers", async ({ rawHeaders }) => {
+    const authenticateStaticApiKey = vi.fn(() => Promise.resolve(context()));
+    const { result, reply } = await runBoundary({
+      authorization: `Bearer ${apiKey}`,
+      rawHeaders,
+      rateLimiter: allowAllLimiter(),
+      service: serviceFor(authenticateStaticApiKey),
+    });
+
+    expect(result).toBeNull();
+    expect(reply.statusCode()).toBe(401);
+    expectV1Error(reply.payload(), "AUTHENTICATION_REQUIRED");
+    expect(authenticateStaticApiKey).not.toHaveBeenCalled();
+  });
 
   it("stops before authentication when the IP limit is exhausted", async () => {
     const consume = vi.fn(() => Promise.resolve({ allowed: false, retryAfter: 7 }));

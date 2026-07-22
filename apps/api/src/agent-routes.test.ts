@@ -921,6 +921,26 @@ describe("Agent Bearer and public routes", () => {
     expect(notYetAvailable.statusCode).toBe(404);
   });
 
+  it("shares aggregate Credential, Agent, and Owner budgets with other Agent transports", async () => {
+    const consume = vi.fn(() => Promise.resolve({ allowed: true, retryAfter: null }));
+    const { app } = await createApp({ rateLimiter: { consume } });
+
+    const response = await app.inject({
+      headers: { authorization: `Bearer ${apiKey}` },
+      method: "GET",
+      remoteAddress: "203.0.113.10",
+      url: "/v1/agent/context",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(consume.mock.calls).toEqual([
+      ["ip:203.0.113.10:agent-context", { max: 120, window: 60 }],
+      [`credential:${ids.credential}:agent-api`, { max: 120, window: 60 }],
+      [`agent:${ids.agent}:agent-api`, { max: 120, window: 60 }],
+      [`owner:${ids.owner}:agent-api`, { max: 120, window: 60 }],
+    ]);
+  });
+
   it("never expands a credential beyond its immutable policy ceiling", async () => {
     const service = createService();
     service.authenticateStaticApiKey.mockResolvedValueOnce({
@@ -1121,14 +1141,26 @@ describe("Agent Bearer and public routes", () => {
     });
   });
 
-  it("rejects API keys in query parameters without authenticating them", async () => {
+  it.each([
+    "access_token",
+    "access-token",
+    "accessToken",
+    "api_key",
+    "api-key",
+    "apiKey",
+    "token",
+    "ToKeN",
+  ])("rejects the %s query credential without authenticating it", async (parameter) => {
     const service = createService();
     const { app } = await createApp({ service });
 
     const response = await app.inject({
-      headers: { "x-request-id": "req-query-token" },
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "x-request-id": "req-query-token",
+      },
       method: "GET",
-      url: `/v1/agent/context?api_key=${encodeURIComponent(apiKey)}`,
+      url: `/v1/agent/context?${parameter}=${encodeURIComponent(apiKey)}`,
     });
 
     expect(response.statusCode).toBe(401);
@@ -1143,6 +1175,29 @@ describe("Agent Bearer and public routes", () => {
       request_id: "req-query-token",
       schema_version: "1",
     });
+    expect(response.body).not.toContain(apiKey);
+    expect(service.authenticateStaticApiKey).not.toHaveBeenCalled();
+  });
+
+  it("rejects duplicate Authorization fields before authentication", async () => {
+    const service = createService();
+    const { app } = await createApp({ service });
+
+    const response = await app.inject({
+      headers: {
+        // light-my-request supports repeated values at runtime, while Fastify's
+        // public inject type narrows request headers to a single string.
+        authorization: [`Bearer ${apiKey}`, `Bearer ${apiKey}`] as unknown as string,
+        "x-request-id": "req-duplicate-authorization",
+      },
+      method: "GET",
+      url: "/v1/agent/context",
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
+      "AUTHENTICATION_REQUIRED",
+    );
     expect(response.body).not.toContain(apiKey);
     expect(service.authenticateStaticApiKey).not.toHaveBeenCalled();
   });
