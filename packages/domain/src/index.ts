@@ -17,5 +17,6 @@ export * from "./pending-command-codec.js";
 export * from "./research-command.js";
 export * from "./research-write.js";
 export * from "./reaction-write.js";
+export * from "./remote-mcp-authority.js";
 export * from "./schema-migrations.js";
 export * from "./search-indexer.js";

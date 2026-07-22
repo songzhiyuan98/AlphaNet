@@ -141,6 +141,36 @@ export interface CredentialView {
   status: CredentialStatus;
 }
 
+/**
+ * Request authority derived from an OAuth Grant. OAuth credentials never have
+ * a static-key prefix; keeping this separate from CredentialView preserves the
+ * Owner credential-management contract while making Agent request context
+ * truthful about the credential that authorized it.
+ */
+export interface OAuthGrantCredentialContext {
+  id: string;
+  ownerId: string;
+  agentId: string;
+  name: string;
+  type: "oauth_grant";
+  prefix: null;
+  scopes: AgentScope[];
+  audience: string;
+  policyCeiling: AgentPolicyTier;
+  policyCeilingDefaultsVersion: string;
+  policyCeilingRules: AgentPolicyRules;
+  policyCeilingSchemaVersion: number;
+  issuedAt: Date;
+  expiresAt: Date;
+  lastUsedAt: Date | null;
+  revokedAt: null;
+  replacesCredentialId: null;
+  status: "active";
+}
+
+export type AgentAuthorityCredentialContext =
+  CredentialView | OAuthGrantCredentialContext;
+
 export interface CreateCredentialInput {
   name: string;
   scopes: AgentScope[];
@@ -158,7 +188,7 @@ export interface CredentialSecretResult {
 
 export interface AgentCredentialContext {
   agent: OwnerAgentView;
-  credential: CredentialView;
+  credential: AgentAuthorityCredentialContext;
   owner: {
     id: string;
   };

@@ -8,6 +8,10 @@ import {
   createPostgresDependency,
   type HealthDependency,
 } from "../../packages/database/src/index.js";
+import {
+  PostgresRemoteMcpAuthorityService,
+  type RemoteMcpActorAuthorityInput,
+} from "../../packages/domain/src/remote-mcp-authority.js";
 
 const databaseUrl = process.env.DATABASE_URL;
 const mustRun = process.env.REQUIRE_INTEGRATION_SERVICES === "true";
@@ -29,6 +33,13 @@ interface OwnerAgentFixture {
   authUserId: string;
   ownerId: string;
   sessionId: string;
+}
+
+interface ActiveRemoteMcpAuthorityFixture {
+  clientId: string;
+  input: RemoteMcpActorAuthorityInput;
+  jtiId: string;
+  grantExpiresAt: Date;
 }
 
 function requireId(value: string | undefined, label: string): string {
@@ -382,6 +393,99 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
       )
     `;
     return { credentialId, expiresAt: absoluteExpiresAt, grantId };
+  }
+
+  async function createActiveAuthority(
+    label: string,
+  ): Promise<ActiveRemoteMcpAuthorityFixture> {
+    const authorityClientId = `${clientId}-authority-${label}-${randomUUID().slice(0, 8)}`;
+    await insertClient(authorityClientId);
+
+    const authorizationRequestId = await createAuthorizationRequest(authorityClientId);
+    await selectAgent(authorizationRequestId, primary);
+    const grant = await createPendingGrant(
+      authorizationRequestId,
+      primary,
+      authorityClientId,
+    );
+    const consentedAt = new Date();
+    await postgres.sql`
+      insert into auth.oauth_consents (
+        id,
+        client_id,
+        user_id,
+        reference_id,
+        scopes,
+        created_at,
+        updated_at
+      )
+      values (
+        ${randomUUID()},
+        ${authorityClientId},
+        ${primary.authUserId},
+        ${grant.grantId},
+        ${postgres.sql.json([...providerScopes])},
+        ${consentedAt},
+        ${consentedAt}
+      )
+    `;
+    await postgres.sql`
+      update platform.oauth_authorization_requests
+      set status = 'consumed',
+          grant_id = ${grant.grantId}
+      where id = ${authorizationRequestId}
+    `;
+    await postgres.sql`
+      update platform.oauth_grants
+      set status = 'active'
+      where id = ${grant.grantId}
+    `;
+
+    const issuedAt = new Date(Math.floor(Date.now() / 1_000) * 1_000);
+    const jtiId = randomUUID();
+    const jtiDigest = digest();
+    await postgres.sql`
+      insert into platform.oauth_access_token_jtis (
+        id,
+        jti_digest,
+        grant_id,
+        owner_id,
+        agent_id,
+        grant_epoch,
+        oauth_client_id,
+        resource,
+        scopes,
+        issued_at,
+        expires_at,
+        created_at
+      )
+      values (
+        ${jtiId},
+        ${jtiDigest},
+        ${grant.grantId},
+        ${primary.ownerId},
+        ${primary.agentId},
+        1,
+        ${authorityClientId},
+        ${resource},
+        ${[...domainScopes]},
+        ${issuedAt},
+        ${new Date(issuedAt.valueOf() + 9 * 60 * 1_000)},
+        ${issuedAt}
+      )
+    `;
+
+    return {
+      clientId: authorityClientId,
+      grantExpiresAt: grant.expiresAt,
+      input: {
+        credentialId: grant.credentialId,
+        grantId: grant.grantId,
+        scopes: [...domainScopes],
+        tokenJtiDigest: jtiDigest.toString("base64url"),
+      },
+      jtiId,
+    };
   }
 
   beforeAll(async () => {
@@ -1678,5 +1782,112 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
         where id = ${grantId}
       `,
     ).rejects.toMatchObject({ code: "22023" });
+  });
+
+  it("revalidates a live OAuth authority into a truthful Agent context", async () => {
+    const fixture = await createActiveAuthority("valid");
+    const service = new PostgresRemoteMcpAuthorityService(postgres.sql);
+
+    const context = await service.authenticateActorContext(fixture.input);
+
+    expect(context.owner).toEqual({ id: primary.ownerId });
+    expect(context.agent).toMatchObject({
+      actorId: primary.actorId,
+      displayName: "OAuth primary Agent",
+      handle: `oauth-primary-${marker}`,
+      id: primary.agentId,
+      ownerId: primary.ownerId,
+      status: "active",
+      policy: {
+        defaultsVersion: "agent-permission-defaults-v1",
+        schemaVersion: 1,
+        tier: "assisted",
+        version: "1",
+      },
+    });
+    expect(context.agent.credentialCount).toBeGreaterThan(0);
+    expect(context.credential).toMatchObject({
+      agentId: primary.agentId,
+      audience: resource,
+      expiresAt: fixture.grantExpiresAt,
+      id: fixture.input.credentialId,
+      name: "Remote MCP OAuth Pending Grant",
+      ownerId: primary.ownerId,
+      policyCeiling: "assisted",
+      prefix: null,
+      revokedAt: null,
+      scopes: [...domainScopes],
+      status: "active",
+      type: "oauth_grant",
+    });
+  });
+
+  it("rejects current authority after its OAuth Client is disabled", async () => {
+    const fixture = await createActiveAuthority("disabled-client");
+    const service = new PostgresRemoteMcpAuthorityService(postgres.sql);
+    await postgres.sql`
+      update auth.oauth_clients
+      set disabled = true,
+          updated_at = clock_timestamp()
+      where client_id = ${fixture.clientId}
+    `;
+
+    await expect(service.authenticateActorContext(fixture.input)).rejects.toMatchObject({
+      code: "INVALID_CREDENTIAL",
+      retryable: false,
+      statusCode: 401,
+    });
+  });
+
+  it("rejects current authority after its access-token JTI is revoked", async () => {
+    const fixture = await createActiveAuthority("revoked-jti");
+    const service = new PostgresRemoteMcpAuthorityService(postgres.sql);
+    await postgres.sql`
+      update platform.oauth_access_token_jtis
+      set status = 'revoked',
+          revoked_at = clock_timestamp(),
+          revocation_reason_code = 'integration_test_revoked'
+      where id = ${fixture.jtiId}
+    `;
+
+    await expect(service.authenticateActorContext(fixture.input)).rejects.toMatchObject({
+      code: "INVALID_CREDENTIAL",
+      retryable: false,
+      statusCode: 401,
+    });
+  });
+
+  it("rejects tampered scopes and token-JTI digests without changing authority", async () => {
+    const fixture = await createActiveAuthority("tampered-input");
+    const service = new PostgresRemoteMcpAuthorityService(postgres.sql);
+
+    await expect(
+      service.authenticateActorContext({
+        ...fixture.input,
+        scopes: ["research:read", "community:read"],
+      }),
+    ).rejects.toMatchObject({
+      code: "INVALID_CREDENTIAL",
+      retryable: false,
+      statusCode: 401,
+    });
+    await expect(
+      service.authenticateActorContext({
+        ...fixture.input,
+        tokenJtiDigest: digest().toString("base64url"),
+      }),
+    ).rejects.toMatchObject({
+      code: "INVALID_CREDENTIAL",
+      retryable: false,
+      statusCode: 401,
+    });
+
+    await expect(service.authenticateActorContext(fixture.input)).resolves.toMatchObject({
+      credential: {
+        id: fixture.input.credentialId,
+        prefix: null,
+        type: "oauth_grant",
+      },
+    });
   });
 });
