@@ -131,10 +131,13 @@ function validAuthorityRow(overrides: Record<string, unknown> = {}) {
 
     client_id: clientId,
     client_disabled: false,
+    client_public: true,
+    client_secret: null,
     client_skip_consent: false,
     client_require_pkce: true,
     client_scopes: ["research:read", "community:read", "offline_access"],
     client_grant_types: ["authorization_code", "refresh_token"],
+    client_token_endpoint_auth_method: "none",
     configured_resource: resource,
 
     credential_id: credentialId,
@@ -309,8 +312,22 @@ describe("PostgresRemoteMcpAuthorityService", () => {
     ["JTI epoch drift", { token_grant_epoch: "8" }],
     ["JTI digest drift", { token_jti_digest: Buffer.alloc(32, 0x33) }],
     ["disabled client", { client_disabled: true }],
+    ["non-public client", { client_public: false }],
+    ["client secret appeared", { client_secret: "A".repeat(43) }],
+    [
+      "client authentication method drift",
+      { client_token_endpoint_auth_method: "client_secret_post" },
+    ],
     ["unsafe client consent", { client_skip_consent: true }],
     ["disabled PKCE", { client_require_pkce: false }],
+    ["missing grant types", { client_grant_types: null }],
+    [
+      "offline Grant lost refresh support",
+      {
+        client_grant_types: ["authorization_code"],
+        grant_offline_access: true,
+      },
+    ],
     ["client scope drift", { client_scopes: ["research:read"] }],
     ["client identity drift", { token_client_id: "another-client" }],
     ["resource drift", { token_resource: "https://other.example/mcp" }],

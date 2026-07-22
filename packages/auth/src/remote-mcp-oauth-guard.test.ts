@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   createRemoteMcpAuthorizationBindingDigest,
@@ -594,6 +594,40 @@ describe("Remote MCP token request boundary", () => {
     expect(events).toEqual([`lock:${CLIENT_ID}`, "provider", "unlock"]);
   });
 
+  it.each(["client_secret_basic", "client_secret_post"] as const)(
+    "rejects %s before either public-client exchange lock",
+    async (method) => {
+      const encoded = Buffer.from(`${CLIENT_ID}:client-secret`, "utf8").toString(
+        "base64",
+      );
+      const lock = vi.fn();
+      const provider = vi.fn();
+      const parameters = new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: "aln_rt_v1_sensitive",
+        resource: RESOURCE,
+      });
+      const authorizationHeaders: string[] = [];
+      if (method === "client_secret_basic") {
+        authorizationHeaders.push(`Basic ${encoded}`);
+      } else {
+        parameters.set("client_id", CLIENT_ID);
+        parameters.set("client_secret", "client-secret");
+      }
+
+      await expect(
+        executeRemoteMcpTokenEndpointBoundary(
+          { authorizationHeaders, parameters },
+          { resource: RESOURCE },
+          lock,
+          provider,
+        ),
+      ).rejects.toMatchObject({ code: "CLIENT_AUTH_INVALID", statusCode: 401 });
+      expect(lock).not.toHaveBeenCalled();
+      expect(provider).not.toHaveBeenCalled();
+    },
+  );
+
   it("fails closed when a refresh hook bypasses the locked provider callback", async () => {
     await expect(
       executeRemoteMcpTokenEndpointBoundary(
@@ -629,6 +663,14 @@ describe("Remote MCP token request boundary", () => {
       },
     ],
     ["disabled client", { clientEnabled: false }],
+    [
+      "less than one access-token lifetime plus clock tolerance remains",
+      {
+        credentialExpiresAt: new Date("2026-07-21T00:10:04.999Z"),
+        grantExpiresAt: new Date("2026-07-21T00:10:04.999Z"),
+        refreshTokenExpiresAt: new Date("2026-07-21T00:10:04.999Z"),
+      },
+    ],
     ["Grant resource drift", { grantResource: "https://attacker.example/mcp" }],
     ["Credential resource drift", { credentialResource: "https://attacker.example/mcp" }],
     ["Credential scope drift", { credentialScopes: ["research:read"] }],
@@ -658,6 +700,32 @@ describe("Remote MCP token request boundary", () => {
       statusCode: 500,
     });
     expect(providerCalls).toBe(0);
+  });
+
+  it("accepts authority at the exact token-lifetime-plus-clock-tolerance horizon", async () => {
+    const horizon = new Date("2026-07-21T00:10:05.000Z");
+    await expect(
+      executeRemoteMcpTokenEndpointBoundary(
+        {
+          authorizationHeaders: [],
+          parameters: new URLSearchParams({
+            client_id: CLIENT_ID,
+            grant_type: "refresh_token",
+            refresh_token: "aln_rt_v1_sensitive",
+            resource: RESOURCE,
+          }),
+        },
+        { now: new Date("2026-07-21T00:00:00.000Z"), resource: RESOURCE },
+        async (_input, executeWhileLocked) =>
+          executeWhileLocked({
+            ...validLockedAuthority(),
+            credentialExpiresAt: horizon,
+            grantExpiresAt: horizon,
+            refreshTokenExpiresAt: horizon,
+          }),
+        () => Promise.resolve("issued"),
+      ),
+    ).resolves.toBe("issued");
   });
 
   it("accepts canonical IPv6 loopback resource and redirect URLs", () => {

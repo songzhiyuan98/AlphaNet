@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  AGENT_SCOPES,
   AgentScopesSchema,
   createHealthResponse,
   type AgentScope,
@@ -25,6 +26,7 @@ import {
 } from "./protocol.js";
 
 export const MCP_MAX_REQUEST_BYTES = 1024 * 1024;
+export const MCP_PRM_MAX_RESPONSE_BYTES = 4 * 1024;
 export const MCP_PROTECTION_TIMEOUT_MILLISECONDS = 2_000;
 
 export interface McpAppOptions {
@@ -33,6 +35,7 @@ export interface McpAppOptions {
   dependencies?: readonly HealthDependency[];
   host: string;
   logger: Logger;
+  oauthIssuer?: string;
   authorizationMiddleware?: RequestHandler;
   runtimeEnabled?: boolean;
   protectionTimeoutMilliseconds?: number;
@@ -358,10 +361,38 @@ function bodyParserErrorHandler(
 export function createMcpApp(options: McpAppOptions): McpApp {
   const dependencies = options.dependencies ?? [];
   const expectedResource = options.resource ? new URL(options.resource) : undefined;
+  const expectedOauthIssuer = options.oauthIssuer
+    ? new URL(options.oauthIssuer)
+    : undefined;
   const expectedOrigin = expectedResource?.origin;
   const resourceMetadataUrl = expectedResource
     ? getOAuthProtectedResourceMetadataUrl(expectedResource)
     : undefined;
+  const resourceMetadataPath = resourceMetadataUrl
+    ? new URL(resourceMetadataUrl).pathname
+    : undefined;
+  const protectedResourcePaths = resourceMetadataPath
+    ? ["/mcp", resourceMetadataPath]
+    : ["/mcp"];
+  const protectedResourceMetadata =
+    expectedResource && expectedOauthIssuer
+      ? {
+          resource: expectedResource.toString(),
+          authorization_servers: [expectedOauthIssuer.toString()],
+          scopes_supported: [...AGENT_SCOPES],
+          bearer_methods_supported: ["header"],
+        }
+      : undefined;
+  const serializedProtectedResourceMetadata = protectedResourceMetadata
+    ? JSON.stringify(protectedResourceMetadata)
+    : undefined;
+  if (
+    serializedProtectedResourceMetadata &&
+    Buffer.byteLength(serializedProtectedResourceMetadata, "utf8") >
+      MCP_PRM_MAX_RESPONSE_BYTES
+  ) {
+    throw new Error("MCP protected resource metadata exceeds the response limit");
+  }
   const toolRegistrations = options.tools ?? Object.freeze([]);
   const toolScopeMap = createMcpToolScopeMap(toolRegistrations);
   const executionRegistry = new McpExecutionRegistry();
@@ -374,13 +405,24 @@ export function createMcpApp(options: McpAppOptions): McpApp {
   ) {
     throw new Error("MCP protection timeout must be between 1 and 2000 milliseconds");
   }
-  const runtimeProtectionAvailable = Boolean(
-    options.authorizationMiddleware &&
+  const metadataProtectionAvailable = Boolean(
     options.requestRateLimiter &&
-    options.actorRateLimiter &&
     options.resolveClientIp &&
-    expectedResource,
+    expectedResource &&
+    expectedOauthIssuer,
   );
+  const runtimeProtectionAvailable = Boolean(
+    metadataProtectionAvailable &&
+    options.authorizationMiddleware &&
+    options.actorRateLimiter,
+  );
+  const isProtectedResourceMetadataRequest = (request: Request): boolean => {
+    if (!resourceMetadataPath) return false;
+    const queryIndex = request.originalUrl.indexOf("?");
+    const path =
+      queryIndex < 0 ? request.originalUrl : request.originalUrl.slice(0, queryIndex);
+    return path === resourceMetadataPath;
+  };
   let shuttingDown = false;
   const app = express();
   app.disable("x-powered-by");
@@ -418,7 +460,7 @@ export function createMcpApp(options: McpAppOptions): McpApp {
       .json(payload);
   });
 
-  app.use("/mcp", (request, response, next) => {
+  app.use(protectedResourcePaths, (request, response, next) => {
     const requestId = randomUUID();
     (request as RequestWithMcpContext).mcpRequestId = requestId;
     (response.locals as { mcpRequestId?: string }).mcpRequestId = requestId;
@@ -426,7 +468,7 @@ export function createMcpApp(options: McpAppOptions): McpApp {
     response.set("cache-control", "no-store");
     next();
   });
-  app.use("/mcp", (request, response, next) => {
+  app.use(protectedResourcePaths, (request, response, next) => {
     const host = request.headers.host;
     let hostname: string | undefined;
     try {
@@ -459,7 +501,7 @@ export function createMcpApp(options: McpAppOptions): McpApp {
     }
     next();
   });
-  app.use("/mcp", (request, response, next) => {
+  app.use(protectedResourcePaths, (request, response, next) => {
     const origin = request.headers.origin;
     if (
       origin !== undefined &&
@@ -476,7 +518,7 @@ export function createMcpApp(options: McpAppOptions): McpApp {
     }
     next();
   });
-  app.use("/mcp", (request, response, next) => {
+  app.use(protectedResourcePaths, (request, response, next) => {
     if (containsQueryCredential(request)) {
       sendJsonRpcError(
         response,
@@ -489,7 +531,7 @@ export function createMcpApp(options: McpAppOptions): McpApp {
     }
     next();
   });
-  app.use("/mcp", (_request, response, next) => {
+  app.use(protectedResourcePaths, (request, response, next) => {
     if (shuttingDown) {
       sendJsonRpcError(response, 503, -32000, "MCP service is shutting down.", {
         code: "MCP_SHUTTING_DOWN",
@@ -503,7 +545,10 @@ export function createMcpApp(options: McpAppOptions): McpApp {
       return;
     }
 
-    if (!runtimeProtectionAvailable) {
+    const protectionAvailable = isProtectedResourceMetadataRequest(request)
+      ? metadataProtectionAvailable
+      : runtimeProtectionAvailable;
+    if (!protectionAvailable) {
       sendJsonRpcError(response, 503, -32000, "MCP request protection is unavailable.", {
         code: "MCP_PROTECTION_UNAVAILABLE",
       });
@@ -513,7 +558,7 @@ export function createMcpApp(options: McpAppOptions): McpApp {
     next();
   });
 
-  app.use("/mcp", async (request, response, next) => {
+  app.use(protectedResourcePaths, async (request, response, next) => {
     try {
       const clientIp = options.resolveClientIp?.(request);
       if (!clientIp || clientIp.length > 128) {
@@ -561,6 +606,27 @@ export function createMcpApp(options: McpAppOptions): McpApp {
       });
     }
   });
+
+  if (
+    resourceMetadataPath &&
+    protectedResourceMetadata &&
+    serializedProtectedResourceMetadata
+  ) {
+    const sendProtectedResourceMetadata = (_request: Request, response: Response) => {
+      response
+        .status(200)
+        .type("application/json")
+        .send(serializedProtectedResourceMetadata);
+    };
+    app.head(resourceMetadataPath, sendProtectedResourceMetadata);
+    app.get(resourceMetadataPath, sendProtectedResourceMetadata);
+    app.all(resourceMetadataPath, (_request, response) => {
+      response
+        .set("allow", "GET, HEAD")
+        .status(405)
+        .json({ error: "method_not_allowed" });
+    });
+  }
 
   if (options.authorizationMiddleware) {
     app.use("/mcp", options.authorizationMiddleware);
