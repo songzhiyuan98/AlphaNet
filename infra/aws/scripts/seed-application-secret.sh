@@ -7,9 +7,10 @@ usage() {
   printf '%s\n' \
     "Usage: $0 --initial APPLICATION_SECRET_ARN DB_HOST VALKEY_HOST VALKEY_AUTH_SECRET_ARN API_INTERNAL_DNS_NAME [AWS_REGION]" \
     "       $0 --augment-mcp-oauth APPLICATION_SECRET_ARN [AWS_REGION]" \
+    "       $0 --augment-admin-web APPLICATION_SECRET_ARN [AWS_REGION]" \
     "" \
-    "--initial refuses any existing version. --augment-mcp-oauth preserves" \
-    "every existing field, adds only absent OAuth keys, and uses an AWSCURRENT" \
+    "--initial refuses any existing version. Augment modes preserve every" \
+    "existing field, add only their absent keys, and use an AWSCURRENT" \
     "compare-and-swap so a concurrent update cannot be overwritten."
 }
 
@@ -24,12 +25,17 @@ elif [[ "${mode}" == "--augment-mcp-oauth" ]]; then
     usage >&2
     exit 2
   fi
+elif [[ "${mode}" == "--augment-admin-web" ]]; then
+  if [[ $# -lt 2 || $# -gt 3 ]]; then
+    usage >&2
+    exit 2
+  fi
 else
   usage >&2
   exit 2
 fi
 
-for command_name in aws jq openssl; do
+for command_name in aws grep jq openssl; do
   if ! command -v "${command_name}" >/dev/null 2>&1; then
     printf '%s is required.\n' "${command_name}" >&2
     exit 127
@@ -37,6 +43,198 @@ for command_name in aws jq openssl; do
 done
 
 application_secret_arn="$2"
+if [[ "${mode}" == "--augment-admin-web" ]]; then
+  aws_region="${3:-${AWS_REGION:-us-west-2}}"
+  pending_version_count="$(aws secretsmanager list-secret-version-ids \
+    --region "${aws_region}" \
+    --secret-id "${application_secret_arn}" \
+    --include-deprecated \
+    --output json | jq '[.Versions[] | select(.VersionStages | index("AWSPENDING"))] | length')"
+  if [[ "${pending_version_count}" != "0" ]]; then
+    printf '%s\n' \
+      "Application secret already has AWSPENDING; finish or cancel that rotation before augmentation." >&2
+    exit 1
+  fi
+  current_secret_response="$(aws secretsmanager get-secret-value \
+    --region "${aws_region}" \
+    --secret-id "${application_secret_arn}" \
+    --version-stage AWSCURRENT \
+    --output json)"
+  current_version_id="$(jq -er '.VersionId' <<<"${current_secret_response}")"
+  current_secret_json="$(jq -er '.SecretString' <<<"${current_secret_response}")"
+  if ! jq -e 'type == "object"' <<<"${current_secret_json}" >/dev/null; then
+    printf '%s\n' "Application SecretString must be a JSON object." >&2
+    exit 1
+  fi
+
+  invalid_admin_fields=""
+  if ! jq -e '
+    if has("ADMIN_WEB_OIDC_CLIENT_SECRET") then
+      (.ADMIN_WEB_OIDC_CLIENT_SECRET | type == "string" and test("^[!-~]{32,512}$"))
+    else
+      true
+    end
+  ' <<<"${current_secret_json}" >/dev/null; then
+    invalid_admin_fields="ADMIN_WEB_OIDC_CLIENT_SECRET"
+  fi
+
+  if jq -e 'has("ADMIN_WEB_SESSION_ENCRYPTION_KEY_BASE64")' \
+    <<<"${current_secret_json}" >/dev/null; then
+    existing_admin_web_session_key_is_valid="true"
+    if ! jq -e '
+      .ADMIN_WEB_SESSION_ENCRYPTION_KEY_BASE64
+      | type == "string" and test("^[A-Za-z0-9+/]{43}=$")
+    ' <<<"${current_secret_json}" >/dev/null; then
+      existing_admin_web_session_key_is_valid="false"
+    else
+      existing_admin_web_session_key="$(
+        jq -er '.ADMIN_WEB_SESSION_ENCRYPTION_KEY_BASE64' \
+          <<<"${current_secret_json}"
+      )"
+      if ! existing_admin_web_session_key_bytes="$(
+        printf '%s' "${existing_admin_web_session_key}" |
+          openssl base64 -d -A 2>/dev/null |
+          wc -c |
+          tr -d '[:space:]'
+      )" || [[ "${existing_admin_web_session_key_bytes}" != "32" ]]; then
+        existing_admin_web_session_key_is_valid="false"
+      elif ! canonical_admin_web_session_key="$(
+        printf '%s' "${existing_admin_web_session_key}" |
+          openssl base64 -d -A 2>/dev/null |
+          openssl base64 -A
+      )" || [[ "${canonical_admin_web_session_key}" != \
+        "${existing_admin_web_session_key}" ]]; then
+        existing_admin_web_session_key_is_valid="false"
+      fi
+    fi
+    if [[ "${existing_admin_web_session_key_is_valid}" != "true" ]]; then
+      invalid_admin_fields="${invalid_admin_fields}${invalid_admin_fields:+$'\n'}ADMIN_WEB_SESSION_ENCRYPTION_KEY_BASE64"
+    fi
+  fi
+
+  if ! jq -e '
+    if has("ADMIN_AUDIT_SUBJECT_DIGEST_KEY") then
+      (.ADMIN_AUDIT_SUBJECT_DIGEST_KEY
+        | type == "string" and test("^[0-9a-f]{64}$"))
+    else
+      true
+    end
+  ' <<<"${current_secret_json}" >/dev/null; then
+    invalid_admin_fields="${invalid_admin_fields}${invalid_admin_fields:+$'\n'}ADMIN_AUDIT_SUBJECT_DIGEST_KEY"
+  fi
+
+  if [[ -n "${invalid_admin_fields}" ]]; then
+    printf '%s\n' "${invalid_admin_fields}" >&2
+    exit 2
+  fi
+
+  missing_admin_key_count="$(jq -er '
+    ([
+      "ADMIN_WEB_OIDC_CLIENT_SECRET",
+      "ADMIN_WEB_SESSION_ENCRYPTION_KEY_BASE64",
+      "ADMIN_AUDIT_SUBJECT_DIGEST_KEY"
+    ] - keys) | length
+  ' <<<"${current_secret_json}")"
+  if [[ "${missing_admin_key_count}" == "0" ]]; then
+    printf '%s\n' \
+      "Application secret already contains every Admin Web key; augmentation refuses to overwrite them." >&2
+    exit 1
+  fi
+
+  if ! jq -e 'has("ADMIN_WEB_OIDC_CLIENT_SECRET")' <<<"${current_secret_json}" >/dev/null; then
+    if [[ -z "${ADMIN_WEB_OIDC_CLIENT_SECRET:-}" ]]; then
+      read -r -s -p "Workforce OIDC Admin Web client secret: " ADMIN_WEB_OIDC_CLIENT_SECRET
+      printf '\n'
+    fi
+    if ((${#ADMIN_WEB_OIDC_CLIENT_SECRET} < 32 || ${#ADMIN_WEB_OIDC_CLIENT_SECRET} > 512)) ||
+      ! printf '%s' "${ADMIN_WEB_OIDC_CLIENT_SECRET}" |
+        LC_ALL=C grep -Eq '^[!-~]+$'; then
+      printf '%s\n' \
+        "ADMIN_WEB_OIDC_CLIENT_SECRET must contain 32-512 printable ASCII characters without spaces." >&2
+      exit 2
+    fi
+  fi
+
+  admin_web_session_encryption_key_base64="$(openssl rand 32 | openssl base64 -A)"
+  admin_audit_subject_digest_key="$(openssl rand -hex 32)"
+  pending_client_token="$(openssl rand -hex 32)"
+
+  new_version_id="$(
+    printf '%s\0' \
+      "${current_secret_json}" \
+      "${ADMIN_WEB_OIDC_CLIENT_SECRET:-}" \
+      "${admin_web_session_encryption_key_base64}" \
+      "${admin_audit_subject_digest_key}" |
+      jq -Rsc '
+        split("\u0000") as $value |
+        if (($value | length) != 5 or $value[4] != "") then
+          error("unexpected Admin Web augmentation field framing")
+        else
+          ($value[0] | fromjson) as $current |
+          [
+            { key: "ADMIN_WEB_OIDC_CLIENT_SECRET", value: $value[1] },
+            { key: "ADMIN_WEB_SESSION_ENCRYPTION_KEY_BASE64", value: $value[2] },
+            { key: "ADMIN_AUDIT_SUBJECT_DIGEST_KEY", value: $value[3] }
+          ] |
+          reduce .[] as $entry ($current;
+            if has($entry.key) then . else . + { ($entry.key): $entry.value } end
+          )
+        end
+      ' |
+      aws secretsmanager put-secret-value \
+        --region "${aws_region}" \
+        --secret-id "${application_secret_arn}" \
+        --client-request-token "${pending_client_token}" \
+        --version-stages AWSPENDING \
+        --secret-string file:///dev/stdin \
+        --query VersionId \
+        --output text
+  )"
+  if [[ "${new_version_id}" != "${pending_client_token}" ]]; then
+    printf '%s\n' "Secrets Manager returned an unexpected pending version." >&2
+    exit 1
+  fi
+
+  if ! aws secretsmanager update-secret-version-stage \
+    --region "${aws_region}" \
+    --secret-id "${application_secret_arn}" \
+    --version-stage AWSCURRENT \
+    --move-to-version-id "${new_version_id}" \
+    --remove-from-version-id "${current_version_id}" \
+    >/dev/null; then
+    aws secretsmanager update-secret-version-stage \
+      --region "${aws_region}" \
+      --secret-id "${application_secret_arn}" \
+      --version-stage AWSPENDING \
+      --remove-from-version-id "${new_version_id}" \
+      >/dev/null 2>&1 || true
+    printf '%s\n' \
+      "Application secret changed concurrently; augmentation left AWSCURRENT untouched." >&2
+    exit 1
+  fi
+  aws secretsmanager update-secret-version-stage \
+    --region "${aws_region}" \
+    --secret-id "${application_secret_arn}" \
+    --version-stage AWSPENDING \
+    --remove-from-version-id "${new_version_id}" \
+    >/dev/null
+
+  unset \
+    ADMIN_WEB_OIDC_CLIENT_SECRET \
+    current_secret_response \
+    current_secret_json \
+    existing_admin_web_session_key \
+    existing_admin_web_session_key_bytes \
+    existing_admin_web_session_key_is_valid \
+    canonical_admin_web_session_key \
+    invalid_admin_fields \
+    admin_web_session_encryption_key_base64 \
+    admin_audit_subject_digest_key
+  printf '%s\n' \
+    "Application secret augmented with absent Admin Web keys; existing values were preserved."
+  exit 0
+fi
+
 if [[ "${mode}" == "--augment-mcp-oauth" ]]; then
   aws_region="${3:-${AWS_REGION:-us-west-2}}"
   pending_version_count="$(aws secretsmanager list-secret-version-ids \

@@ -308,6 +308,7 @@ describe("Admin moderation queue", () => {
   it("requires exact reason totals and terminal Case resolution state", () => {
     expect(ModerationReasonCountsSchema.parse(reasonCounts)).toEqual(reasonCounts);
     const response = {
+      capabilities: { can_decide: true },
       items: [{ ...resolvedCase, queue_rank: 1 }],
       page,
       ordering: {
@@ -319,6 +320,24 @@ describe("Admin moderation queue", () => {
       schema_version: "1",
     } as const;
     expect(AdminModerationCaseListResponseSchema.parse(response)).toEqual(response);
+    expect(
+      AdminModerationCaseListResponseSchema.parse({
+        ...response,
+        capabilities: { can_decide: false },
+      }).capabilities,
+    ).toEqual({ can_decide: false });
+    expect(
+      AdminModerationCaseListResponseSchema.safeParse({
+        ...response,
+        capabilities: { can_decide: true, forged_permission: true },
+      }).success,
+    ).toBe(false);
+    const withoutCapabilities = Object.fromEntries(
+      Object.entries(response).filter(([key]) => key !== "capabilities"),
+    );
+    expect(
+      AdminModerationCaseListResponseSchema.safeParse(withoutCapabilities).success,
+    ).toBe(false);
 
     expect(
       AdminModerationCaseListResponseSchema.safeParse({
@@ -347,6 +366,7 @@ describe("Admin moderation queue", () => {
 
   it("enforces unique ascending frozen queue ranks and declared page size", () => {
     const response = {
+      capabilities: { can_decide: true },
       items: [
         { ...resolvedCase, case_id: "case-2", queue_rank: 2 },
         { ...resolvedCase, case_id: "case-1", queue_rank: 1 },
@@ -408,6 +428,7 @@ describe("Admin Case detail", () => {
 
   it("binds the Case, content, reports, actions, and their ordering snapshots", () => {
     const response = {
+      capabilities: { can_decide: true },
       case: resolvedCase,
       content: contentSnapshot,
       reports: [{ ...resolvedReport, reporter_owner_id: ids.reporter }],
@@ -428,6 +449,18 @@ describe("Admin Case detail", () => {
       schema_version: "1",
     } as const;
     expect(AdminModerationCaseDetailResponseSchema.parse(response)).toEqual(response);
+    expect(
+      AdminModerationCaseDetailResponseSchema.parse({
+        ...response,
+        capabilities: { can_decide: false },
+      }).capabilities,
+    ).toEqual({ can_decide: false });
+    expect(
+      AdminModerationCaseDetailResponseSchema.safeParse({
+        ...response,
+        capabilities: { can_decide: "true" },
+      }).success,
+    ).toBe(false);
     expect(
       AdminModerationCaseDetailResponseSchema.safeParse({
         ...response,

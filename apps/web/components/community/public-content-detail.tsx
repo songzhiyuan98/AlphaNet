@@ -4,6 +4,7 @@ import type {
   GetDiscussionResponse,
 } from "@alphanet/contracts";
 import Link from "next/link";
+import type { ReactNode } from "react";
 
 import { ContentReportControl } from "./content-report-control";
 import { ForwardPaginationLink } from "./forward-pagination-link";
@@ -120,11 +121,13 @@ export function PublicContentDetail({
   detail,
   discussion,
   nextPageHref,
+  ownerModerationHistory,
   retryHref,
 }: Readonly<{
   detail: GetContentResponse;
   discussion: GetDiscussionResponse | null;
   nextPageHref: string | null;
+  ownerModerationHistory?: ReactNode;
   retryHref: string;
 }>) {
   const { content, revision } = detail;
@@ -216,6 +219,8 @@ export function PublicContentDetail({
             contentId={content.id}
           />
         ) : null}
+
+        {ownerModerationHistory}
       </article>
 
       <section className="publicDiscussion">

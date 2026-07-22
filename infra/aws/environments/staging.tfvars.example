@@ -19,14 +19,30 @@ route53_zone_id            = "ZREPLACE_WITH_PUBLIC_ZONE"
 cloudfront_price_class     = "PriceClass_100"
 # Four separate rollout gates remain off. The OAuth server requires Owner
 # consent, but neither setting promotes the MCP runtime or public edge.
-mcp_public_enabled               = false
-mcp_runtime_enabled              = false
+mcp_public_enabled              = false
+mcp_runtime_enabled             = false
 mcp_oauth_owner_consent_enabled = false
 mcp_oauth_server_enabled        = false
 mcp_oauth_provisioning_enabled  = false
-mcp_oauth_issuer                 = ""
-mcp_oauth_jwks_uri               = ""
-allow_direct_alb_cidrs           = []
+mcp_oauth_issuer                = ""
+mcp_oauth_jwks_uri              = ""
+allow_direct_alb_cidrs          = []
+
+# Workforce Admin Web remains absent until its OIDC client, Admin identities,
+# application-secret fields, fixed domain, and WAF have passed the runbook.
+admin_web_enabled             = false
+admin_oidc_issuer             = ""
+admin_oidc_audience           = ""
+admin_oidc_jwks_uri           = ""
+admin_oidc_allowed_algorithms = ["RS256"]
+admin_oidc_allowed_acr_values = []
+admin_oidc_allow_amr_mfa      = true
+admin_web_oidc_client_id      = ""
+admin_web_oidc_scopes         = ["openid", "profile", "email"]
+admin_web_oidc_resource       = ""
+admin_web_session_store       = "dynamodb"
+admin_web_session_ttl_seconds = 28800
+admin_web_login_ttl_seconds   = 600
 
 nat_gateway_mode                   = "single"
 enable_vpc_flow_logs               = true

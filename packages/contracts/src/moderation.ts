@@ -438,8 +438,18 @@ export const ModerationCaseListOrderingSchema = OrderingSnapshotSchema.extend({
   ordering_version: z.literal(MODERATION_CASE_LIST_ORDERING_VERSION),
 }).strict();
 
+export const AdminModerationCapabilitiesSchema = z
+  .object({
+    can_decide: z.boolean(),
+  })
+  .strict();
+export type AdminModerationCapabilities = z.infer<
+  typeof AdminModerationCapabilitiesSchema
+>;
+
 export const AdminModerationCaseListResponseSchema = z
   .object({
+    capabilities: AdminModerationCapabilitiesSchema,
     items: z.array(AdminModerationCaseListItemSchema).max(100),
     page: V1CursorPageSchema,
     ordering: ModerationCaseListOrderingSchema,
@@ -729,6 +739,7 @@ export const ModerationActionListOrderingSchema = OrderingSnapshotSchema.extend(
 
 export const AdminModerationCaseDetailResponseSchema = z
   .object({
+    capabilities: AdminModerationCapabilitiesSchema,
     case: ModerationCaseSummarySchema,
     content: ModerationContentSnapshotSchema,
     reports: z.array(AdminContentReportProjectionSchema).max(100),

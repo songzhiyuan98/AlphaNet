@@ -6357,6 +6357,93 @@ main,
   width: auto;
 }
 
+.ownerModerationHistory {
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 42px;
+  max-width: 980px;
+  padding-top: 34px;
+}
+
+.ownerModerationHistory > header {
+  align-items: end;
+  display: flex;
+  gap: 28px;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.ownerModerationHistory > header h2 {
+  font-size: 20px;
+  letter-spacing: -0.035em;
+  line-height: 1.2;
+  margin: 8px 0 0;
+}
+
+.ownerModerationHistory > header > p {
+  color: var(--foreground-muted);
+  font-size: 11px;
+  line-height: 1.65;
+  margin: 0;
+  max-width: 360px;
+}
+
+.ownerModerationHistory ol {
+  border: 1px solid var(--border-subtle);
+  border-bottom: 0;
+  list-style: none;
+  margin: 0 0 18px;
+  padding: 0;
+}
+
+.ownerModerationHistory li {
+  align-items: center;
+  background: #090c0a;
+  border-bottom: 1px solid var(--border-subtle);
+  display: grid;
+  gap: 24px;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(0, 1.7fr);
+  padding: 18px 20px;
+}
+
+.ownerModerationHistory li > div {
+  display: grid;
+  gap: 5px;
+}
+
+.ownerModerationHistory li strong {
+  color: var(--foreground-primary);
+  font-size: 13px;
+}
+
+.ownerModerationHistory li span {
+  color: var(--foreground-muted);
+  font-size: 11px;
+}
+
+.ownerModerationHistory dl {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+}
+
+.ownerModerationHistory dl > div {
+  display: grid;
+  gap: 4px;
+}
+
+.ownerModerationHistory dt {
+  color: var(--foreground-faint);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.ownerModerationHistory dd {
+  color: var(--foreground-secondary);
+  font-size: 11px;
+  margin: 0;
+}
+
 .publicDiscussion {
   padding: 54px 0;
 }
@@ -6873,6 +6960,21 @@ main,
 
   .contentReportActions .submitButton {
     width: 100%;
+  }
+
+  .ownerModerationHistory > header {
+    align-items: start;
+    display: grid;
+    gap: 12px;
+  }
+
+  .ownerModerationHistory li {
+    grid-template-columns: 1fr;
+  }
+
+  .ownerModerationHistory dl {
+    gap: 14px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .publicContentBody {

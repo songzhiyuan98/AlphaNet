@@ -417,6 +417,172 @@ variable "google_oauth_enabled" {
   default     = false
 }
 
+variable "admin_web_enabled" {
+  description = "Enable the workforce-only Admin Web and matching Admin API boundary. Disabled by default and inert unless the complete production OIDC/session gate passes."
+  type        = bool
+  default     = false
+}
+
+variable "admin_oidc_issuer" {
+  description = "Exact workforce OIDC issuer shared by Admin Web discovery and Admin API token verification."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.admin_oidc_issuer == "" || (length(var.admin_oidc_issuer) <= 2048 && can(regex("^https?://[^/@?#]+(?:/[^?#]*)?$", var.admin_oidc_issuer)))
+    error_message = "admin_oidc_issuer must be empty or an absolute HTTP(S) issuer with no query or fragment; enabled AWS environments additionally require HTTPS."
+  }
+}
+
+variable "admin_oidc_audience" {
+  description = "Exact workforce Admin API audience. The browser resource must match it byte for byte."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.admin_oidc_audience == "" || can(regex("^[!-~]{1,200}$", var.admin_oidc_audience))
+    error_message = "admin_oidc_audience must be empty or 1-200 visible ASCII characters without spaces."
+  }
+}
+
+variable "admin_oidc_jwks_uri" {
+  description = "Exact workforce OIDC JWKS URI used by the Admin API verifier."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.admin_oidc_jwks_uri == "" || (length(var.admin_oidc_jwks_uri) <= 2048 && can(regex("^https?://[^/@?#]+/[^?#]+$", var.admin_oidc_jwks_uri)))
+    error_message = "admin_oidc_jwks_uri must be empty or an absolute HTTP(S) URL with a path and no query or fragment; enabled AWS environments additionally require HTTPS."
+  }
+}
+
+variable "admin_oidc_allowed_algorithms" {
+  description = "Asymmetric JWT algorithms accepted by the workforce Admin API verifier."
+  type        = list(string)
+  default     = ["RS256"]
+
+  validation {
+    condition = (
+      length(var.admin_oidc_allowed_algorithms) > 0 &&
+      length(distinct(var.admin_oidc_allowed_algorithms)) == length(var.admin_oidc_allowed_algorithms) &&
+      alltrue([
+        for algorithm in var.admin_oidc_allowed_algorithms :
+        contains(["EdDSA", "ES256", "ES384", "ES512", "PS256", "PS384", "PS512", "RS256", "RS384", "RS512"], algorithm)
+      ])
+    )
+    error_message = "admin_oidc_allowed_algorithms must contain unique supported asymmetric EdDSA/ES/PS/RS algorithms."
+  }
+}
+
+variable "admin_oidc_allowed_acr_values" {
+  description = "Exact workforce acr values accepted as MFA evidence; may be empty only while amr=mfa evidence is accepted."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = (
+      length(var.admin_oidc_allowed_acr_values) <= 20 &&
+      length(distinct(var.admin_oidc_allowed_acr_values)) == length(var.admin_oidc_allowed_acr_values) &&
+      alltrue([
+        for value in var.admin_oidc_allowed_acr_values :
+        can(regex("^[!-~]{1,200}$", value))
+      ])
+    )
+    error_message = "admin_oidc_allowed_acr_values must contain at most 20 unique visible-ASCII values no longer than 200 characters."
+  }
+}
+
+variable "admin_oidc_allow_amr_mfa" {
+  description = "Accept an amr claim containing mfa as strong workforce authentication evidence."
+  type        = bool
+  default     = true
+}
+
+variable "admin_oidc_clock_tolerance_seconds" {
+  description = "Maximum workforce OIDC token clock skew accepted by the Admin API verifier."
+  type        = number
+  default     = 5
+
+  validation {
+    condition     = var.admin_oidc_clock_tolerance_seconds >= 0 && var.admin_oidc_clock_tolerance_seconds <= 60
+    error_message = "admin_oidc_clock_tolerance_seconds must be between 0 and 60."
+  }
+}
+
+variable "admin_web_oidc_client_id" {
+  description = "Confidential workforce OIDC browser client ID; its client secret remains only in the application secret."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.admin_web_oidc_client_id == "" || can(regex("^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$", var.admin_web_oidc_client_id))
+    error_message = "admin_web_oidc_client_id must be empty or a safe identifier no longer than 200 characters."
+  }
+}
+
+variable "admin_web_oidc_scopes" {
+  description = "Workforce browser authorization scopes. An enabled Admin Web must include openid."
+  type        = list(string)
+  default     = ["openid", "profile", "email"]
+
+  validation {
+    condition = (
+      length(var.admin_web_oidc_scopes) <= 20 &&
+      length(distinct(var.admin_web_oidc_scopes)) == length(var.admin_web_oidc_scopes) &&
+      !contains(var.admin_web_oidc_scopes, "offline_access") &&
+      alltrue([
+        for scope in var.admin_web_oidc_scopes :
+        can(regex("^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$", scope))
+      ])
+    )
+    error_message = "admin_web_oidc_scopes must contain at most 20 unique OAuth scope tokens, include no offline_access token, and use at most 200 safe characters per token."
+  }
+}
+
+variable "admin_web_oidc_resource" {
+  description = "Resource requested by Admin Web. It must equal admin_oidc_audience when enabled."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.admin_web_oidc_resource == "" || can(regex("^https?://[^/@?#]+(?:/[^?#]*)?$", var.admin_web_oidc_resource))
+    error_message = "admin_web_oidc_resource must be empty or an absolute HTTP(S) URL without credentials, query, or fragment; enabled AWS environments additionally require HTTPS."
+  }
+}
+
+variable "admin_web_session_store" {
+  description = "Admin Web session backend. AWS permits only DynamoDB when the Admin surface is enabled; memory exists solely to make unsafe plans fail explicitly."
+  type        = string
+  default     = "dynamodb"
+
+  validation {
+    condition     = contains(["dynamodb", "memory"], var.admin_web_session_store)
+    error_message = "admin_web_session_store must be dynamodb or memory."
+  }
+}
+
+variable "admin_web_session_ttl_seconds" {
+  description = "Absolute lifetime of an authenticated workforce Admin Web session."
+  type        = number
+  default     = 28800
+
+  validation {
+    condition     = var.admin_web_session_ttl_seconds >= 900 && var.admin_web_session_ttl_seconds <= 43200
+    error_message = "admin_web_session_ttl_seconds must be between 900 and 43200."
+  }
+}
+
+variable "admin_web_login_ttl_seconds" {
+  description = "Lifetime of a one-time workforce OIDC browser login transaction."
+  type        = number
+  default     = 600
+
+  validation {
+    condition     = var.admin_web_login_ttl_seconds >= 60 && var.admin_web_login_ttl_seconds <= 600
+    error_message = "admin_web_login_ttl_seconds must be between 60 and 600."
+  }
+}
+
 variable "mcp_additional_allowed_hosts" {
   description = "Additional exact MCP Host header values, comma separated."
   type        = string
