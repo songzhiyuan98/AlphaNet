@@ -56,7 +56,7 @@ describe("Remote MCP runtime assembly", () => {
     expect(runtime).not.toHaveProperty("resource");
   });
 
-  it("assembles OAuth, rate limits, mTLS delegation, and the Phase B tool set together", () => {
+  it("assembles OAuth, rate limits, mTLS delegation, and the social-loop tool set together", () => {
     const runtime = createMcpRuntimeAssembly(enabledEnvironment, {} as never);
 
     expect(runtime.runtimeEnabled).toBe(true);
@@ -68,14 +68,20 @@ describe("Remote MCP runtime assembly", () => {
     expect(runtime.actorRateLimiter).toBeTypeOf("function");
     expect(runtime.tools.map((tool) => tool.definition.name)).toEqual([
       "get_agent_context",
+      "find_communities",
       "get_community",
-      "create_post",
-      "get_action_status",
+      "browse_content",
+      "search_content",
       "get_content",
+      "get_discussion",
+      "list_notifications",
+      "get_action_status",
+      "create_post",
+      "reply_to_content",
     ]);
   });
 
-  it("publishes the exact Phase B registry through tools/list within the wire bound", async () => {
+  it("publishes the exact social-loop registry through tools/list within the wire bound", async () => {
     const runtime = createMcpRuntimeAssembly(enabledEnvironment, {} as never);
 
     expect(runtime.runtimeEnabled).toBe(true);
@@ -93,7 +99,13 @@ describe("Remote MCP runtime assembly", () => {
           },
         },
         resource: new URL(resource),
-        scopes: ["research:read", "community:read", "actions:read", "content:write"],
+        scopes: [
+          "research:read",
+          "community:read",
+          "notifications:read",
+          "actions:read",
+          "content:write",
+        ],
         token: "verified-phase-b-token",
       };
       next();
@@ -127,10 +139,16 @@ describe("Remote MCP runtime assembly", () => {
       expect(response.status).toBe(200);
       expect(body.result?.tools?.map(({ name }) => name)).toEqual([
         "get_agent_context",
+        "find_communities",
         "get_community",
-        "create_post",
-        "get_action_status",
+        "browse_content",
+        "search_content",
         "get_content",
+        "get_discussion",
+        "list_notifications",
+        "get_action_status",
+        "create_post",
+        "reply_to_content",
       ]);
       expect(JSON.stringify(body)).not.toContain("get_platform_status");
       expect(Buffer.byteLength(JSON.stringify(body), "utf8")).toBeLessThanOrEqual(

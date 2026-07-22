@@ -6,10 +6,16 @@ import {
 } from "@alphanet/auth";
 import {
   AgentContextResponseSchema,
+  BrowseContentResponseSchema,
   CreatePostWriteResultSchema,
+  FindCommunitiesResponseSchema,
   GetActionStatusResponseSchema,
   GetCommunityResponseSchema,
   GetContentResponseSchema,
+  GetDiscussionResponseSchema,
+  ListNotificationsResponseSchema,
+  ReplyToContentWriteResultSchema,
+  SearchContentResponseSchema,
 } from "@alphanet/contracts";
 import type {
   AgentCredentialContext,
@@ -29,8 +35,14 @@ import {
   PRIVATE_MCP_AGENT_CONTEXT_PATH,
   PRIVATE_MCP_COMMUNITY_BY_SLUG_PATH,
   PRIVATE_MCP_COMMUNITY_PATH,
+  PRIVATE_MCP_COMMUNITY_SEARCH_PATH,
+  PRIVATE_MCP_CONTENT_BROWSE_PATH,
   PRIVATE_MCP_CONTENT_PATH,
+  PRIVATE_MCP_CONTENT_SEARCH_PATH,
+  PRIVATE_MCP_DISCUSSION_PATH,
+  PRIVATE_MCP_NOTIFICATIONS_PATH,
   PRIVATE_MCP_POSTS_PATH,
+  PRIVATE_MCP_REPLIES_PATH,
   type PrivateMcpAppOptions,
 } from "./private-mcp-app.js";
 import { registerResearchWriteRoutes } from "./research-write-routes.js";
@@ -46,6 +58,8 @@ const ids = {
   owner: "50000000-0000-4000-8000-000000000005",
   policy: "60000000-0000-4000-8000-000000000006",
   revision: "a0000000-0000-4000-8000-00000000000a",
+  reply: "d0000000-0000-4000-8000-00000000000d",
+  replyRevision: "e0000000-0000-4000-8000-00000000000e",
   topic: "b0000000-0000-4000-8000-00000000000b",
 } as const;
 const now = new Date("2026-07-22T08:00:00.000Z");
@@ -219,6 +233,137 @@ function contentDetail(): ContentDetailProjection {
   };
 }
 
+function emptyCommunitySearchPage(): Awaited<
+  ReturnType<PrivateMcpAppOptions["communityDirectoryService"]["searchCommunities"]>
+> {
+  return {
+    items: [],
+    ordering: {
+      asOf: now,
+      orderingVersion: "community-directory-v1",
+      snapshotId: "community-search-snapshot",
+    },
+    page: { hasMore: false, limit: 5, nextCursor: null },
+  };
+}
+
+function emptyBrowsePage(): Awaited<
+  ReturnType<PrivateMcpAppOptions["contentReadService"]["browseContent"]>
+> {
+  return {
+    countsAsOf: now,
+    items: [],
+    page: { hasMore: false, limit: 5, nextCursor: null },
+    ranking: {
+      asOf: now,
+      expiresAt: new Date(now.valueOf() + 300_000),
+      rankingVersion: "content-read-v1:latest",
+      snapshotId: "content-browse-snapshot",
+    },
+  };
+}
+
+function emptySearchPage(): Awaited<
+  ReturnType<PrivateMcpAppOptions["contentSearchService"]["searchContent"]>
+> {
+  return {
+    countsAsOf: now,
+    items: [],
+    page: { hasMore: false, limit: 5, nextCursor: null },
+    ranking: {
+      asOf: now,
+      expiresAt: new Date(now.valueOf() + 300_000),
+      indexAsOf: now,
+      rankingVersion: "content-search-v1",
+      snapshotId: "content-search-snapshot",
+    },
+    searchExecution: {
+      degraded: false,
+      degradationReason: null,
+      effectiveMode: "hybrid",
+      requestedMode: "hybrid",
+    },
+    semanticIndexCoverage: {
+      complete: true,
+      unindexedCandidateCount: 0,
+    },
+  };
+}
+
+function discussionProjection(): Awaited<
+  ReturnType<PrivateMcpAppOptions["contentReadService"]["getDiscussion"]>
+> {
+  const detail = contentDetail();
+  if (detail.revision === null) throw new Error("Expected current revision");
+  return {
+    ancestorContext: [],
+    countsAsOf: now,
+    ordering: {
+      asOf: now,
+      expiresAt: new Date(now.valueOf() + 300_000),
+      orderingVersion: "discussion-flat-v1:latest",
+      snapshotId: "discussion-snapshot",
+    },
+    page: {
+      hasMore: false,
+      limit: 5,
+      nextCursor: null,
+      truncatedByByteBudget: false,
+    },
+    replies: [],
+    root: {
+      author: detail.content.author,
+      contentSafety: detail.contentSafety,
+      createdAt: detail.content.createdAt,
+      currentRevisionId: detail.content.currentRevisionId,
+      depth: detail.content.depth,
+      distributionState: detail.content.distributionState,
+      effectiveCommunityIds: detail.effectiveCommunityIds,
+      id: detail.content.id,
+      inboundReferenceCount: detail.inboundReferenceCount,
+      kind: detail.content.kind,
+      lastActivityAt: detail.content.lastActivityAt,
+      lifecycleState: detail.content.lifecycleState,
+      parentContentId: detail.content.parentContentId,
+      reactionCounts: detail.reactionCounts,
+      reactionCountsByActorKind: detail.reactionCountsByActorKind,
+      replyCount: detail.replyCount,
+      revision: detail.revision,
+      rootContentId: detail.content.rootContentId,
+      symbols: detail.content.symbols,
+      topics: detail.content.topics,
+      updatedAt: detail.content.updatedAt,
+      version: detail.content.version,
+      viewerState: detail.viewerState,
+    },
+  };
+}
+
+function emptyNotificationPage(): Awaited<
+  ReturnType<PrivateMcpAppOptions["notificationService"]["listAgentNotifications"]>
+> {
+  return {
+    filters: {
+      communityIds: [],
+      createdAfter: null,
+      createdBefore: null,
+      followingOnly: false,
+      symbols: [],
+      types: [],
+      unreadOnly: false,
+    },
+    items: [],
+    mode: "history",
+    ordering: {
+      asOf: now,
+      orderingVersion: "notifications-created-at-v1",
+      snapshotId: "nts_history_1",
+    },
+    page: { hasMore: false, limit: 5, nextCursor: null },
+    poll: { hasMore: false, nextCursor: "npc_poll_1" },
+  };
+}
+
 function pendingAction(): AgentPendingActionView {
   return {
     id: ids.action,
@@ -284,6 +429,26 @@ function successfulCreatePostOutcome(replayed = false): CreatePostOutcome {
       contentId: ids.content,
       resourceVersion: 1,
       revisionId: ids.revision,
+    },
+    status: "succeeded",
+  };
+}
+
+function successfulReplyOutcome(): Extract<
+  ResearchWriteOutcome,
+  { operation: "reply_to_content" }
+> {
+  return {
+    decision: "allow",
+    error: null,
+    operation: "reply_to_content",
+    pendingAction: null,
+    replayed: false,
+    result: {
+      contentId: ids.reply,
+      resourceVersion: 1,
+      revisionId: ids.replyRevision,
+      rootContentId: ids.content,
     },
     status: "succeeded",
   };
@@ -379,12 +544,14 @@ interface AppHarness {
 async function createApp(options?: {
   authorityContext?: AgentCredentialContext;
   authorityFailure?: Error;
-  communityDirectoryService?: PrivateMcpAppOptions["communityDirectoryService"];
+  communityDirectoryService?: Partial<PrivateMcpAppOptions["communityDirectoryService"]>;
   consumeLimit?: PrivateMcpAppOptions["rateLimiter"]["consume"];
-  contentReadService?: PrivateMcpAppOptions["contentReadService"];
+  contentReadService?: Partial<PrivateMcpAppOptions["contentReadService"]>;
+  contentSearchService?: Partial<PrivateMcpAppOptions["contentSearchService"]>;
+  notificationService?: Partial<PrivateMcpAppOptions["notificationService"]>;
   order?: string[];
   pendingActionStatusService?: PrivateMcpAppOptions["pendingActionStatusService"];
-  researchWriteService?: PrivateMcpAppOptions["researchWriteService"];
+  researchWriteService?: Partial<PrivateMcpAppOptions["researchWriteService"]>;
   transportIdentityGuard?: PrivateMcpAppOptions["transportIdentityGuard"];
 }): Promise<AppHarness> {
   const order = options?.order;
@@ -424,11 +591,26 @@ async function createApp(options?: {
       now: () => now,
       replayStore: { consume: consumeReplay },
     },
-    communityDirectoryService: options?.communityDirectoryService ?? {
+    communityDirectoryService: {
       getCommunity: () => Promise.reject(new Error("Unexpected Community request")),
+      searchCommunities: () =>
+        Promise.reject(new Error("Unexpected Community search request")),
+      ...options?.communityDirectoryService,
     },
-    contentReadService: options?.contentReadService ?? {
+    contentReadService: {
+      browseContent: () => Promise.reject(new Error("Unexpected Content browse")),
       getContent: () => Promise.reject(new Error("Unexpected Content request")),
+      getDiscussion: () => Promise.reject(new Error("Unexpected Content discussion")),
+      ...options?.contentReadService,
+    },
+    contentSearchService: {
+      searchContent: () => Promise.reject(new Error("Unexpected Content search")),
+      ...options?.contentSearchService,
+    },
+    notificationService: {
+      listAgentNotifications: () =>
+        Promise.reject(new Error("Unexpected Notification request")),
+      ...options?.notificationService,
     },
     now: () => now,
     pendingActionStatusService: options?.pendingActionStatusService ?? {
@@ -436,8 +618,10 @@ async function createApp(options?: {
         Promise.reject(new Error("Unexpected PendingAction request")),
     },
     rateLimiter: { consume: consumeLimit },
-    researchWriteService: options?.researchWriteService ?? {
+    researchWriteService: {
       createPost: () => Promise.reject(new Error("Unexpected research write")),
+      replyToContent: () => Promise.reject(new Error("Unexpected reply write")),
+      ...options?.researchWriteService,
     },
     transportIdentityGuard,
   });
@@ -498,7 +682,7 @@ describe("private MCP API application boundary", () => {
       server_time: now.toISOString(),
       effective_capabilities: {
         get_agent_context: { available: true, default_decision: "allow" },
-        find_communities: { available: false, default_decision: "allow" },
+        find_communities: { available: true, default_decision: "allow" },
         create_post: {
           available: true,
           default_decision: "deny",
@@ -636,6 +820,210 @@ describe("private MCP API application boundary", () => {
       `credential:${ids.credential}:agent-api:write`,
       { max: 20, window: 60 },
     );
+  });
+
+  it("serves the MCP social loop through contract-shaped private POST routes", async () => {
+    const scopes = [
+      "research:read",
+      "community:read",
+      "notifications:read",
+      "content:write",
+    ] as const;
+    const authorityContext = contextWithScopes([...scopes]);
+    const searchCommunities = vi.fn<
+      PrivateMcpAppOptions["communityDirectoryService"]["searchCommunities"]
+    >(() => Promise.resolve(emptyCommunitySearchPage()));
+    const browseContent = vi.fn<
+      PrivateMcpAppOptions["contentReadService"]["browseContent"]
+    >(() => Promise.resolve(emptyBrowsePage()));
+    const getDiscussion = vi.fn<
+      PrivateMcpAppOptions["contentReadService"]["getDiscussion"]
+    >(() => Promise.resolve(discussionProjection()));
+    const searchContent = vi.fn<
+      PrivateMcpAppOptions["contentSearchService"]["searchContent"]
+    >(() => Promise.resolve(emptySearchPage()));
+    const listAgentNotifications = vi.fn<
+      PrivateMcpAppOptions["notificationService"]["listAgentNotifications"]
+    >(() => Promise.resolve(emptyNotificationPage()));
+    const replyToContent = vi.fn<
+      PrivateMcpAppOptions["researchWriteService"]["replyToContent"]
+    >(() => Promise.resolve(successfulReplyOutcome()));
+    const harness = await createApp({
+      authorityContext,
+      communityDirectoryService: {
+        getCommunity: () => Promise.reject(new Error("Unexpected Community read")),
+        searchCommunities,
+      },
+      contentReadService: {
+        browseContent,
+        getContent: () => Promise.reject(new Error("Unexpected Content read")),
+        getDiscussion,
+      },
+      contentSearchService: { searchContent },
+      notificationService: { listAgentNotifications },
+      researchWriteService: {
+        createPost: () => Promise.reject(new Error("Unexpected post write")),
+        replyToContent,
+      },
+    });
+
+    const findRequestId = "req_private_mcp_find_communities";
+    const findResponse = await harness.app.inject({
+      headers: await validHeaders(findRequestId, scopes),
+      method: "POST",
+      payload: { limit: 5, query: "semiconductors" },
+      url: PRIVATE_MCP_COMMUNITY_SEARCH_PATH,
+    });
+    const find = FindCommunitiesResponseSchema.parse(findResponse.json());
+
+    const browseRequestId = "req_private_mcp_browse_content";
+    const browseResponse = await harness.app.inject({
+      headers: await validHeaders(browseRequestId, scopes),
+      method: "POST",
+      payload: {
+        author_actor_id: ids.actor,
+        limit: 5,
+        scope: "author",
+        sort: "latest",
+      },
+      url: PRIVATE_MCP_CONTENT_BROWSE_PATH,
+    });
+    const browse = BrowseContentResponseSchema.parse(browseResponse.json());
+
+    const searchRequestId = "req_private_mcp_search_content";
+    const searchResponse = await harness.app.inject({
+      headers: await validHeaders(searchRequestId, scopes),
+      method: "POST",
+      payload: {
+        author_actor_id: ids.actor,
+        limit: 5,
+        query: "AMD downside evidence",
+        scope: "author",
+      },
+      url: PRIVATE_MCP_CONTENT_SEARCH_PATH,
+    });
+    const search = SearchContentResponseSchema.parse(searchResponse.json());
+
+    const discussionRequestId = "req_private_mcp_get_discussion";
+    const discussionResponse = await harness.app.inject({
+      headers: await validHeaders(discussionRequestId, scopes),
+      method: "POST",
+      payload: {
+        content_id: ids.content,
+        limit: 5,
+        sort: "latest",
+      },
+      url: PRIVATE_MCP_DISCUSSION_PATH,
+    });
+    const discussion = GetDiscussionResponseSchema.parse(discussionResponse.json());
+
+    const notificationRequestId = "req_private_mcp_list_notifications";
+    const notificationResponse = await harness.app.inject({
+      headers: await validHeaders(notificationRequestId, scopes),
+      method: "POST",
+      payload: { limit: 5 },
+      url: PRIVATE_MCP_NOTIFICATIONS_PATH,
+    });
+    const notifications = ListNotificationsResponseSchema.parse(
+      notificationResponse.json(),
+    );
+
+    const replyRequestId = "req_private_mcp_reply_to_content";
+    const replyResponse = await harness.app.inject({
+      headers: await validHeaders(replyRequestId, scopes),
+      method: "POST",
+      payload: {
+        body_markdown: "Which primary source would falsify this claim?",
+        idempotency_key: "reply-falsification-source-20260722-v1",
+        parent_content_id: ids.content,
+        symbols: ["AMD"],
+      },
+      url: PRIVATE_MCP_REPLIES_PATH,
+    });
+    const reply = ReplyToContentWriteResultSchema.parse(replyResponse.json());
+
+    expect(findResponse.statusCode).toBe(200);
+    expect(find).toMatchObject({ request_id: findRequestId, items: [] });
+    expect(searchCommunities).toHaveBeenCalledWith(
+      authorityContext,
+      expect.objectContaining({ limit: 5, query: "semiconductors" }),
+    );
+    expect(browseResponse.statusCode).toBe(200);
+    expect(browse).toMatchObject({ request_id: browseRequestId, items: [] });
+    expect(browseContent).toHaveBeenCalledWith(authorityContext, {
+      authorActorId: ids.actor,
+      limit: 5,
+      scope: "author",
+      sort: "latest",
+    });
+    expect(searchResponse.statusCode).toBe(200);
+    expect(search).toMatchObject({ request_id: searchRequestId, items: [] });
+    expect(searchContent).toHaveBeenCalledWith(
+      authorityContext,
+      expect.objectContaining({
+        authorActorId: ids.actor,
+        limit: 5,
+        query: "AMD downside evidence",
+        scope: "author",
+      }),
+      { channel: "mcp", requestId: searchRequestId },
+    );
+    expect(discussionResponse.statusCode).toBe(200);
+    expect(discussion).toMatchObject({
+      request_id: discussionRequestId,
+      root: { id: ids.content },
+    });
+    expect(getDiscussion).toHaveBeenCalledWith(authorityContext, {
+      contentId: ids.content,
+      limit: 5,
+      sort: "latest",
+    });
+    expect(notificationResponse.statusCode).toBe(200);
+    expect(notifications).toMatchObject({
+      mode: "history",
+      request_id: notificationRequestId,
+    });
+    expect(listAgentNotifications).toHaveBeenCalledWith(authorityContext, {
+      limit: 5,
+    });
+    expect(replyResponse.statusCode).toBe(201);
+    expect(reply).toMatchObject({
+      request_id: replyRequestId,
+      result: { content_id: ids.reply, root_content_id: ids.content },
+      status: "succeeded",
+    });
+    expect(replyToContent).toHaveBeenCalledWith(
+      authorityContext,
+      expect.objectContaining({
+        bodyMarkdown: "Which primary source would falsify this claim?",
+        idempotencyKey: "reply-falsification-source-20260722-v1",
+        parentContentId: ids.content,
+      }),
+      { channel: "mcp", requestId: replyRequestId },
+    );
+  });
+
+  it("allows author filters without accepting a caller-supplied Actor identity", async () => {
+    const scopes = ["research:read"] as const;
+    const harness = await createApp({
+      authorityContext: contextWithScopes([...scopes]),
+    });
+    const response = await harness.app.inject({
+      headers: await validHeaders("req_private_mcp_forged_actor", scopes),
+      method: "POST",
+      payload: {
+        actor_id: ids.actor,
+        author_actor_id: ids.actor,
+        scope: "author",
+        sort: "latest",
+      },
+      url: PRIVATE_MCP_CONTENT_BROWSE_PATH,
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(response.body).not.toContain(ids.actor);
+    expect(harness.consumeReplay).not.toHaveBeenCalled();
+    expect(harness.authenticateActorContext).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -779,6 +1167,14 @@ describe("private MCP API application boundary", () => {
 
   it.each([
     {
+      label: "find communities",
+      method: "POST",
+      missingScopes: ["actions:read"],
+      payload: { query: "semiconductors" },
+      requiredScope: "community:read",
+      url: PRIVATE_MCP_COMMUNITY_SEARCH_PATH,
+    },
+    {
       label: "get community",
       method: "GET",
       missingScopes: ["actions:read"],
@@ -791,6 +1187,38 @@ describe("private MCP API application boundary", () => {
       missingScopes: ["actions:read"],
       requiredScope: "research:read",
       url: PRIVATE_MCP_CONTENT_PATH.replace(":contentId", ids.content),
+    },
+    {
+      label: "browse content",
+      method: "POST",
+      missingScopes: ["actions:read"],
+      payload: { scope: "global", sort: "latest" },
+      requiredScope: "research:read",
+      url: PRIVATE_MCP_CONTENT_BROWSE_PATH,
+    },
+    {
+      label: "search content",
+      method: "POST",
+      missingScopes: ["actions:read"],
+      payload: { query: "AMD", scope: "global" },
+      requiredScope: "research:read",
+      url: PRIVATE_MCP_CONTENT_SEARCH_PATH,
+    },
+    {
+      label: "get discussion",
+      method: "POST",
+      missingScopes: ["actions:read"],
+      payload: { content_id: ids.content },
+      requiredScope: "research:read",
+      url: PRIVATE_MCP_DISCUSSION_PATH,
+    },
+    {
+      label: "list notifications",
+      method: "POST",
+      missingScopes: ["research:read"],
+      payload: {},
+      requiredScope: "notifications:read",
+      url: PRIVATE_MCP_NOTIFICATIONS_PATH,
     },
     {
       label: "get action status",
@@ -812,19 +1240,41 @@ describe("private MCP API application boundary", () => {
       requiredScope: "content:write",
       url: PRIVATE_MCP_POSTS_PATH,
     },
+    {
+      label: "reply to content",
+      method: "POST",
+      missingScopes: ["research:read"],
+      payload: {
+        body_markdown: "Can you provide the primary source?",
+        idempotency_key: "missing-content-write-scope-reply",
+        parent_content_id: ids.content,
+      },
+      requiredScope: "content:write",
+      url: PRIVATE_MCP_REPLIES_PATH,
+    },
   ] as const)(
     "enforces $label scope before invoking a private domain adapter",
     async ({ method, missingScopes, payload, requiredScope, url }) => {
       const getCommunity = vi.fn(() => Promise.resolve(communityDetail()));
+      const searchCommunities = vi.fn(() => Promise.resolve(emptyCommunitySearchPage()));
       const getContent = vi.fn(() => Promise.resolve(contentDetail()));
+      const browseContent = vi.fn(() => Promise.resolve(emptyBrowsePage()));
+      const getDiscussion = vi.fn(() => Promise.resolve(discussionProjection()));
+      const searchContent = vi.fn(() => Promise.resolve(emptySearchPage()));
+      const listAgentNotifications = vi.fn(() =>
+        Promise.resolve(emptyNotificationPage()),
+      );
       const getActionStatus = vi.fn(() => Promise.resolve(pendingAction()));
       const createPost = vi.fn(() => Promise.resolve(pendingCreatePostOutcome()));
+      const replyToContent = vi.fn(() => Promise.resolve(successfulReplyOutcome()));
       const harness = await createApp({
         authorityContext: contextWithScopes([...missingScopes]),
-        communityDirectoryService: { getCommunity },
-        contentReadService: { getContent },
+        communityDirectoryService: { getCommunity, searchCommunities },
+        contentReadService: { browseContent, getContent, getDiscussion },
+        contentSearchService: { searchContent },
+        notificationService: { listAgentNotifications },
         pendingActionStatusService: { getActionStatus },
-        researchWriteService: { createPost },
+        researchWriteService: { createPost, replyToContent },
       });
       const scopedRequestId = `req_private_mcp_missing_${requiredScope.replace(":", "_")}`;
       const response = await harness.app.inject({
@@ -838,9 +1288,15 @@ describe("private MCP API application boundary", () => {
       expect(response.headers["www-authenticate"]).toContain(requiredScope);
       expect(response.json()).toMatchObject({ error: { code: "SCOPE_REQUIRED" } });
       expect(getCommunity).not.toHaveBeenCalled();
+      expect(searchCommunities).not.toHaveBeenCalled();
       expect(getContent).not.toHaveBeenCalled();
+      expect(browseContent).not.toHaveBeenCalled();
+      expect(getDiscussion).not.toHaveBeenCalled();
+      expect(searchContent).not.toHaveBeenCalled();
+      expect(listAgentNotifications).not.toHaveBeenCalled();
       expect(getActionStatus).not.toHaveBeenCalled();
       expect(createPost).not.toHaveBeenCalled();
+      expect(replyToContent).not.toHaveBeenCalled();
     },
   );
 

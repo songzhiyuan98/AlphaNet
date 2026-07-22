@@ -10,6 +10,7 @@ import {
   type CreatePostRequest,
   type CreatePostWriteResult,
   type DeleteContentWriteResult,
+  type ReplyToContentRequest,
   type ReplyToContentWriteResult,
   type UpdateContentWriteResult,
   type V1ErrorDetail,
@@ -394,6 +395,46 @@ export async function handleAgentCreatePost(
   }
 }
 
+export async function handleAgentReplyToContent(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  service: Pick<ResearchWriteService, "replyToContent">,
+  context: Parameters<ResearchWriteService["replyToContent"]>[0],
+  input: ReplyToContentRequest,
+  channel: "mcp" | "rest",
+  actionLocationPrefix = "/v1/actions",
+): Promise<unknown> {
+  try {
+    const outcome = await service.replyToContent(
+      context,
+      {
+        parentContentId: input.parent_content_id,
+        bodyMarkdown: input.body_markdown,
+        symbols: input.symbols,
+        topics: input.topics,
+        sourceLinks: input.source_links,
+        references: input.references?.map((reference) => ({
+          targetContentId: reference.target_content_id,
+          relationType: reference.relation_type,
+        })),
+        idempotencyKey: input.idempotency_key,
+      },
+      { channel, requestId: request.id },
+    );
+    const response = serializeReply(request, outcome);
+    if (!response) {
+      request.log.error(
+        { operation: outcome.operation, status: outcome.status },
+        "Reply result violated its Agent response contract",
+      );
+      return sendWriteError(request, reply, new Error("projection invalid"));
+    }
+    return sendOutcome(reply, outcome, response, actionLocationPrefix);
+  } catch (error) {
+    return sendWriteError(request, reply, error);
+  }
+}
+
 function statusForOutcomeError(code: ResearchWriteErrorCode | undefined): number {
   switch (code) {
     case "ACTION_CANCELLED":
@@ -506,36 +547,14 @@ export function registerResearchWriteRoutes(
         idempotency_key: key,
       });
       if (!body.success) return validationFailed(request, reply);
-
-      try {
-        const outcome = await options.service.replyToContent(
-          authorization.context,
-          {
-            parentContentId: body.data.parent_content_id,
-            bodyMarkdown: body.data.body_markdown,
-            symbols: body.data.symbols,
-            topics: body.data.topics,
-            sourceLinks: body.data.source_links,
-            references: body.data.references?.map((reference) => ({
-              targetContentId: reference.target_content_id,
-              relationType: reference.relation_type,
-            })),
-            idempotencyKey: body.data.idempotency_key,
-          },
-          { channel: "rest", requestId: request.id },
-        );
-        const response = serializeReply(request, outcome);
-        if (!response) {
-          request.log.error(
-            { operation: outcome.operation, status: outcome.status },
-            "Reply result violated its public response contract",
-          );
-          return sendWriteError(request, reply, new Error("projection invalid"));
-        }
-        return sendOutcome(reply, outcome, response);
-      } catch (error) {
-        return sendWriteError(request, reply, error);
-      }
+      return handleAgentReplyToContent(
+        request,
+        reply,
+        options.service,
+        authorization.context,
+        body.data,
+        "rest",
+      );
     },
   );
 

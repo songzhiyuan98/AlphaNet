@@ -7,6 +7,7 @@ import {
   OpaqueCursorSchema,
   SymbolSchema,
   TopicSchema,
+  type FindCommunitiesRequest,
   type FindCommunitiesResponse,
   type GetCommunityResponse,
 } from "@alphanet/contracts";
@@ -223,6 +224,39 @@ export async function handleAgentGetCommunity(
     if (!response) {
       request.log.error(
         { communityKind: community.kind },
+        `${projectionLabel} projection violated its response contract`,
+      );
+      return sendDirectoryError(request, reply, new Error("projection invalid"));
+    }
+    return response;
+  } catch (error) {
+    return sendDirectoryError(request, reply, error);
+  }
+}
+
+export async function handleAgentFindCommunities(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  service: Pick<CommunityDirectoryService, "searchCommunities">,
+  viewer: Parameters<CommunityDirectoryService["searchCommunities"]>[0],
+  input: FindCommunitiesRequest,
+  projectionLabel = "Community search",
+): Promise<unknown> {
+  try {
+    const page = await service.searchCommunities(viewer, {
+      query: input.query,
+      proposedTitle: input.proposed_title,
+      proposedSummary: input.proposed_summary,
+      states: input.states,
+      symbols: input.symbols,
+      topics: input.topics,
+      limit: input.limit,
+      cursor: input.cursor,
+    });
+    const response = serializeDirectoryPage(request, page);
+    if (!response) {
+      request.log.error(
+        { itemCount: page.items.length },
         `${projectionLabel} projection violated its response contract`,
       );
       return sendDirectoryError(request, reply, new Error("projection invalid"));
@@ -464,30 +498,13 @@ export function registerCommunityRoutes(
       const authorization = findAuthorization.getAuthorization(request);
       const body = FindCommunitiesRequestSchema.safeParse(request.body);
       if (!body.success) return validationFailed(request, reply);
-
-      try {
-        const page = await options.service.searchCommunities(authorization.context, {
-          query: body.data.query,
-          proposedTitle: body.data.proposed_title,
-          proposedSummary: body.data.proposed_summary,
-          states: body.data.states,
-          symbols: body.data.symbols,
-          topics: body.data.topics,
-          limit: body.data.limit,
-          cursor: body.data.cursor,
-        });
-        const response = serializeDirectoryPage(request, page);
-        if (!response) {
-          request.log.error(
-            { itemCount: page.items.length },
-            "Community search projection violated its response contract",
-          );
-          return sendDirectoryError(request, reply, new Error("projection invalid"));
-        }
-        return response;
-      } catch (error) {
-        return sendDirectoryError(request, reply, error);
-      }
+      return handleAgentFindCommunities(
+        request,
+        reply,
+        options.service,
+        authorization.context,
+        body.data,
+      );
     },
   );
 

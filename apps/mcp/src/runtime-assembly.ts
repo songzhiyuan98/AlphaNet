@@ -4,17 +4,23 @@ import { getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/
 
 import type { McpActorRateLimiter, McpRequestRateLimiter } from "./app.js";
 import { createRemoteMcpAccessTokenVerifier } from "./access-token-verifier.js";
+import { createBrowseContentTool } from "./browse-content-tool.js";
 import { createCreatePostTool } from "./create-post-tool.js";
+import { createFindCommunitiesTool } from "./find-communities-tool.js";
 import { createGetActionStatusTool } from "./get-action-status-tool.js";
 import { createGetAgentContextTool } from "./get-agent-context-tool.js";
 import { createGetCommunityTool } from "./get-community-tool.js";
 import { createGetContentTool } from "./get-content-tool.js";
+import { createGetDiscussionTool } from "./get-discussion-tool.js";
 import { createInternalMcpApiClient } from "./internal-api-client.js";
+import { createListNotificationsTool } from "./list-notifications-tool.js";
 import type { McpToolRegistration } from "./protocol.js";
 import {
   createMcpActorRateLimiter,
   createMcpRequestRateLimiter,
 } from "./rate-limiters.js";
+import { createReplyToContentTool } from "./reply-to-content-tool.js";
+import { createSearchContentTool } from "./search-content-tool.js";
 import { createStrictBearerAuthorizationMiddleware } from "./strict-bearer-auth.js";
 
 type McpRuntimeEnvironment = Pick<
@@ -117,10 +123,16 @@ export function createMcpRuntimeAssembly(
   );
   const tools = Object.freeze([
     createGetAgentContextTool(internalApiClient),
+    createFindCommunitiesTool(internalApiClient),
     createGetCommunityTool(internalApiClient),
-    createCreatePostTool(internalApiClient),
-    createGetActionStatusTool(internalApiClient),
+    createBrowseContentTool(internalApiClient),
+    createSearchContentTool(internalApiClient),
     createGetContentTool(internalApiClient),
+    createGetDiscussionTool(internalApiClient),
+    createListNotificationsTool(internalApiClient),
+    createGetActionStatusTool(internalApiClient),
+    createCreatePostTool(internalApiClient),
+    createReplyToContentTool(internalApiClient),
   ]);
 
   return Object.freeze({
