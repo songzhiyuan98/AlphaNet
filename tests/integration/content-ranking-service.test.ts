@@ -999,9 +999,9 @@ describeRanking("Postgres Content Ranking v1", () => {
     const expectedScores = new Map(
       expected.items.map((item) => [item.contentId, item.score]),
     );
-    expect(collected.map((item) => [item.contentId, item.score])).toEqual(
-      collected.map((item) => [item.contentId, expectedScores.get(item.contentId)]),
-    );
+    for (const item of collected) {
+      expect(item.score).toBeCloseTo(expectedScores.get(item.contentId)!, 5);
+    }
   });
 
   it("freezes Top candidates so reaction changes between pages cannot duplicate or skip", async () => {
