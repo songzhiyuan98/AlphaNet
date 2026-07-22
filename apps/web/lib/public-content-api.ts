@@ -3,6 +3,7 @@ import {
   GetContentResponseSchema,
   GetDiscussionResponseSchema,
   SearchContentResponseSchema,
+  type BrowseContentRequest,
   type BrowseContentResponse,
   type GetContentResponse,
   type GetDiscussionResponse,
@@ -27,7 +28,9 @@ export type PublicContentBrowseOptions = PublicContentScope & {
   contentTypes?: readonly ("post" | "reply")[] | undefined;
   cursor?: string | undefined;
   limit?: number | undefined;
-  sort?: "active" | "latest" | undefined;
+  sort?: BrowseContentRequest["sort"] | undefined;
+  topMetric?: BrowseContentRequest["top_metric"] | undefined;
+  window?: BrowseContentRequest["window"] | undefined;
 };
 
 function apiInternalUrl(): string {
@@ -109,6 +112,8 @@ export function getPublicContent(
   if (options.contentTypes?.length) {
     parameters.set("content_types", options.contentTypes.join(","));
   }
+  if (options.topMetric) parameters.set("top_metric", options.topMetric);
+  if (options.window) parameters.set("window", options.window);
   if (options.limit) parameters.set("limit", String(options.limit));
   if (options.cursor) parameters.set("cursor", options.cursor);
 

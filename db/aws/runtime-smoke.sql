@@ -64,6 +64,25 @@ BEGIN
       'Runtime can bypass the bounded Search snapshot store function';
   END IF;
 
+  IF has_table_privilege(
+       current_user,
+       'system.content_ranking_candidate_snapshots',
+       'INSERT'
+     )
+     OR has_table_privilege(
+       current_user,
+       'system.content_ranking_candidate_snapshots',
+       'UPDATE'
+     )
+     OR has_table_privilege(
+       current_user,
+       'system.content_ranking_candidate_snapshots',
+       'DELETE'
+     ) THEN
+    RAISE EXCEPTION
+      'Runtime can bypass the bounded Content ranking snapshot store function';
+  END IF;
+
   BEGIN
     PERFORM system.redrive_content_embedding_job(
       pg_catalog.gen_random_uuid()
@@ -229,6 +248,9 @@ SELECT
     AS search_snapshot_id,
   pg_catalog.gen_random_uuid()::text AS search_snapshot_content_id,
   pg_catalog.gen_random_uuid()::text AS search_snapshot_revision_id,
+  'crs_' || left(replace(pg_catalog.gen_random_uuid()::text, '-', ''), 32)
+    AS ranking_snapshot_id,
+  pg_catalog.gen_random_uuid()::text AS ranking_snapshot_content_id,
   pg_catalog.gen_random_uuid()::text AS aggregate_id,
   pg_catalog.gen_random_uuid()::text AS consumer_suffix
 \gset
@@ -1060,6 +1082,24 @@ SELECT system.purge_expired_content_search_candidate_snapshots(1000)
   AS expired_search_snapshot_purge_count
 \gset
 
+SELECT system.store_content_ranking_candidate_snapshot(
+  :'ranking_snapshot_id',
+  public.digest('runtime-smoke-binding:' || :'ranking_snapshot_id', 'sha256'),
+  'browse',
+  jsonb_build_array(jsonb_build_object(
+    'content_id', :'ranking_snapshot_content_id',
+    'created_at', '2026-07-21T00:00:00.000Z',
+    'order_at', '2026-07-21T00:00:00.000Z',
+    'score_micros', 1000000
+  )),
+  clock_timestamp() + interval '5 minutes'
+) AS ranking_snapshot_stored
+\gset
+
+SELECT system.purge_expired_content_ranking_candidate_snapshots(1000)
+  AS expired_ranking_snapshot_purge_count
+\gset
+
 INSERT INTO system.outbox_events (
   aggregate_type,
   aggregate_id,
@@ -1261,6 +1301,25 @@ SELECT (
         'sha256'
       )
       AND jsonb_array_length(candidates) = 1
+  )
+  AND :'ranking_snapshot_stored'::boolean
+  AND :'expired_ranking_snapshot_purge_count'::integer BETWEEN 0 AND 1000
+  AND EXISTS (
+    SELECT 1
+    FROM system.content_ranking_candidate_snapshots
+    WHERE snapshot_id = :'ranking_snapshot_id'
+      AND binding_hmac = public.digest(
+        'runtime-smoke-binding:' || :'ranking_snapshot_id',
+        'sha256'
+      )
+      AND snapshot_kind = 'browse'
+      AND jsonb_array_length(candidates) = 1
+      AND candidates -> 0 = jsonb_build_object(
+        'content_id', :'ranking_snapshot_content_id',
+        'created_at', '2026-07-21T00:00:00.000Z',
+        'order_at', '2026-07-21T00:00:00.000Z',
+        'score_micros', 1000000
+      )
   )
   AND EXISTS (
     SELECT 1

@@ -11,6 +11,10 @@ import {
 } from "../../../lib/forward-pagination";
 import { getPublicStockCommunity } from "../../../lib/public-community-api";
 import { getPublicContent } from "../../../lib/public-content-api";
+import {
+  publicFeedRankingOptions,
+  readPublicFeedSort,
+} from "../../../lib/public-content-ranking";
 
 export const dynamic = "force-dynamic";
 
@@ -35,7 +39,7 @@ export default async function StockCommunityPage({
 }) {
   const { symbol: rawSymbol } = await params;
   const query = await searchParams;
-  const sort = query.sort === "active" ? "active" : "latest";
+  const sort = readPublicFeedSort(query.sort);
   const cursor = readForwardCursor(query.cursor);
   const symbol = rawSymbol.toUpperCase();
   if (!/^[A-Z0-9][A-Z0-9.-]{0,14}$/.test(symbol)) notFound();
@@ -61,7 +65,7 @@ export default async function StockCommunityPage({
     cursor,
     limit: 20,
     scope: "community",
-    sort,
+    ...publicFeedRankingOptions(sort),
   });
   const feedData = feed.kind === "success" ? feed.data : null;
   return (

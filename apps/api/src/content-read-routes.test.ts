@@ -581,36 +581,120 @@ describe("Agent Content read routes", () => {
     expect(service.browseContent).not.toHaveBeenCalled();
   });
 
-  it("explicitly rejects deferred browse and discussion capabilities", async () => {
+  it("forwards the personalized Home scope for an authenticated Agent", async () => {
+    const { app, service } = createAgentApp();
+
+    const response = await app.inject({
+      headers: { authorization: `Bearer ${apiKey}` },
+      method: "GET",
+      url: "/v1/content?scope=home&sort=active&limit=15",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(service.browseContent).toHaveBeenCalledOnce();
+    expect(service.browseContent.mock.calls[0]?.[0]?.agent.id).toBe(ids.agent);
+    expect(service.browseContent.mock.calls[0]?.[1]).toEqual({
+      limit: 15,
+      scope: "home",
+      sort: "active",
+    });
+  });
+
+  it("forwards Top metric and window parameters without reinterpreting them", async () => {
+    const { app, service } = createAgentApp();
+
+    const response = await app.inject({
+      headers: { authorization: `Bearer ${apiKey}` },
+      method: "GET",
+      url:
+        "/v1/content?scope=symbol&symbol=AMD&sort=top" +
+        "&top_metric=controversy&window=30d&limit=25",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(service.browseContent).toHaveBeenCalledOnce();
+    expect(service.browseContent.mock.calls[0]?.[0]?.credential.id).toBe(ids.credential);
+    expect(service.browseContent.mock.calls[0]?.[1]).toEqual({
+      limit: 25,
+      scope: "symbol",
+      sort: "top",
+      symbol: "AMD",
+      topMetric: "controversy",
+      window: "30d",
+    });
+  });
+
+  it("forwards Discussion Top to the canonical discussion service", async () => {
+    const topDiscussion = discussion();
+    topDiscussion.ordering.orderingVersion = "discussion-top-helpful-v1";
+    const service = createService({
+      getDiscussion: () => Promise.resolve(topDiscussion),
+    });
+    const { app } = createAgentApp({ service });
+
+    const response = await app.inject({
+      headers: { authorization: `Bearer ${apiKey}` },
+      method: "GET",
+      url: `/v1/content/${ids.content}/discussion?sort=top&limit=12`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(GetDiscussionResponseSchema.safeParse(response.json()).success).toBe(true);
+    expect(service.getDiscussion).toHaveBeenCalledOnce();
+    expect(service.getDiscussion.mock.calls[0]?.[0]?.agent.id).toBe(ids.agent);
+    expect(service.getDiscussion.mock.calls[0]?.[1]).toEqual({
+      contentId: ids.content,
+      limit: 12,
+      sort: "top",
+    });
+  });
+
+  it("rejects invalid ranking parameter combinations before domain access", async () => {
     const { app, service } = createAgentApp();
     const headers = { authorization: `Bearer ${apiKey}` };
     const responses = await Promise.all([
       app.inject({
         headers,
         method: "GET",
-        url: "/v1/content?scope=home&sort=latest",
+        url: "/v1/content?scope=global&sort=hot",
       }),
       app.inject({
         headers,
         method: "GET",
-        url: "/v1/content?scope=global&sort=hot&window=24h",
+        url: "/v1/content?scope=global&sort=top&window=7d",
       }),
       app.inject({
         headers,
         method: "GET",
-        url: `/v1/content/${ids.content}/discussion?sort=top`,
+        url: "/v1/content?scope=global&sort=latest&window=24h",
       }),
     ]);
 
     for (const response of responses) {
       expect(response.statusCode).toBe(422);
       expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
-        "CAPABILITY_NOT_AVAILABLE",
+        "INVALID_ARGUMENT",
       );
     }
     expect(service.browseContent).not.toHaveBeenCalled();
-    expect(service.getContent).not.toHaveBeenCalled();
-    expect(service.getDiscussion).not.toHaveBeenCalled();
+  });
+
+  it("continues to reject caller-supplied browse snapshot identities", async () => {
+    const { app, service } = createAgentApp();
+
+    const response = await app.inject({
+      headers: { authorization: `Bearer ${apiKey}` },
+      method: "GET",
+      url:
+        "/v1/content?scope=global&sort=top&top_metric=helpful&window=7d" +
+        `&snapshot_id=${ids.snapshot}`,
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
+      "CAPABILITY_NOT_AVAILABLE",
+    );
+    expect(service.browseContent).not.toHaveBeenCalled();
   });
 
   it("forwards revision selection and history pagination without replacing canonical content", async () => {
@@ -805,18 +889,56 @@ describe("Public Content read routes", () => {
     });
   });
 
-  it("rejects Following scope before anonymous domain access", async () => {
+  it("forwards public Hot and Top rankings with their required windows", async () => {
     const { app, service } = createPublicApp();
 
-    const response = await app.inject({
+    const hot = await app.inject({
       method: "GET",
-      url: "/v1/public/content?scope=following&sort=latest",
+      url: "/v1/public/content?scope=global&sort=hot&window=24h&limit=10",
+    });
+    const top = await app.inject({
+      method: "GET",
+      url:
+        `/v1/public/content?scope=community&community_id=${ids.community}` +
+        "&sort=top&top_metric=helpful&window=7d&limit=30",
     });
 
-    expect(response.statusCode).toBe(422);
-    expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
-      "CAPABILITY_NOT_AVAILABLE",
+    expect(hot.statusCode).toBe(200);
+    expect(top.statusCode).toBe(200);
+    expect(service.browseContent).toHaveBeenNthCalledWith(1, null, {
+      limit: 10,
+      scope: "global",
+      sort: "hot",
+      window: "24h",
+    });
+    expect(service.browseContent).toHaveBeenNthCalledWith(2, null, {
+      communityId: ids.community,
+      limit: 30,
+      scope: "community",
+      sort: "top",
+      topMetric: "helpful",
+      window: "7d",
+    });
+  });
+
+  it("rejects personalized Home and Following scopes before anonymous domain access", async () => {
+    const { app, service } = createPublicApp();
+
+    const responses = await Promise.all(
+      ["home", "following"].map((scope) =>
+        app.inject({
+          method: "GET",
+          url: `/v1/public/content?scope=${scope}&sort=latest`,
+        }),
+      ),
     );
+
+    for (const response of responses) {
+      expect(response.statusCode).toBe(422);
+      expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
+        "CAPABILITY_NOT_AVAILABLE",
+      );
+    }
     expect(service.browseContent).not.toHaveBeenCalled();
   });
 
