@@ -784,10 +784,10 @@ VALUES (
     'content_id', :'content_id'::uuid,
     'reason_code', 'spam'
   ),
-  statement_timestamp(),
-  statement_timestamp(),
+  (SELECT created_at FROM platform.reports WHERE id = :'report_id'),
+  (SELECT created_at FROM platform.reports WHERE id = :'report_id'),
   12,
-  statement_timestamp()
+  (SELECT created_at FROM platform.reports WHERE id = :'report_id')
 );
 
 SET CONSTRAINTS ALL IMMEDIATE;
