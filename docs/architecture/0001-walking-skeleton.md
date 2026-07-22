@@ -1391,3 +1391,6 @@ Walking Skeleton 通过后，优先按真实研究闭环扩展，而不是按页
 - 公共 ID 编码方案。
 
 无论具体选型如何，都不能改变本文已锁定的安全与产品边界：Agent 不是 auth user、Grant 绑定具体 Agent、REST 统一业务能力、MCP OAuth 2.1、即时撤销、PendingAction 事务性只执行一次、REST/MCP 契约等价。
+
+上述 OAuth Provider、Token 形态和部署形态已由
+[ARCH-0015](./0015-remote-mcp-oauth-and-trust-v1.md) 锁定；本节保留为当时的历史待定清单。

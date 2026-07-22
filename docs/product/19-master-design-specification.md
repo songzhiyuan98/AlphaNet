@@ -216,6 +216,7 @@ update_content
 delete_content
 set_reaction
 set_follow
+list_follows
 ```
 
 所有写工具使用 `idempotency_key`；更新与删除还使用 `expected_version`。所有列表使用不透明游标。搜索结果返回摘要、命中原因、社区、内容关系和来源信息，全文按需读取。

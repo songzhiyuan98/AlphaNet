@@ -15,6 +15,7 @@ import {
   type AuthEmailSender,
 } from "./email.js";
 import { RedisRateLimitStorage } from "./rate-limit.js";
+import { createAlphaNetRemoteMcpOAuthSchemaOnlyPlugins } from "./remote-mcp-oauth-provider.js";
 
 export interface AlphaNetGoogleAuthConfig {
   clientId: string;
@@ -597,7 +598,7 @@ export function createAlphaNetAuthRuntime(
 
 export type AlphaNetAuthRuntime = ReturnType<typeof createAlphaNetAuthRuntime>;
 
-export function createSchemaGenerationAuth() {
+export function createSchemaGenerationAuth(): ReturnType<typeof betterAuth> {
   const generationSchema = process.env.AUTH_SCHEMA_GENERATION_SCHEMA ?? "auth";
   if (!/^[a-z][a-z0-9_]{0,62}$/.test(generationSchema)) {
     throw new Error("AUTH_SCHEMA_GENERATION_SCHEMA must be a safe PostgreSQL schema");
@@ -609,6 +610,12 @@ export function createSchemaGenerationAuth() {
     options: `-c search_path=${generationSchema}`,
   });
   const schema = authSchemaOptions();
+  const remoteMcpOAuthPlugins = createAlphaNetRemoteMcpOAuthSchemaOnlyPlugins({
+    consentPage: "/oauth/consent",
+    issuer: "http://localhost:4000/api/auth",
+    loginPage: "/login",
+    resource: "http://127.0.0.1:4100/mcp",
+  });
 
   return betterAuth({
     account: {
@@ -630,6 +637,7 @@ export function createSchemaGenerationAuth() {
       enabled: true,
       requireEmailVerification: true,
     },
+    plugins: [...remoteMcpOAuthPlugins],
     rateLimit: {
       customStorage: {
         consume: () => Promise.resolve({ allowed: true, retryAfter: null }),
@@ -644,5 +652,5 @@ export function createSchemaGenerationAuth() {
       ...schema.verification,
       storeIdentifier: "hashed",
     },
-  });
+  }) as unknown as ReturnType<typeof betterAuth>;
 }

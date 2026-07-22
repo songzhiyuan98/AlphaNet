@@ -32,6 +32,26 @@ FROM (
 CROSS JOIN unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE']) AS privilege;
 
 INSERT INTO expected_table_privileges (schema_name, table_name, privilege)
+VALUES ('auth', 'oauth_clients', 'SELECT');
+
+INSERT INTO expected_table_privileges (schema_name, table_name, privilege)
+SELECT 'auth', table_name, privilege
+FROM (VALUES ('oauth_jwks'::name)) AS auth_table(table_name)
+CROSS JOIN unnest(ARRAY['SELECT', 'INSERT']) AS privilege;
+
+INSERT INTO expected_table_privileges (schema_name, table_name, privilege)
+SELECT 'auth', table_name, privilege
+FROM (VALUES ('oauth_access_tokens'::name)) AS auth_table(table_name)
+CROSS JOIN unnest(ARRAY['SELECT', 'INSERT', 'DELETE']) AS privilege;
+
+INSERT INTO expected_table_privileges (schema_name, table_name, privilege)
+SELECT 'auth', table_name, privilege
+FROM (
+  VALUES ('oauth_consents'::name), ('oauth_refresh_tokens'::name)
+) AS auth_table(table_name)
+CROSS JOIN unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE']) AS privilege;
+
+INSERT INTO expected_table_privileges (schema_name, table_name, privilege)
 SELECT 'platform', table_name, 'SELECT'
 FROM (
   VALUES
@@ -62,6 +82,10 @@ FROM (
     ('moderation_case_items'::name),
     ('moderation_cases'::name),
     ('notifications'::name),
+    ('oauth_access_token_jtis'::name),
+    ('oauth_authorization_requests'::name),
+    ('oauth_grants'::name),
+    ('oauth_resource_configuration'::name),
     ('owners'::name),
     ('pending_action_attempts'::name),
     ('pending_actions'::name),
@@ -93,6 +117,9 @@ FROM (
     ('credentials'::name),
     ('idempotency_records'::name),
     ('mentions'::name),
+    ('oauth_access_token_jtis'::name),
+    ('oauth_authorization_requests'::name),
+    ('oauth_grants'::name),
     ('pending_actions'::name),
     ('reactions'::name),
     ('source_links'::name)
@@ -115,6 +142,9 @@ FROM (
     ('agents'::name),
     ('credentials'::name),
     ('idempotency_records'::name),
+    ('oauth_access_token_jtis'::name),
+    ('oauth_authorization_requests'::name),
+    ('oauth_grants'::name),
     ('pending_action_attempts'::name),
     ('pending_actions'::name)
 ) AS platform_table(table_name);
@@ -402,6 +432,11 @@ VALUES
   ('platform', 'canonical_discovery_tags_are_valid', 'candidate text[]'),
   ('platform', 'community_posting_rules_are_valid', 'candidate jsonb'),
   ('platform', 'discovery_tags_are_valid', 'candidate text[]'),
+  ('platform', 'oauth_provider_scopes_are_valid', 'candidate jsonb'),
+  ('platform', 'oauth_redirect_uris_are_valid', 'candidate jsonb'),
+  ('platform', 'oauth_requested_scopes_are_valid', 'candidate text[]'),
+  ('platform', 'oauth_resource_is_valid', 'candidate text'),
+  ('platform', 'oauth_text_arrays_are_same_set', 'left_values text[], right_values text[]'),
   ('platform', 'purge_expired_agent_search_activity_events', 'candidate_batch_size integer'),
   ('platform', 'text_array_has_unique_values', 'candidate text[]'),
   ('system', 'claim_content_embedding_jobs', 'candidate_lease_owner text, candidate_lease_token_digest bytea, candidate_batch_size integer, candidate_lease_seconds integer'),

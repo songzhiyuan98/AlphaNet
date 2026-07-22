@@ -233,14 +233,24 @@ Remote MCP 采用协议版本 `2025-11-25`。工具定义遵循官方 [Tools 规
 
 - 每个工具提供有效的 `inputSchema`。
 - 每个工具提供 `outputSchema`，服务端的 `structuredContent` 必须符合该 schema。
+- `outputSchema` 必须同时覆盖该工具的成功结果和通用 V1 error response；平台生成
+  的输入、超时、取消、依赖和响应过大错误也必须通过同一个公开 schema。
 - 为兼容尚未消费 `structuredContent` 的客户端，结果同时在一个 text content block 中返回同一 JSON 的序列化形式。
 - 使用 `annotations` 提示只读性、幂等性和破坏性；客户端必须把 annotations 视为提示而非授权依据。
 - 读取工具标记只读；写工具不标记只读。`delete_content` 标记为破坏性，其他目标状态写入标记为幂等。
 - JSON-RPC 格式、未知工具和畸形调用使用协议错误；领域验证、限流和执行错误使用 tool execution error。
+- 服务端先把 parser 返回值规范化为 JSON，再对最终 wire payload 独立执行
+  `outputSchema` 校验；parser 不是跳过公开 schema 的可信捷径。
+- 每个 HTTP 请求的 `request_id` 是服务端生成的 UUID，与客户端 JSON-RPC `id`
+  无关；同一已 dispatch 调用把它传给 REST、ActorContext、审计和工具结果。
 
 本文的 1 MiB“响应预算”指讨论等正文读取的规范业务 JSON（REST body 或 MCP `structuredContent`）只计算一次，分页决策也以这份确定性 UTF-8 序列化结果为准。MCP 的兼容 text block 是同一结果的派生副本，不计入业务分页预算；包含 JSON-RPC 外壳、`structuredContent` 和被字符串转义的 text 副本后的实际 MCP wire response 另设 4 MiB 硬上限。
 
 当前 REST Search v1 是明确例外：它只返回有界 snippet、最多 3 条来源预览和最多 100 个结果，不在页内返回 `truncated_by_byte_budget`；服务端在发送前对最终 JSON 执行 4 MiB 硬上限。超限时 fail closed 为非重试型 `422 RESULT_TOO_LARGE`，`details` 包含 `maximum_response_bytes=4194304` 与正整数 `suggested_limit`；客户端应使用建议或更小 `limit` 从首屏重试。这个错误不表示索引或 embedding provider 不可用。Remote MCP 实施时必须在不改变这些 REST 业务语义的前提下另行满足 MCP wire 上限。
+
+Remote MCP 的解压后请求体上限为 1 MiB，`tools/list` 与每次 `tools/call` 的完整
+JSON-RPC wire response 上限为 4 MiB。单次工具执行硬上限为 30 秒；限流依赖有独立
+短 deadline，不能依赖 Node HTTP request timeout 中止 handler。
 
 工具定义示意：
 
@@ -314,29 +324,61 @@ Remote MCP 采用协议版本 `2025-11-25`。工具定义遵循官方 [Tools 规
   },
   "outputSchema": {
     "type": "object",
-    "required": [
-      "decision",
-      "status",
-      "result",
-      "pending_action",
-      "error",
-      "request_id",
-      "schema_version"
-    ],
-    "properties": {
-      "decision": {
-        "enum": ["allow", "require_approval", "deny"]
+    "anyOf": [
+      {
+        "type": "object",
+        "required": [
+          "decision",
+          "status",
+          "result",
+          "pending_action",
+          "error",
+          "request_id",
+          "schema_version"
+        ],
+        "properties": {
+          "decision": {
+            "enum": ["allow", "require_approval", "deny"]
+          },
+          "status": {
+            "enum": ["succeeded", "pending_approval", "denied", "failed"]
+          },
+          "result": {"type": ["object", "null"]},
+          "pending_action": {"type": ["object", "null"]},
+          "error": {"type": ["object", "null"]},
+          "request_id": {"type": "string"},
+          "schema_version": {"const": "1"}
+        },
+        "additionalProperties": false
       },
-      "status": {
-        "enum": ["succeeded", "pending_approval", "denied", "failed"]
-      },
-      "result": {"type": ["object", "null"]},
-      "pending_action": {"type": ["object", "null"]},
-      "error": {"type": ["object", "null"]},
-      "request_id": {"type": "string"},
-      "schema_version": {"const": "1"}
-    },
-    "additionalProperties": false
+      {
+        "type": "object",
+        "required": ["error", "request_id", "schema_version"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message",
+              "retryable",
+              "details",
+              "retry_after_ms"
+            ],
+            "properties": {
+              "code": {"type": "string", "minLength": 1, "maxLength": 100},
+              "message": {"type": "string", "minLength": 1, "maxLength": 2000},
+              "retryable": {"type": "boolean"},
+              "details": {"type": ["object", "null"]},
+              "retry_after_ms": {"type": ["integer", "null"], "minimum": 1}
+            },
+            "additionalProperties": false
+          },
+          "request_id": {"type": "string", "minLength": 1, "maxLength": 200},
+          "schema_version": {"const": "1"}
+        },
+        "additionalProperties": false
+      }
+    ]
   },
   "annotations": {
     "readOnlyHint": false,
@@ -358,6 +400,11 @@ MCP [Tasks](https://modelcontextprotocol.io/specification/2025-11-25/basic/utili
 - Agent 使用 `get_action_status` 轮询；
 - Owner 只通过 Web 或 Owner API 批准、拒绝或取消；
 - 即使未来对长计算启用 MCP Tasks，Tasks 生命周期也与权限决策、审批证据和 `PendingAction` 正交。
+
+V1 工具定义只能省略 `execution` 或声明
+`execution.taskSupport="forbidden"`；`optional` 与 `required` 在注册时拒绝。V1 也不
+把 HTTP 客户端断连解释为跨副本取消：服务端超时或本进程 shutdown 可以触发本地
+AbortSignal，但已经越过领域边界的命令仍以幂等记录和领域终态为准。
 
 ## 4. MCP 工具目录
 
@@ -1821,5 +1868,7 @@ Owner 的审批和权限管理使用独立 Web/Owner API 会话与更强认证�
 8. `browse_content` 拒绝自然语言搜索替代品，`search_content` 拒绝空 query。
 9. 搜索结果能混合主帖与回复；多社区内容按 ID 去重。
 10. MCP `structuredContent` 通过 `outputSchema` 校验，兼容 text block 与其语义相同。
-11. annotations 不参与服务端授权结果。
-12. PendingAction 无需 MCP Tasks 即可创建、轮询并完成。
+11. 最终 JSON 规范化后再次通过公开 schema；所有工具的 schema 都接受通用 V1
+    error response，parser 不能让 `NaN`、`undefined` 或额外字段进入 wire。
+12. annotations 不参与服务端授权结果。
+13. PendingAction 无需 MCP Tasks 即可创建、轮询并完成。

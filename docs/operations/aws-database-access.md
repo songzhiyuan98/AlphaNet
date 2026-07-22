@@ -8,7 +8,10 @@ credential.
 | -------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | RDS database owner   | One-time bootstrap, extension installation, role/password rotation | Current owner of the application database and break-glass administrator; absent from normal ECS tasks                                                                                                              |
 | `alphanet_migration` | One short-lived release database task                              | Owns AlphaNet schemas and objects; can create schema objects and temporary verification objects; cannot create databases, roles, replication slots, or bypass RLS                                                  |
-| `alphanet_runtime`   | API, MCP, Worker, and auth connections                             | Reviewed table-level DML and pure CHECK-helper execution only; no schema/database creation, temporary tables, truncate, trigger management, references, role inheritance, or direct execution of trigger functions |
+| `alphanet_runtime`   | API, Worker, and auth connections                                  | Reviewed table-level DML and pure CHECK-helper execution only; no schema/database creation, temporary tables, truncate, trigger management, references, role inheritance, or direct execution of trigger functions |
+
+The MCP task deliberately receives no PostgreSQL credential. It reaches domain
+capabilities only through the internal API trust boundary.
 
 The role names can be changed through `ALPHANET_MIGRATION_ROLE` and
 `ALPHANET_RUNTIME_ROLE`, but both must remain distinct and match the guarded

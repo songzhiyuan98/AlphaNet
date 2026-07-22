@@ -22,6 +22,7 @@ regexes = [
   '''^L8wq2Uox9sV7Gm1Xc4Kd6aJ0Ph5Rt3NyE1bZfQ7i$''',
   '''^Production-SSR-Request-Secret-J8m4V2s7X5n9K3p6T1w0$''',
   '''^QJv7w8ScgVN4Xs1TBP-Wuz2HaK6e3d9Rm5Afy0LcoEi$''',
+  '''^aln_rt_v1_w7mZaPQyD4$''',
   '''^yKt8Jue5W_Q24xh6bP9FdM3Rav7CzsNe0GLi1TXUcAo$''',
 ]
 

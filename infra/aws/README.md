@@ -48,9 +48,13 @@ API / MCP ---------- ElastiCache Valkey (TLS, AUTH, cluster mode disabled)
   us-west-2 ACM certificate. A generated origin header is required by every
   forwarding rule; the default response is `403`.
 - `/api/*`, `/v1/*`, and the exact `/health/ready` route go to API. Everything
-  else, including Web `/health`, routes to Web. `/mcp` is added only when
-  `mcp_public_enabled=true`; while false, an explicit higher-priority rule
-  returns `404` instead of allowing the Web catch-all to mask the boundary.
+  else, including Web `/health`, routes to Web. `/mcp`, `/mcp/*`, and the
+  standard `/.well-known/oauth-protected-resource/mcp` discovery route are
+  reserved for MCP. They forward only when `mcp_public_enabled=true`; while
+  false, the same higher-priority rule returns `404` instead of allowing the
+  Web catch-all to mask the boundary. Public MCP additionally requires a fixed
+  custom `domain_name`; Terraform rejects using its generated CloudFront
+  hostname as the immutable OAuth Resource audience.
 - The same five immutable ECR repositories serve staging and production. A
   release is promoted by digest; it is never copied into an environment-specific
   repository or rebuilt between environments. Untagged upload artifacts expire
@@ -445,10 +449,11 @@ relies on service readiness, public reads, and exact digest verification.
   not Agent quota enforcement. Credential and IP policy remains in Redis-backed
   application limits so multiple Agents behind one NAT are not accidentally
   blocked.
-- ALB preserves CloudFront's X-Forwarded-For chain. CloudFront appends the real
-  viewer IP at the right; AlphaNet trusts only the two ALB public-subnet CIDRs
-  and resolves from right to left. A forged viewer-supplied left value is never
-  selected before the real viewer hop.
+- The CloudFront viewer-request function removes caller-supplied
+  `X-Forwarded-For`; CloudFront then appends the actual viewer IP and the ALB
+  preserves that sanitized value. AlphaNet trusts only the two ALB
+  public-subnet CIDRs. A malformed forwarded chain from a trusted peer fails
+  closed instead of collapsing callers into the shared ALB rate-limit bucket.
 - CloudFront does not forward the viewer `Host` to the TLS origin and removes
   viewer-controlled `Forwarded`/`X-Forwarded-Host`/protocol metadata. The app's
   public auth URL and trusted origin are explicit environment values, not

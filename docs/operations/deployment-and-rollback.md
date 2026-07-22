@@ -170,11 +170,19 @@ restricted to the AWS-managed CloudFront origin prefix list, and listener rules
 also require a high-entropy CloudFront origin header; the listener default is a
 fixed 403.
 
-CloudFront appends the actual viewer address to `X-Forwarded-For`; the ALB
-preserves that chain. `API_TRUSTED_PROXY_CIDRS` contains only the actual ALB
-subnet ranges. Before traffic opens, verify direct-ALB access is denied and a
-caller-supplied forwarding chain cannot change the resolved client identity or
-rate-limit bucket.
+Public MCP requires a fixed custom `domain_name`; Terraform must reject
+`mcp_public_enabled=true` when only the generated CloudFront hostname exists.
+The MCP listener rule reserves both `/mcp` and the standard
+`/.well-known/oauth-protected-resource/mcp` metadata path. While the public gate
+is false, both return an explicit 404 instead of falling through to Web.
+
+The CloudFront viewer-request function removes caller-supplied
+`X-Forwarded-For`, CloudFront appends the actual viewer address, and the ALB
+preserves that sanitized value. `API_TRUSTED_PROXY_CIDRS` and
+`MCP_TRUSTED_PROXY_CIDRS` contain only the actual ALB subnet ranges. Before
+traffic opens, verify direct-ALB access is denied, malformed trusted-proxy
+chains fail closed, and caller-supplied forwarding metadata cannot change the
+resolved client identity or rate-limit bucket.
 
 `SSR_ALLOW_MISSING_CLIENT_IP` is local-only and must remain false in AWS. Web
 signs the sanitized client chain for its private API request with
@@ -193,9 +201,9 @@ Every schema change follows expand/migrate/contract:
 
 Aurora and database defaults keep
 `log_parameter_max_length=0` and
-`log_parameter_max_length_on_error=0`. API/MCP readiness and Worker processing
-must reject unsafe values. Never grant the runtime role DDL or broader DML to
-work around a failed privilege gate.
+`log_parameter_max_length_on_error=0`. API readiness and Worker processing must
+reject unsafe values. Never grant the runtime role DDL or broader DML to work
+around a failed privilege gate.
 
 Automatic down migrations are prohibited. An application rollback is allowed
 only while the deployed schema remains compatible with the previous release.

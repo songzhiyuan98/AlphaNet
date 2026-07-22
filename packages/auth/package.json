@@ -17,16 +17,19 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "clean": "rm -rf dist coverage",
-    "schema:check": "node scripts/check-schema.mjs",
+    "schema:check": "pnpm --filter @alphanet/contracts build && node scripts/check-schema.mjs",
     "test": "vitest run src",
     "test:coverage": "vitest run src --coverage",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@alphanet/contracts": "workspace:*",
+    "@better-auth/oauth-provider": "1.6.23",
     "better-auth": "1.6.23",
     "ioredis": "5.11.1",
     "jose": "6.2.3",
-    "pg": "8.22.0"
+    "pg": "8.22.0",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/node": "22.20.1",

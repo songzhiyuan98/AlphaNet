@@ -379,6 +379,53 @@ env \
   PGPASSWORD="${ALPHANET_MIGRATION_PASSWORD}" \
   /bin/bash "${SCRIPT_DIR}/aws-apply-runtime-privileges.sh" >/dev/null
 
+# Execute the Remote MCP OAuth helper chain under the real Runtime role. The
+# verifier checks the exact ACL inventory; this probe additionally catches a
+# helper-to-helper EXECUTE dependency that would otherwise surface only when
+# the Provider first inserts a constrained row.
+oauth_runtime_acl_is_usable="$(admin_psql \
+  --quiet \
+  --tuples-only \
+  --no-align \
+  --set="runtime_role=${RUNTIME_ROLE}" <<'SQL'
+SET ROLE :"runtime_role";
+SELECT
+  platform.oauth_requested_scopes_are_valid(
+    ARRAY['research:read', 'offline_access']::text[]
+  )
+  AND platform.oauth_provider_scopes_are_valid(
+    '["research:read", "offline_access"]'::jsonb
+  )
+  AND platform.oauth_redirect_uris_are_valid(
+    '["https://client.example/oauth/callback"]'::jsonb
+  )
+  AND platform.oauth_resource_is_valid('https://mcp.example/mcp')
+  AND platform.oauth_text_arrays_are_same_set(
+    ARRAY['community:read', 'research:read']::text[],
+    ARRAY['research:read', 'community:read']::text[]
+  )
+  AND has_table_privilege(current_user, 'auth.oauth_clients', 'SELECT')
+  AND NOT has_table_privilege(current_user, 'auth.oauth_clients', 'INSERT,UPDATE,DELETE')
+  AND has_table_privilege(current_user, 'auth.oauth_jwks', 'SELECT,INSERT')
+  AND NOT has_table_privilege(current_user, 'auth.oauth_jwks', 'UPDATE,DELETE')
+  AND has_table_privilege(
+    current_user,
+    'platform.oauth_resource_configuration',
+    'SELECT'
+  )
+  AND NOT has_table_privilege(
+    current_user,
+    'platform.oauth_resource_configuration',
+    'INSERT,UPDATE,DELETE'
+  );
+RESET ROLE;
+SQL
+)"
+if [[ "${oauth_runtime_acl_is_usable//[[:space:]]/}" != "t" ]]; then
+  echo "Remote MCP OAuth Runtime ACL or validation-helper execution is incomplete." >&2
+  exit 1
+fi
+
 object_acl_is_closed="$(admin_psql \
   --tuples-only \
   --no-align \
