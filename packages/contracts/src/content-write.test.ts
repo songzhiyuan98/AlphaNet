@@ -386,6 +386,7 @@ describe("content write request contracts", () => {
     expect(IdempotencyKeySchema.safeParse("😀".repeat(201)).success).toBe(false);
     expect(IdempotencyKeySchema.safeParse("key\nsecond-line").success).toBe(false);
     expect(IdempotencyKeySchema.safeParse("key\u0085suffix").success).toBe(false);
+    expect(IdempotencyKeySchema.safeParse("key,second-key").success).toBe(false);
   });
 
   it("keeps fragments but rejects source userinfo and conflicting normalized duplicates", () => {

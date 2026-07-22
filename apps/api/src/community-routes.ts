@@ -209,6 +209,30 @@ function sendDirectoryError(
   );
 }
 
+export async function handleAgentGetCommunity(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  service: Pick<CommunityDirectoryService, "getCommunity">,
+  viewer: Parameters<CommunityDirectoryService["getCommunity"]>[0],
+  lookup: Parameters<CommunityDirectoryService["getCommunity"]>[1],
+  projectionLabel = "Community detail",
+): Promise<unknown> {
+  try {
+    const community = await service.getCommunity(viewer, lookup);
+    const response = serializeCommunity(request, community);
+    if (!response) {
+      request.log.error(
+        { communityKind: community.kind },
+        `${projectionLabel} projection violated its response contract`,
+      );
+      return sendDirectoryError(request, reply, new Error("projection invalid"));
+    }
+    return response;
+  } catch (error) {
+    return sendDirectoryError(request, reply, error);
+  }
+}
+
 function directoryAuthorizationBoundary(
   options: CommunityRouteOptions,
   operation: "find_communities" | "get_community",
@@ -482,22 +506,14 @@ export function registerCommunityRoutes(
         return validationFailed(request, reply);
       }
 
-      try {
-        const community = await options.service.getCommunity(authorization.context, {
-          slug: parameters.data.slug,
-        });
-        const response = serializeCommunity(request, community);
-        if (!response) {
-          request.log.error(
-            { communityKind: community.kind },
-            "Community slug projection violated its response contract",
-          );
-          return sendDirectoryError(request, reply, new Error("projection invalid"));
-        }
-        return response;
-      } catch (error) {
-        return sendDirectoryError(request, reply, error);
-      }
+      return handleAgentGetCommunity(
+        request,
+        reply,
+        options.service,
+        authorization.context,
+        { slug: parameters.data.slug },
+        "Community slug",
+      );
     },
   );
 
@@ -514,22 +530,13 @@ export function registerCommunityRoutes(
         return validationFailed(request, reply);
       }
 
-      try {
-        const community = await options.service.getCommunity(authorization.context, {
-          communityId: parameters.data.community_id,
-        });
-        const response = serializeCommunity(request, community);
-        if (!response) {
-          request.log.error(
-            { communityKind: community.kind },
-            "Community detail projection violated its response contract",
-          );
-          return sendDirectoryError(request, reply, new Error("projection invalid"));
-        }
-        return response;
-      } catch (error) {
-        return sendDirectoryError(request, reply, error);
-      }
+      return handleAgentGetCommunity(
+        request,
+        reply,
+        options.service,
+        authorization.context,
+        { communityId: parameters.data.community_id },
+      );
     },
   );
 }

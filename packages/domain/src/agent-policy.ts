@@ -55,7 +55,9 @@ export interface AgentOperationEvaluation {
   scopeSatisfied: boolean;
 }
 
-const communityReadScopes = ["research:read", "community:read"] as const;
+// Keep the canonical challenge scope aligned with the public Agent/MCP
+// contract while still accepting either read scope.
+const communityReadScopes = ["community:read", "research:read"] as const;
 const operationScopes: Record<AgentOperation, readonly AgentScope[]> = {
   get_agent_context: [],
   find_communities: communityReadScopes,

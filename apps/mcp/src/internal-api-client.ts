@@ -9,7 +9,7 @@ import {
 
 import type { McpToolExecutionContext } from "./protocol.js";
 
-export const INTERNAL_API_DEFAULT_TIMEOUT_MILLISECONDS = 5_000;
+export const INTERNAL_API_DEFAULT_TIMEOUT_MILLISECONDS = 15_000;
 export const INTERNAL_API_MAX_TIMEOUT_MILLISECONDS =
   MCP_ACTOR_ASSERTION_MAX_TTL_SECONDS * 1_000 - 1;
 export const INTERNAL_API_DEFAULT_MAX_RESPONSE_BYTES = 4 * 1_024 * 1_024;

@@ -13,6 +13,7 @@ export const IdempotencyKeySchema = z
     (value) => !/\p{Cc}/u.test(value),
     "Idempotency key cannot contain control characters.",
   )
+  .refine((value) => !value.includes(","), "Idempotency key cannot contain a comma.")
   .refine((value) => value.trim().length > 0, "Idempotency key cannot be blank.");
 
 export const WriteStatusSchema = z.enum([

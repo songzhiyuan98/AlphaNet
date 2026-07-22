@@ -717,7 +717,7 @@ describe("Remote MCP private transport environment parsing", () => {
     expect(result.MCP_RUNTIME_ENABLED).toBe(true);
     expect(result.MCP_PUBLIC_ENABLED).toBe(false);
     expect(result.MCP_INTERNAL_API_URL).toBe("https://127.0.0.1:4443");
-    expect(result.MCP_INTERNAL_API_TIMEOUT_MS).toBe(5_000);
+    expect(result.MCP_INTERNAL_API_TIMEOUT_MS).toBe(15_000);
     expect(result.MCP_INTERNAL_API_MAX_RESPONSE_BYTES).toBe(4 * 1_024 * 1_024);
     expect(Buffer.isBuffer(result.MCP_INTERNAL_API_CLIENT_CERT_PEM_BASE64)).toBe(true);
     expect(Buffer.isBuffer(result.MCP_INTERNAL_API_CLIENT_KEY_PEM_BASE64)).toBe(true);

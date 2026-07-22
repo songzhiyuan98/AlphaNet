@@ -141,7 +141,7 @@ describe("internal MCP API client", () => {
       rejectUnauthorized: true,
       servername: "api.alphanet.internal",
     });
-    expect(captured?.timeoutMilliseconds).toBe(5_000);
+    expect(captured?.timeoutMilliseconds).toBe(15_000);
 
     const assertion = captured?.headers["x-alphanet-mcp-actor-context"];
     expect(assertion).toBeTypeOf("string");

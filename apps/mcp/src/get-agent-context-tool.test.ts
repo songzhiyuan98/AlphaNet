@@ -193,19 +193,132 @@ describe("get_agent_context MCP tool", () => {
     expect(executionContext).toBe(context);
   });
 
-  it.each([400, 401, 403, 404, 409, 429, 500, 503, 599])(
-    "returns a validated V1Error as an MCP error for HTTP %s",
-    async (statusCode) => {
+  it.each([
+    ["POLICY_DENIED", 403],
+    ["RATE_LIMITED", 429],
+    ["REMOTE_MCP_ACTOR_AUTHENTICATION_FAILED", 401],
+    ["REMOTE_MCP_ACTOR_AUTHENTICATION_UNAVAILABLE", 503],
+    ["REMOTE_MCP_TRANSPORT_AUTHENTICATION_FAILED", 401],
+    ["REMOTE_MCP_TRANSPORT_AUTHENTICATION_UNAVAILABLE", 503],
+    ["SCOPE_REQUIRED", 403],
+    ["TEMPORARILY_UNAVAILABLE", 503],
+  ] as const)(
+    "returns mapped upstream error %s only with HTTP %s",
+    async (code, statusCode) => {
+      const payload = {
+        ...errorResponse,
+        error: { ...errorResponse.error, code },
+      };
       const tool = createGetAgentContextTool(
-        respondingClient(errorResponse, statusCode).client,
+        respondingClient(payload, statusCode).client,
       );
 
       await expect(tool.execute({}, context)).resolves.toEqual({
         isError: true,
-        payload: errorResponse,
+        payload,
       });
     },
   );
+
+  it.each([
+    {
+      label: "request ID",
+      payload: {
+        ...successResponse,
+        request_id: "77777777-7777-4777-8777-777777777777",
+      },
+    },
+    {
+      label: "credential ID",
+      payload: {
+        ...successResponse,
+        credential: {
+          ...successResponse.credential,
+          id: "77777777-7777-4777-8777-777777777777",
+        },
+      },
+    },
+    {
+      label: "credential audience",
+      payload: {
+        ...successResponse,
+        credential: {
+          ...successResponse.credential,
+          audience: "https://different.alphanet.example/mcp",
+        },
+      },
+    },
+    {
+      label: "credential scopes",
+      payload: {
+        ...successResponse,
+        credential: {
+          ...successResponse.credential,
+          scopes: ["community:read" as const],
+        },
+      },
+    },
+  ])("rejects success with a mismatched $label", async ({ payload }) => {
+    const tool = createGetAgentContextTool(respondingClient(payload, 200).client);
+
+    await expect(tool.execute({}, context)).rejects.toMatchObject({
+      code: "INVALID_RESPONSE",
+      name: "InternalMcpApiClientError",
+    });
+  });
+
+  it("accepts the same authorized scope set in a different projection order", async () => {
+    const reorderedContext: McpToolExecutionContext = {
+      ...context,
+      authorization: {
+        ...context.authorization,
+        scopes: ["research:read", "community:read"],
+      },
+    };
+    const payload: AgentContextResponse = {
+      ...successResponse,
+      credential: {
+        ...successResponse.credential,
+        scopes: ["community:read", "research:read"],
+      },
+    };
+    const tool = createGetAgentContextTool(respondingClient(payload, 200).client);
+
+    await expect(tool.execute({}, reorderedContext)).resolves.toEqual({ payload });
+  });
+
+  it.each([
+    {
+      code: "RATE_LIMITED",
+      label: "a mismatched code/status pair",
+      requestId,
+      status: 503,
+    },
+    {
+      code: "ROUTE_NOT_FOUND",
+      label: "an endpoint-skew error code",
+      requestId,
+      status: 404,
+    },
+    {
+      code: "RATE_LIMITED",
+      label: "a mismatched error request ID",
+      requestId: "77777777-7777-4777-8777-777777777777",
+      status: 429,
+    },
+  ])("rejects $label", async ({ code, requestId: errorRequestId, status }) => {
+    const payload = {
+      ...errorResponse,
+      error: { ...errorResponse.error, code },
+      request_id: errorRequestId,
+    };
+    const tool = createGetAgentContextTool(respondingClient(payload, status).client);
+
+    await expect(tool.execute({}, context)).rejects.toMatchObject({
+      code: "INVALID_RESPONSE",
+      name: "InternalMcpApiClientError",
+    });
+  });
 
   it.each([
     {

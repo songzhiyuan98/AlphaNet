@@ -4,7 +4,11 @@ import { getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/
 
 import type { McpActorRateLimiter, McpRequestRateLimiter } from "./app.js";
 import { createRemoteMcpAccessTokenVerifier } from "./access-token-verifier.js";
+import { createCreatePostTool } from "./create-post-tool.js";
+import { createGetActionStatusTool } from "./get-action-status-tool.js";
 import { createGetAgentContextTool } from "./get-agent-context-tool.js";
+import { createGetCommunityTool } from "./get-community-tool.js";
+import { createGetContentTool } from "./get-content-tool.js";
 import { createInternalMcpApiClient } from "./internal-api-client.js";
 import type { McpToolRegistration } from "./protocol.js";
 import {
@@ -109,7 +113,13 @@ export function createMcpRuntimeAssembly(
     redisClient,
     "alphanet:remote-mcp:rate-limit:",
   );
-  const tools = Object.freeze([createGetAgentContextTool(internalApiClient)]);
+  const tools = Object.freeze([
+    createGetAgentContextTool(internalApiClient),
+    createGetCommunityTool(internalApiClient),
+    createCreatePostTool(internalApiClient),
+    createGetActionStatusTool(internalApiClient),
+    createGetContentTool(internalApiClient),
+  ]);
 
   return Object.freeze({
     actorRateLimiter: createMcpActorRateLimiter(rateLimitStorage),

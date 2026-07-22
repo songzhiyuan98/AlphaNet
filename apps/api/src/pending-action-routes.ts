@@ -99,6 +99,29 @@ function sendActionError(
   );
 }
 
+export async function handleAgentGetActionStatus(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  service: Pick<PendingActionStatusService, "getActionStatus">,
+  viewer: { agentId: string; ownerId: string },
+  actionId: string,
+): Promise<unknown> {
+  try {
+    const action = await service.getActionStatus(viewer, actionId);
+    const response = serializeAction(request, action);
+    if (!response) {
+      request.log.error(
+        { actionState: action.state, operation: action.operation },
+        "PendingAction Agent projection violated its response contract",
+      );
+      return sendActionError(request, reply, new Error("projection invalid"));
+    }
+    return response;
+  } catch (error) {
+    return sendActionError(request, reply, error);
+  }
+}
+
 export function registerPendingActionRoutes(
   app: FastifyInstance,
   options: PendingActionRouteOptions,
@@ -130,26 +153,16 @@ export function registerPendingActionRoutes(
         return validationFailed(request, reply);
       }
 
-      try {
-        const action = await options.service.getActionStatus(
-          {
-            ownerId: authorization.context.owner.id,
-            agentId: authorization.context.agent.id,
-          },
-          parameters.data.action_id,
-        );
-        const response = serializeAction(request, action);
-        if (!response) {
-          request.log.error(
-            { actionState: action.state, operation: action.operation },
-            "PendingAction public projection violated its response contract",
-          );
-          return sendActionError(request, reply, new Error("projection invalid"));
-        }
-        return response;
-      } catch (error) {
-        return sendActionError(request, reply, error);
-      }
+      return handleAgentGetActionStatus(
+        request,
+        reply,
+        options.service,
+        {
+          ownerId: authorization.context.owner.id,
+          agentId: authorization.context.agent.id,
+        },
+        parameters.data.action_id,
+      );
     },
   );
 }
