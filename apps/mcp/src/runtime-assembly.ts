@@ -47,6 +47,7 @@ export type McpRuntimeAssembly =
       authorizationMiddleware: ReturnType<
         typeof createStrictBearerAuthorizationMiddleware
       >;
+      oauthIssuer: string;
       requestRateLimiter: McpRequestRateLimiter;
       resource: string;
       runtimeEnabled: true;
@@ -77,6 +78,7 @@ export function createMcpRuntimeAssembly(
   }
 
   const resource = required(environment.MCP_RESOURCE);
+  const oauthIssuer = required(environment.MCP_OAUTH_ISSUER);
   const actorAssertionKeyRing = createMcpActorAssertionKeyRing({
     currentKey: required(environment.MCP_ACTOR_ASSERTION_CURRENT_KEY_BASE64),
     currentVersion: required(environment.MCP_ACTOR_ASSERTION_CURRENT_KEY_VERSION),
@@ -104,7 +106,7 @@ export function createMcpRuntimeAssembly(
     },
   });
   const verifier = createRemoteMcpAccessTokenVerifier({
-    issuer: required(environment.MCP_OAUTH_ISSUER),
+    issuer: oauthIssuer,
     jwksUrl: required(environment.MCP_OAUTH_JWKS_URI),
     resource,
     tokenJtiDigestKey: required(environment.MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64),
@@ -129,6 +131,7 @@ export function createMcpRuntimeAssembly(
       ).toString(),
       verifier,
     }),
+    oauthIssuer,
     requestRateLimiter: createMcpRequestRateLimiter(rateLimitStorage),
     resource,
     runtimeEnabled: true,

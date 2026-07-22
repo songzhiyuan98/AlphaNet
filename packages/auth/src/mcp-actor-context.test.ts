@@ -1,3 +1,5 @@
+import { createHmac } from "node:crypto";
+
 import { decodeProtectedHeader, SignJWT } from "jose";
 import { describe, expect, it } from "vitest";
 
@@ -192,6 +194,11 @@ describe("MCP ActorContext assertions", () => {
   });
 
   it("distinguishes malformed inbound token identifiers from digest-key failures", () => {
+    const expected = createHmac("sha256", tokenJtiDigestKey)
+      .update("alphanet:oauth_access_token_jti:v1\0", "utf8")
+      .update(inboundTokenJti, "utf8")
+      .digest("base64url");
+    expect(digestInboundMcpTokenJti(inboundTokenJti, tokenJtiDigestKey)).toBe(expected);
     expect(() => digestInboundMcpTokenJti("", tokenJtiDigestKey)).toThrowError(
       expect.objectContaining({ code: "ASSERTION_TOKEN_JTI_INVALID" }),
     );
@@ -246,8 +253,9 @@ describe("MCP ActorContext assertions", () => {
     );
 
     const digest = input.tokenJtiDigest;
+    const differentDigest = `${digest.slice(0, -1)}${digest.endsWith("A") ? "B" : "A"}`;
     expect(actorContextTokenDigestMatches(digest, digest)).toBe(true);
-    expect(actorContextTokenDigestMatches(digest, digest.replace(/.$/, "A"))).toBe(false);
+    expect(actorContextTokenDigestMatches(digest, differentDigest)).toBe(false);
     expect(actorContextTokenDigestMatches(digest, "not-a-digest")).toBe(false);
   });
 

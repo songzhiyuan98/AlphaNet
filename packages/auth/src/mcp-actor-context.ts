@@ -7,6 +7,7 @@ import { z } from "zod";
 export const MCP_ACTOR_ASSERTION_ISSUER = "urn:alphanet:service:mcp";
 export const MCP_ACTOR_ASSERTION_AUDIENCE = "urn:alphanet:service:api:actor-context:v1";
 export const MCP_ACTOR_ASSERTION_MAX_TTL_SECONDS = 30;
+const MCP_TOKEN_JTI_DIGEST_DOMAIN = "alphanet:oauth_access_token_jti:v1\0";
 
 const UuidSchema = z.uuid();
 const InboundTokenJtiSchema = z
@@ -190,7 +191,10 @@ export function digestInboundMcpTokenJti(jti: string, digestKey: Uint8Array): st
   if (!InboundTokenJtiSchema.safeParse(jti).success) {
     throw new McpActorContextAssertionError("ASSERTION_TOKEN_JTI_INVALID");
   }
-  return createHmac("sha256", digestKey).update(jti, "utf8").digest("base64url");
+  return createHmac("sha256", digestKey)
+    .update(MCP_TOKEN_JTI_DIGEST_DOMAIN, "utf8")
+    .update(jti, "utf8")
+    .digest("base64url");
 }
 
 export async function createMcpActorContextAssertion(

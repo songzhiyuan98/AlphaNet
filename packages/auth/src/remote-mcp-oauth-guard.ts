@@ -13,10 +13,13 @@ import { AGENT_SCOPES } from "@alphanet/contracts";
 export type RemoteMcpOAuthRawParameters = string | URLSearchParams;
 
 export const REMOTE_MCP_OAUTH_SCOPE_ORDER = [...AGENT_SCOPES, "offline_access"] as const;
+/** Fixed access-token TTL plus the permitted five-second signer clock lead. */
+export const REMOTE_MCP_REFRESH_ACCESS_HORIZON_MILLISECONDS = 10 * 60 * 1_000 + 5_000;
 
 export type RemoteMcpOAuthScope = (typeof REMOTE_MCP_OAUTH_SCOPE_ORDER)[number];
 
 export type RemoteMcpOAuthGuardErrorCode =
+  | "AUTHORIZATION_CODE_AUTHORITY_INVALID"
   | "CLIENT_AUTH_AMBIGUOUS"
   | "CLIENT_AUTH_INVALID"
   | "CLIENT_AUTH_REPEATED"
@@ -912,8 +915,8 @@ function validateLockedRefreshAuthority(
     !Number.isFinite(credentialExpiresAt) ||
     refreshIssuedAt > nowValue ||
     refreshExpiresAt <= nowValue ||
-    grantExpiresAt <= nowValue ||
-    credentialExpiresAt <= nowValue ||
+    grantExpiresAt < nowValue + REMOTE_MCP_REFRESH_ACCESS_HORIZON_MILLISECONDS ||
+    credentialExpiresAt < nowValue + REMOTE_MCP_REFRESH_ACCESS_HORIZON_MILLISECONDS ||
     refreshExpiresAt <= refreshIssuedAt ||
     refreshExpiresAt - refreshIssuedAt > 30 * 24 * 60 * 60 * 1_000 ||
     refreshExpiresAt > grantExpiresAt ||
@@ -969,6 +972,19 @@ export async function executeRemoteMcpTokenEndpointBoundary<Result>(
     );
   }
   const request = validateRemoteMcpTokenRequest(input, options);
+  // Remote MCP V1 admits public PKCE clients only. Rejecting confidential
+  // authentication before either exchange lock also prevents an invalid
+  // secret from turning refresh-token possession into a destructive family
+  // compromise signal.
+  if (request.clientAuthenticationMethod !== "none") {
+    fail(
+      "CLIENT_AUTH_INVALID",
+      "invalid_client",
+      "Remote MCP V1 supports public clients only.",
+      "authorization",
+      401,
+    );
+  }
   if (request.grantType !== "refresh_token") {
     return executeProvider(request);
   }
@@ -993,8 +1009,8 @@ export async function executeRemoteMcpTokenEndpointBoundary<Result>(
           500,
         );
       }
-      providerStarted = true;
       validateLockedRefreshAuthority(request, authority, options.now ?? new Date());
+      providerStarted = true;
       return {
         marker: completionMarker,
         value: await executeProvider(request),

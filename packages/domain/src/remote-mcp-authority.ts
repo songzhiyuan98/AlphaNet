@@ -85,10 +85,13 @@ interface RemoteMcpAuthorityRow {
 
   client_id: string;
   client_disabled: boolean | null;
+  client_public: boolean | null;
+  client_secret: string | null;
   client_skip_consent: boolean | null;
   client_require_pkce: boolean | null;
   client_scopes: unknown;
   client_grant_types: unknown;
+  client_token_endpoint_auth_method: string | null;
 
   configured_resource: string;
 
@@ -261,14 +264,13 @@ function clientSupportsGrant(row: RemoteMcpAuthorityRow): boolean {
   if (!row.grant_scopes.every((scope) => configuredScopes.has(scope))) return false;
   if (row.grant_offline_access && !configuredScopes.has("offline_access")) return false;
 
-  if (row.client_grant_types !== null && row.client_grant_types !== undefined) {
-    if (
-      !Array.isArray(row.client_grant_types) ||
-      !row.client_grant_types.every((value) => typeof value === "string") ||
-      !row.client_grant_types.includes("authorization_code")
-    ) {
-      return false;
-    }
+  if (
+    !Array.isArray(row.client_grant_types) ||
+    !row.client_grant_types.every((value) => typeof value === "string") ||
+    !row.client_grant_types.includes("authorization_code") ||
+    (row.grant_offline_access && !row.client_grant_types.includes("refresh_token"))
+  ) {
+    return false;
   }
   return true;
 }
@@ -351,9 +353,12 @@ function buildContext(
     row.token_resource !== row.grant_resource ||
     row.client_id !== row.grant_client_id ||
     row.token_client_id !== row.grant_client_id ||
-    row.client_disabled === true ||
-    row.client_skip_consent === true ||
-    row.client_require_pkce === false ||
+    row.client_disabled !== false ||
+    row.client_public !== true ||
+    row.client_secret !== null ||
+    row.client_skip_consent !== false ||
+    row.client_require_pkce !== true ||
+    row.client_token_endpoint_auth_method !== "none" ||
     !clientSupportsGrant(row) ||
     !sameScopeSet(row.grant_scopes, input.scopes) ||
     !sameScopeSet(row.credential_scopes, input.scopes) ||
@@ -510,10 +515,14 @@ export class PostgresRemoteMcpAuthorityService implements RemoteMcpAuthorityServ
 
             oauth_client.client_id,
             oauth_client.disabled as client_disabled,
+            oauth_client.public as client_public,
+            oauth_client.client_secret,
             oauth_client.skip_consent as client_skip_consent,
             oauth_client.require_pkce as client_require_pkce,
             oauth_client.scopes as client_scopes,
             oauth_client.grant_types as client_grant_types,
+            oauth_client.token_endpoint_auth_method
+              as client_token_endpoint_auth_method,
 
             resource_configuration.resource as configured_resource,
 

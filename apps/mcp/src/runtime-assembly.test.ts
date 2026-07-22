@@ -52,6 +52,7 @@ describe("Remote MCP runtime assembly", () => {
 
     expect(runtime).toEqual({ runtimeEnabled: false, tools: [] });
     expect(runtime).not.toHaveProperty("authorizationMiddleware");
+    expect(runtime).not.toHaveProperty("oauthIssuer");
     expect(runtime).not.toHaveProperty("resource");
   });
 
@@ -60,6 +61,7 @@ describe("Remote MCP runtime assembly", () => {
 
     expect(runtime.runtimeEnabled).toBe(true);
     if (!runtime.runtimeEnabled) throw new Error("expected enabled runtime");
+    expect(runtime.oauthIssuer).toBe("https://auth.alphanet.example/");
     expect(runtime.resource).toBe("https://alphanet.example/mcp");
     expect(runtime.authorizationMiddleware).toBeTypeOf("function");
     expect(runtime.requestRateLimiter).toBeTypeOf("function");
@@ -102,6 +104,7 @@ describe("Remote MCP runtime assembly", () => {
       authorizationMiddleware,
       host: "127.0.0.1",
       logger,
+      oauthIssuer: runtime.oauthIssuer,
       requestRateLimiter: () => ({ allowed: true }),
       resolveClientIp: () => "203.0.113.10",
       resource,

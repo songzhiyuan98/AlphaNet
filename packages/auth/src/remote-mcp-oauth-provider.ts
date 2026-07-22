@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHmac, randomUUID } from "node:crypto";
 
 import { AGENT_SCOPES, AgentScopeSchema, type AgentScope } from "@alphanet/contracts";
@@ -11,6 +12,8 @@ import {
   RemoteMcpOAuthGuardError,
   validateRemoteMcpAuthorizeQuery,
   type RemoteMcpOwnerClientRefreshLock,
+  type RemoteMcpOAuthScope,
+  type ValidatedRemoteMcpTokenRequest,
   type ValidatedRemoteMcpAuthorizeQuery,
 } from "./remote-mcp-oauth-guard.js";
 
@@ -22,12 +25,77 @@ export const REMOTE_MCP_JWKS_GRACE_SECONDS = 7 * 24 * 60 * 60;
 export const REMOTE_MCP_TOKEN_REQUEST_BODY_MAX_BYTES = 16 * 1_024;
 export const REMOTE_MCP_OAUTH_SCOPES = [...AGENT_SCOPES, "offline_access"] as const;
 
+const REMOTE_MCP_OAUTH_SCOPE_INDEX = new Map<string, number>(
+  REMOTE_MCP_OAUTH_SCOPES.map((scope, index) => [scope, index]),
+);
+const REMOTE_MCP_OAUTH_SCOPE_SET = new Set<string>(REMOTE_MCP_OAUTH_SCOPES);
+
 type OAuthProviderOptions = Parameters<typeof oauthProvider>[0];
 type OAuthPostLogin = NonNullable<OAuthProviderOptions["postLogin"]>;
 type OAuthPostLoginContext = Parameters<OAuthPostLogin["consentReferenceId"]>[0];
 type OAuthAccessTokenClaimsContext = Parameters<
   NonNullable<OAuthProviderOptions["customAccessTokenClaims"]>
 >[0];
+type OAuthTokenResponseFields = NonNullable<
+  OAuthProviderOptions["customTokenResponseFields"]
+>;
+type OAuthTokenResponseFieldsContext = Parameters<OAuthTokenResponseFields>[0];
+
+export type RemoteMcpOAuthConsentReferencePhase = "claim" | "inspect";
+
+/**
+ * Log-safe authority fields recovered from Provider-owned authorization-code
+ * state. Raw codes, code verifiers, tokens, client secrets and state are
+ * deliberately absent.
+ */
+export interface RemoteMcpAuthorizationGrantActivationInput {
+  authUserId: string;
+  codeChallenge: string;
+  codeChallengeMethod: "S256";
+  grantId: string;
+  oauthClientId: string;
+  ownerSessionId: string;
+  redirectUri: string;
+  resource: string;
+  /** Full protocol scopes, including offline_access when granted. */
+  scopes: readonly RemoteMcpOAuthScope[];
+}
+
+/**
+ * Minimal log-safe handle for undoing a Grant claimed or activated by a
+ * Provider request that failed before it returned a successful response.
+ */
+export interface RemoteMcpAuthorizationGrantExchangeCompensationInput {
+  grantId: string;
+}
+
+export interface RemoteMcpAuthorizationCodeExchangeLockInput {
+  /** Raw one-shot Provider code. It must never be logged or persisted in plaintext. */
+  authorizationCode: string;
+  clientId: string;
+  /** Raw PKCE verifier. It must never be logged or persisted. */
+  codeVerifier: string;
+  redirectUri: string;
+  resource: string;
+}
+
+export interface RemoteMcpAuthorizationCodeLockedAuthority {
+  /** Log-safe Grant correlation recovered from the unconsumed Provider code row. */
+  grantId: string;
+}
+
+export interface RemoteMcpAuthorizationCodeExchangeLock {
+  /**
+   * Serialize one code across replicas, validate its frozen PKCE/client binding,
+   * and keep the lock through Provider consumption and token creation.
+   */
+  <Result>(
+    input: RemoteMcpAuthorizationCodeExchangeLockInput,
+    executeWhileLocked: (
+      authority: RemoteMcpAuthorizationCodeLockedAuthority,
+    ) => Promise<Result>,
+  ): Promise<Result>;
+}
 
 export interface RemoteMcpAccessTokenAuthorityPersistenceInput {
   /** Better Auth user id. The persistence transaction must re-resolve the Owner. */
@@ -38,6 +106,10 @@ export interface RemoteMcpAccessTokenAuthorityPersistenceInput {
   issuedAt: Date;
   /** Raw JWT identifier. Persist only its independently keyed digest. */
   jti: string;
+  /** Exact Provider client copied into the JWT azp claim. */
+  oauthClientId: string;
+  /** Full canonical Provider scope set, including offline_access when granted. */
+  protocolScopes: readonly RemoteMcpOAuthScope[];
   resource: string;
   /** Credential/domain scopes only; offline_access is deliberately excluded. */
   scopes: readonly AgentScope[];
@@ -77,6 +149,20 @@ export interface RemoteMcpDomainRevocationInput {
 
 export interface AlphaNetRemoteMcpOAuthSecurityHooks {
   /**
+   * Atomically claim/revalidate the pending Grant immediately before the
+   * Provider creates access and refresh tokens in parallel.
+   */
+  activateAuthorizationGrant(
+    input: RemoteMcpAuthorizationGrantActivationInput,
+  ): Promise<void>;
+  /**
+   * Restore/revoke the claimed authority when Provider code issuance or the
+   * first authorization-code token exchange fails after the domain hook ran.
+   */
+  compensateFailedAuthorizationGrantExchange(
+    input: RemoteMcpAuthorizationGrantExchangeCompensationInput,
+  ): Promise<void>;
+  /**
    * Must authenticate the Owner/client and atomically revoke the Grant,
    * Credential, token epoch/JTI state, consent, audit log and outbox before
    * returning a protocol response. The native Provider delete/revoke handlers
@@ -104,10 +190,14 @@ export interface AlphaNetRemoteMcpOAuthSecurityHooks {
   signAccessToken(payload: RemoteMcpAccessTokenSigningPayload): Promise<string>;
   postLogin: {
     page: string;
-    /** Must consume the one-shot authorization envelope and return its Grant id. */
-    resolveGrantId(context: OAuthPostLoginContext): Promise<string>;
+    /** Inspect or claim the one-shot authorization envelope and return its Grant id. */
+    resolveGrantId(
+      context: OAuthPostLoginContext,
+      phase: RemoteMcpOAuthConsentReferencePhase,
+    ): Promise<string>;
     shouldRedirect: OAuthPostLogin["shouldRedirect"];
   };
+  withAuthorizationCodeExchangeLock: RemoteMcpAuthorizationCodeExchangeLock;
   /**
    * Must hold a cross-replica Owner+Client lock while executeWhileLocked runs.
    * Reuse of a revoked token must invalidate that Owner+Client family and
@@ -150,6 +240,20 @@ export interface AlphaNetRemoteMcpOAuthLiveBoundary {
   wrapProviderHandler(
     providerHandler: AlphaNetRemoteMcpOAuthProviderHandler,
   ): (input: AlphaNetRemoteMcpOAuthRawHttpRequest) => Promise<Response>;
+}
+
+type RemoteMcpAuthorizationCodeTokenRequest = Extract<
+  ValidatedRemoteMcpTokenRequest,
+  { grantType: "authorization_code" }
+>;
+
+interface RemoteMcpOAuthProviderRequestState {
+  activatedGrantId?: string;
+  authorizationCodeGrantId?: string;
+  authorizationCodeTokenRequest?: RemoteMcpAuthorizationCodeTokenRequest;
+  claimedGrantId?: string;
+  compensationAttempted: boolean;
+  consentReferencePhase: RemoteMcpOAuthConsentReferencePhase;
 }
 
 /**
@@ -281,6 +385,8 @@ function isUuid(value: unknown): value is string {
 function assertSecurityHooks(security: AlphaNetRemoteMcpOAuthSecurityHooks): void {
   if (
     !security ||
+    typeof security.activateAuthorizationGrant !== "function" ||
+    typeof security.compensateFailedAuthorizationGrantExchange !== "function" ||
     typeof security.executeDomainRevocationTransaction !== "function" ||
     typeof security.persistAccessTokenAuthority !== "function" ||
     typeof security.persistAuthorizationRequestEnvelope !== "function" ||
@@ -290,10 +396,143 @@ function assertSecurityHooks(security: AlphaNetRemoteMcpOAuthSecurityHooks): voi
     typeof security.postLogin.resolveGrantId !== "function" ||
     typeof security.postLogin.shouldRedirect !== "function" ||
     typeof security.signAccessToken !== "function" ||
+    typeof security.withAuthorizationCodeExchangeLock !== "function" ||
     typeof security.withOwnerClientRefreshLock !== "function"
   ) {
     throw new Error("Remote MCP OAuth live security hooks are incomplete");
   }
+}
+
+function normalizeProtocolScopes(
+  value: unknown,
+): readonly RemoteMcpOAuthScope[] | undefined {
+  if (
+    !isStringArray(value) ||
+    value.length < 1 ||
+    value.length > REMOTE_MCP_OAUTH_SCOPES.length
+  ) {
+    return undefined;
+  }
+  const unique = new Set(value);
+  if (
+    unique.size !== value.length ||
+    value.some((scope) => !REMOTE_MCP_OAUTH_SCOPE_SET.has(scope)) ||
+    !value.some((scope) => scope !== "offline_access")
+  ) {
+    return undefined;
+  }
+  return Object.freeze(
+    [...value]
+      .sort(
+        (left, right) =>
+          (REMOTE_MCP_OAUTH_SCOPE_INDEX.get(left) ?? Number.MAX_SAFE_INTEGER) -
+          (REMOTE_MCP_OAUTH_SCOPE_INDEX.get(right) ?? Number.MAX_SAFE_INTEGER),
+      )
+      .map((scope) => scope as RemoteMcpOAuthScope),
+  );
+}
+
+function normalizeProtocolScopeString(
+  value: unknown,
+): readonly RemoteMcpOAuthScope[] | undefined {
+  if (
+    typeof value !== "string" ||
+    value.length < 1 ||
+    value.startsWith(" ") ||
+    value.endsWith(" ") ||
+    value.includes("  ") ||
+    [...value.replaceAll(" ", "")].some((character) => {
+      const codePoint = character.codePointAt(0);
+      return codePoint === undefined || codePoint <= 0x20 || codePoint === 0x7f;
+    })
+  ) {
+    return undefined;
+  }
+  return normalizeProtocolScopes(value.split(" "));
+}
+
+function sameProtocolScopes(
+  left: readonly RemoteMcpOAuthScope[],
+  right: readonly RemoteMcpOAuthScope[],
+): boolean {
+  return (
+    left.length === right.length && left.every((scope, index) => scope === right[index])
+  );
+}
+
+function isPkceS256Challenge(value: unknown): value is string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(value)) {
+    return false;
+  }
+  const decoded = Buffer.from(value, "base64url");
+  return decoded.byteLength === 32 && decoded.toString("base64url") === value;
+}
+
+function validateAuthorizationGrantActivation(
+  context: OAuthTokenResponseFieldsContext,
+  options: AlphaNetRemoteMcpOAuthProviderOptions,
+  state: RemoteMcpOAuthProviderRequestState | undefined,
+): RemoteMcpAuthorizationGrantActivationInput {
+  const verification = context.verificationValue;
+  const query = verification?.query;
+  const tokenRequest = state?.authorizationCodeTokenRequest;
+  const contextScopes = normalizeProtocolScopes(context.scopes);
+  const queryScopes = normalizeProtocolScopeString(query?.scope);
+  if (
+    context.grantType !== "authorization_code" ||
+    !state ||
+    !tokenRequest ||
+    !context.user ||
+    !isUuid(context.user.id) ||
+    !verification ||
+    verification.type !== "authorization_code" ||
+    verification.userId !== context.user.id ||
+    !isUuid(verification.referenceId) ||
+    verification.referenceId !== state.authorizationCodeGrantId ||
+    !isUuid(verification.sessionId) ||
+    !query ||
+    query.response_type !== "code" ||
+    query.client_id !== tokenRequest.clientId ||
+    query.redirect_uri !== tokenRequest.redirectUri ||
+    tokenRequest.resource !== options.resource ||
+    !isPkceS256Challenge(query.code_challenge) ||
+    query.code_challenge_method !== "S256" ||
+    !contextScopes ||
+    !queryScopes ||
+    !sameProtocolScopes(contextScopes, queryScopes)
+  ) {
+    throw new Error("Remote MCP OAuth authorization Grant activation is unavailable");
+  }
+  return Object.freeze({
+    authUserId: context.user.id,
+    codeChallenge: query.code_challenge,
+    codeChallengeMethod: "S256",
+    grantId: verification.referenceId,
+    oauthClientId: tokenRequest.clientId,
+    ownerSessionId: verification.sessionId,
+    redirectUri: tokenRequest.redirectUri,
+    resource: tokenRequest.resource,
+    scopes: queryScopes,
+  });
+}
+
+function createLiveTokenResponseFields(
+  options: AlphaNetRemoteMcpOAuthProviderOptions,
+  requestState: AsyncLocalStorage<RemoteMcpOAuthProviderRequestState>,
+): OAuthTokenResponseFields {
+  return async (context) => {
+    if (context.grantType === "refresh_token") {
+      return {};
+    }
+    const state = requestState.getStore();
+    const activation = validateAuthorizationGrantActivation(context, options, state);
+    await options.security.activateAuthorizationGrant(activation);
+    if (!state) {
+      throw new Error("Remote MCP OAuth authorization Grant activation is unavailable");
+    }
+    state.activatedGrantId = activation.grantId;
+    return {};
+  };
 }
 
 function isTokenJtiDigest(value: unknown): value is string {
@@ -371,7 +610,7 @@ interface ValidatedProviderAccessTokenSeed {
   grantId: string;
   iat: number;
   jti: string;
-  protocolScopes: readonly string[];
+  protocolScopes: readonly RemoteMcpOAuthScope[];
   scopes: readonly AgentScope[];
 }
 
@@ -406,7 +645,10 @@ function validateProviderAccessTokenSeed(
   ) {
     throw new Error("Remote MCP OAuth access-token signing payload is invalid");
   }
-  const protocolScopes = scope.split(" ");
+  const protocolScopes = normalizeProtocolScopeString(scope);
+  if (!protocolScopes) {
+    throw new Error("Remote MCP OAuth access-token signing payload is invalid");
+  }
   const scopes = normalizeAuthorityScopes(protocolScopes);
   return {
     authUserId: payload.sub,
@@ -474,6 +716,8 @@ function createLiveJwtSigner(
       grantId: seed.grantId,
       issuedAt: new Date(seed.iat * 1_000),
       jti: seed.jti,
+      oauthClientId: seed.azp,
+      protocolScopes: seed.protocolScopes,
       resource: options.resource,
       scopes: seed.scopes,
     });
@@ -522,12 +766,26 @@ function createLiveJwtSigner(
 
 function createLivePostLogin(
   security: AlphaNetRemoteMcpOAuthSecurityHooks,
+  requestState: AsyncLocalStorage<RemoteMcpOAuthProviderRequestState>,
 ): OAuthPostLogin {
   return {
     consentReferenceId: async (context) => {
-      const grantId = await security.postLogin.resolveGrantId(context);
+      const state = requestState.getStore();
+      if (!state) {
+        throw new Error("Remote MCP OAuth consent Grant is unavailable");
+      }
+      if (state.consentReferencePhase === "claim" && state.claimedGrantId) {
+        return state.claimedGrantId;
+      }
+      const grantId = await security.postLogin.resolveGrantId(
+        context,
+        state.consentReferencePhase,
+      );
       if (!isUuid(grantId)) {
         throw new Error("Remote MCP OAuth consent Grant is unavailable");
+      }
+      if (state.consentReferencePhase === "claim") {
+        state.claimedGrantId = grantId;
       }
       return grantId;
     },
@@ -749,9 +1007,63 @@ function guardErrorResponse(error: RemoteMcpOAuthGuardError): Response {
   });
 }
 
+function authorizationCodeExchangeLockInput(
+  parameters: string,
+  request: RemoteMcpAuthorizationCodeTokenRequest,
+): RemoteMcpAuthorizationCodeExchangeLockInput {
+  const form = new URLSearchParams(parameters);
+  const authorizationCode = form.get("code");
+  const codeVerifier = form.get("code_verifier");
+  if (authorizationCode === null || codeVerifier === null) {
+    throw new Error("Remote MCP OAuth authorization-code state is unavailable");
+  }
+  return Object.freeze({
+    authorizationCode,
+    clientId: request.clientId,
+    codeVerifier,
+    redirectUri: request.redirectUri,
+    resource: request.resource,
+  });
+}
+
+async function compensateFailedProviderRequest(
+  security: AlphaNetRemoteMcpOAuthSecurityHooks,
+  state: RemoteMcpOAuthProviderRequestState,
+): Promise<void> {
+  const grantId = state.activatedGrantId ?? state.authorizationCodeGrantId;
+  if (!grantId || state.compensationAttempted) {
+    return;
+  }
+  state.compensationAttempted = true;
+  await security.compensateFailedAuthorizationGrantExchange(Object.freeze({ grantId }));
+}
+
+async function executeTrackedProviderRequest(
+  options: AlphaNetRemoteMcpOAuthProviderOptions,
+  state: RemoteMcpOAuthProviderRequestState,
+  providerHandler: AlphaNetRemoteMcpOAuthProviderHandler,
+  request: Request,
+): Promise<Response> {
+  try {
+    const response = await providerHandler(request);
+    if (!(response instanceof Response)) {
+      await compensateFailedProviderRequest(options.security, state);
+      throw new Error("Remote MCP OAuth provider handler returned an invalid response");
+    }
+    if (!response.ok) {
+      await compensateFailedProviderRequest(options.security, state);
+    }
+    return response;
+  } catch (error) {
+    await compensateFailedProviderRequest(options.security, state);
+    throw error;
+  }
+}
+
 function wrapLiveProviderHandler(
   options: AlphaNetRemoteMcpOAuthProviderOptions,
   requestAdmissions: WeakSet<Request>,
+  requestState: AsyncLocalStorage<RemoteMcpOAuthProviderRequestState>,
   providerHandler: AlphaNetRemoteMcpOAuthProviderHandler,
 ): (input: AlphaNetRemoteMcpOAuthRawHttpRequest) => Promise<Response> {
   if (typeof providerHandler !== "function") {
@@ -761,60 +1073,103 @@ function wrapLiveProviderHandler(
   return async ({ authorizationHeaders, request }) => {
     const requestUrl = new URL(request.url);
     const relativePath = oauthRelativePath(requestUrl.pathname, options.issuer);
-    const isCanonicalAuthorizeRequest =
-      requestUrl.origin === issuer.origin &&
-      relativePath === "/oauth2/authorize" &&
-      request.method === "GET";
-    if (isCanonicalAuthorizeRequest) {
-      try {
-        const authorization = validateRemoteMcpAuthorizeQuery(requestUrl.search, {
-          resource: options.resource,
-        });
-        await options.security.persistAuthorizationRequestEnvelope(authorization);
-        requestAdmissions.add(request);
+    const state: RemoteMcpOAuthProviderRequestState = {
+      compensationAttempted: false,
+      consentReferencePhase:
+        requestUrl.origin === issuer.origin && relativePath === "/oauth2/consent"
+          ? "claim"
+          : "inspect",
+    };
+    return requestState.run(state, async () => {
+      const isCanonicalAuthorizeRequest =
+        requestUrl.origin === issuer.origin &&
+        relativePath === "/oauth2/authorize" &&
+        request.method === "GET";
+      if (isCanonicalAuthorizeRequest) {
         try {
-          return await providerHandler(request);
-        } finally {
-          requestAdmissions.delete(request);
+          const authorization = validateRemoteMcpAuthorizeQuery(requestUrl.search, {
+            resource: options.resource,
+          });
+          await options.security.persistAuthorizationRequestEnvelope(authorization);
+          requestAdmissions.add(request);
+          try {
+            return await executeTrackedProviderRequest(
+              options,
+              state,
+              providerHandler,
+              request,
+            );
+          } finally {
+            requestAdmissions.delete(request);
+          }
+        } catch (error) {
+          if (error instanceof RemoteMcpOAuthGuardError) {
+            return guardErrorResponse(error);
+          }
+          throw error;
         }
+      }
+      const isCanonicalTokenRequest =
+        requestUrl.origin === issuer.origin && relativePath === "/oauth2/token";
+      if (!isCanonicalTokenRequest || request.method !== "POST") {
+        return executeTrackedProviderRequest(options, state, providerHandler, request);
+      }
+
+      assertRawAuthorizationHeaderSnapshot(request, authorizationHeaders);
+      try {
+        const { parameters, providerRequest } =
+          await readBoundedTokenRequestBody(request);
+        return await executeRemoteMcpTokenEndpointBoundary(
+          { authorizationHeaders, parameters },
+          { resource: options.resource },
+          options.security.withOwnerClientRefreshLock,
+          async (validatedRequest) => {
+            const executeProvider = async (): Promise<Response> => {
+              requestAdmissions.add(providerRequest);
+              try {
+                return await executeTrackedProviderRequest(
+                  options,
+                  state,
+                  providerHandler,
+                  providerRequest,
+                );
+              } finally {
+                requestAdmissions.delete(providerRequest);
+              }
+            };
+            if (validatedRequest.grantType === "authorization_code") {
+              state.authorizationCodeTokenRequest = validatedRequest;
+              try {
+                return await options.security.withAuthorizationCodeExchangeLock(
+                  authorizationCodeExchangeLockInput(parameters, validatedRequest),
+                  async (authority) => {
+                    if (!authority || !isUuid(authority.grantId)) {
+                      throw new Error(
+                        "Remote MCP OAuth authorization-code authority is unavailable",
+                      );
+                    }
+                    state.authorizationCodeGrantId = authority.grantId;
+                    return executeProvider();
+                  },
+                );
+              } catch (error) {
+                await compensateFailedProviderRequest(options.security, state);
+                throw error;
+              }
+            }
+            return executeProvider();
+          },
+        );
       } catch (error) {
+        if (error instanceof RemoteMcpOAuthTokenBodyTooLargeError) {
+          return tokenBodyTooLargeResponse();
+        }
         if (error instanceof RemoteMcpOAuthGuardError) {
           return guardErrorResponse(error);
         }
         throw error;
       }
-    }
-    const isCanonicalTokenRequest =
-      requestUrl.origin === issuer.origin && relativePath === "/oauth2/token";
-    if (!isCanonicalTokenRequest || request.method !== "POST") {
-      return providerHandler(request);
-    }
-
-    assertRawAuthorizationHeaderSnapshot(request, authorizationHeaders);
-    try {
-      const { parameters, providerRequest } = await readBoundedTokenRequestBody(request);
-      return await executeRemoteMcpTokenEndpointBoundary(
-        { authorizationHeaders, parameters },
-        { resource: options.resource },
-        options.security.withOwnerClientRefreshLock,
-        async () => {
-          requestAdmissions.add(providerRequest);
-          try {
-            return await providerHandler(providerRequest);
-          } finally {
-            requestAdmissions.delete(providerRequest);
-          }
-        },
-      );
-    } catch (error) {
-      if (error instanceof RemoteMcpOAuthTokenBodyTooLargeError) {
-        return tokenBodyTooLargeResponse();
-      }
-      if (error instanceof RemoteMcpOAuthGuardError) {
-        return guardErrorResponse(error);
-      }
-      throw error;
-    }
+    });
   };
 }
 
@@ -892,7 +1247,7 @@ function unavailableMetadataResponse(): Response {
   });
 }
 
-async function removeNativeIntrospectionMetadata(response: Response): Promise<Response> {
+async function sanitizeRemoteMcpOAuthMetadata(response: Response): Promise<Response> {
   try {
     const metadata: unknown = await response.json();
     if (!isUnknownRecord(metadata)) {
@@ -902,6 +1257,11 @@ async function removeNativeIntrospectionMetadata(response: Response): Promise<Re
     for (const field of NATIVE_INTROSPECTION_METADATA_FIELDS) {
       delete sanitized[field];
     }
+    // V1 clients are pre-registered public PKCE clients. Dynamic registration
+    // remains disabled, but discovery must still advertise the one token and
+    // domain-revocation authentication method the live boundary accepts.
+    sanitized["token_endpoint_auth_methods_supported"] = ["none"];
+    sanitized["revocation_endpoint_auth_methods_supported"] = ["none"];
     const headers = new Headers(response.headers);
     headers.delete("Content-Length");
     return new Response(JSON.stringify(sanitized), {
@@ -917,8 +1277,12 @@ async function removeNativeIntrospectionMetadata(response: Response): Promise<Re
 function createProviderPlugin(
   options: AlphaNetRemoteMcpOAuthSchemaOnlyOptions,
   live?: AlphaNetRemoteMcpOAuthProviderOptions,
+  requestState?: AsyncLocalStorage<RemoteMcpOAuthProviderRequestState>,
 ): BetterAuthPlugin {
   const tokenStorageKey = live?.tokenStorageKey;
+  if (live && !requestState) {
+    throw new Error("Remote MCP OAuth Provider request state is unavailable");
+  }
   const provider = oauthProvider({
     accessTokenExpiresIn: REMOTE_MCP_ACCESS_TOKEN_TTL_SECONDS,
     allowDynamicClientRegistration: false,
@@ -930,7 +1294,14 @@ function createProviderPlugin(
     ...(live
       ? {
           customAccessTokenClaims: createLiveAccessTokenClaims(live),
-          postLogin: createLivePostLogin(live.security),
+          customTokenResponseFields: createLiveTokenResponseFields(
+            live,
+            requestState as AsyncLocalStorage<RemoteMcpOAuthProviderRequestState>,
+          ),
+          postLogin: createLivePostLogin(
+            live.security,
+            requestState as AsyncLocalStorage<RemoteMcpOAuthProviderRequestState>,
+          ),
         }
       : {}),
     grantTypes: ["authorization_code", "refresh_token"],
@@ -988,7 +1359,7 @@ function createProviderPlugin(
       }
       return {
         ...result,
-        response: await removeNativeIntrospectionMetadata(result.response),
+        response: await sanitizeRemoteMcpOAuthMetadata(result.response),
       };
     },
   };
@@ -1013,15 +1384,16 @@ export function createAlphaNetRemoteMcpOAuthLiveBoundary(
   assertSecurityHooks(options.security);
 
   const requestAdmissions = new WeakSet<Request>();
+  const requestState = new AsyncLocalStorage<RemoteMcpOAuthProviderRequestState>();
   const plugins = [
     createDomainBoundaryPlugin(options, requestAdmissions),
     createJwtPlugin(options.issuer, options),
-    createProviderPlugin(options, options),
+    createProviderPlugin(options, options, requestState),
   ] as const;
   return {
     plugins,
     wrapProviderHandler: (providerHandler) =>
-      wrapLiveProviderHandler(options, requestAdmissions, providerHandler),
+      wrapLiveProviderHandler(options, requestAdmissions, requestState, providerHandler),
   };
 }
 

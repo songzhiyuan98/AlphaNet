@@ -2,6 +2,7 @@ import { gzipSync } from "node:zlib";
 import { createServer } from "node:http";
 
 import {
+  AGENT_SCOPES,
   AGENT_TOOL_NAMES,
   V1ErrorResponseSchema,
   type AgentScope,
@@ -19,6 +20,7 @@ import { z } from "zod";
 import {
   createMcpApp,
   MCP_MAX_REQUEST_BYTES,
+  MCP_PRM_MAX_RESPONSE_BYTES,
   type McpActorRateLimitContext,
   type McpApp,
   type McpAppOptions,
@@ -38,6 +40,8 @@ const logger = createLogger({
   service: "mcp-test",
 });
 const resource = "https://mcp.alphanet.test/mcp";
+const oauthIssuer = "https://auth.alphanet.test/";
+const resourceMetadataPath = "/.well-known/oauth-protected-resource/mcp";
 const grantId = "11111111-1111-4111-8111-111111111111";
 const credentialId = "22222222-2222-4222-8222-222222222222";
 const tokenJtiDigest = "A".repeat(43);
@@ -142,10 +146,11 @@ afterEach(async () => {
 function makeApp(overrides: Partial<McpAppOptions> = {}): McpApp {
   const app = createMcpApp({
     actorRateLimiter: () => ({ allowed: true }),
-    allowedHosts: ["127.0.0.1", "localhost"],
+    allowedHosts: ["127.0.0.1", "localhost", "mcp.alphanet.test"],
     authorizationMiddleware,
     host: "127.0.0.1",
     logger,
+    oauthIssuer,
     runtimeEnabled: true,
     requestRateLimiter: () => ({ allowed: true }),
     resolveClientIp: () => "203.0.113.10",
@@ -203,6 +208,192 @@ describe("MCP service", () => {
       status: "degraded",
       failedDependencies: ["redis"],
     });
+  });
+
+  it("publishes bounded RFC 9728 metadata without bearer authorization", async () => {
+    const authorize = vi.fn(authorizationMiddleware);
+    const actorRateLimiter = vi.fn(() => ({ allowed: true as const }));
+    const requestRateLimiter = vi.fn((context: McpRequestRateLimitContext) => {
+      void context;
+      return { allowed: true as const };
+    });
+    const app = makeApp({
+      actorRateLimiter,
+      authorizationMiddleware: authorize,
+      requestRateLimiter,
+    });
+
+    const response = await request(app.app)
+      .get(resourceMetadataPath)
+      .set("host", "mcp.alphanet.test")
+      .set("origin", "https://mcp.alphanet.test");
+
+    expect(response.status).toBe(200);
+    expect(response.headers["content-type"]).toMatch(
+      /^application\/json(?:;\s*charset=utf-8)?$/,
+    );
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.headers["x-request-id"]).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(response.body).toEqual({
+      resource,
+      authorization_servers: [oauthIssuer],
+      scopes_supported: AGENT_SCOPES,
+      bearer_methods_supported: ["header"],
+    });
+    expect(Buffer.byteLength(response.text, "utf8")).toBeLessThanOrEqual(
+      MCP_PRM_MAX_RESPONSE_BYTES,
+    );
+    expect(requestRateLimiter).toHaveBeenCalledOnce();
+    const rateLimitContext = requestRateLimiter.mock.calls[0]?.[0];
+    expect(rateLimitContext).toMatchObject({
+      clientIp: "203.0.113.10",
+    });
+    expect(rateLimitContext?.requestId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(rateLimitContext?.signal).toBeInstanceOf(AbortSignal);
+    expect(authorize).not.toHaveBeenCalled();
+    expect(actorRateLimiter).not.toHaveBeenCalled();
+  });
+
+  it("serves the same metadata headers for HEAD without a response body", async () => {
+    const authorize = vi.fn(authorizationMiddleware);
+    const actorRateLimiter = vi.fn(() => ({ allowed: true as const }));
+    const app = makeApp({
+      actorRateLimiter,
+      authorizationMiddleware: authorize,
+    });
+
+    const response = await request(app.app)
+      .head(resourceMetadataPath)
+      .set("host", "mcp.alphanet.test");
+
+    expect(response.status).toBe(200);
+    expect(response.headers["content-type"]).toMatch(
+      /^application\/json(?:;\s*charset=utf-8)?$/,
+    );
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.text).toBeUndefined();
+    expect(authorize).not.toHaveBeenCalled();
+    expect(actorRateLimiter).not.toHaveBeenCalled();
+  });
+
+  it("does not make bearer or actor protection components a metadata dependency", async () => {
+    const requestRateLimiter = vi.fn(() => ({ allowed: true as const }));
+    const app = makeApp({
+      actorRateLimiter: undefined,
+      authorizationMiddleware: undefined,
+      requestRateLimiter,
+    });
+
+    const response = await request(app.app)
+      .get(resourceMetadataPath)
+      .set("host", "mcp.alphanet.test");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ resource });
+    expect(requestRateLimiter).toHaveBeenCalledOnce();
+  });
+
+  it.each(["post", "put", "patch", "delete", "options"] as const)(
+    "returns 405 for %s on protected resource metadata after IP protection",
+    async (method) => {
+      const authorize = vi.fn(authorizationMiddleware);
+      const actorRateLimiter = vi.fn(() => ({ allowed: true as const }));
+      const requestRateLimiter = vi.fn(() => ({ allowed: true as const }));
+      const app = makeApp({
+        actorRateLimiter,
+        authorizationMiddleware: authorize,
+        requestRateLimiter,
+      });
+
+      const agent = request(app.app);
+      const response = await agent[method](resourceMetadataPath).set(
+        "host",
+        "mcp.alphanet.test",
+      );
+
+      expect(response.status).toBe(405);
+      expect(response.headers.allow).toBe("GET, HEAD");
+      expect(response.headers["cache-control"]).toBe("no-store");
+      expect(response.body).toEqual({ error: "method_not_allowed" });
+      expect(requestRateLimiter).toHaveBeenCalledOnce();
+      expect(authorize).not.toHaveBeenCalled();
+      expect(actorRateLimiter).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects hostile metadata Host and Origin values before rate limiting", async () => {
+    const authorize = vi.fn(authorizationMiddleware);
+    const requestRateLimiter = vi.fn(() => ({ allowed: true as const }));
+    const app = makeApp({ authorizationMiddleware: authorize, requestRateLimiter });
+
+    const [hostResponse, originResponse] = await Promise.all([
+      request(app.app).get(resourceMetadataPath).set("host", "attacker.example"),
+      request(app.app)
+        .get(resourceMetadataPath)
+        .set("host", "mcp.alphanet.test")
+        .set("origin", "https://attacker.example"),
+    ]);
+
+    expect(hostResponse.status).toBe(403);
+    expect(originResponse.status).toBe(403);
+    expect(requestRateLimiter).not.toHaveBeenCalled();
+    expect(authorize).not.toHaveBeenCalled();
+  });
+
+  it("applies IP admission to metadata without invoking bearer or actor admission", async () => {
+    const authorize = vi.fn(authorizationMiddleware);
+    const actorRateLimiter = vi.fn(() => ({ allowed: true as const }));
+    const app = makeApp({
+      actorRateLimiter,
+      authorizationMiddleware: authorize,
+      requestRateLimiter: () => ({ allowed: false, retryAfterSeconds: 11 }),
+    });
+
+    const response = await request(app.app)
+      .get(resourceMetadataPath)
+      .set("host", "mcp.alphanet.test");
+
+    expect(response.status).toBe(429);
+    expect(response.headers["retry-after"]).toBe("11");
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(authorize).not.toHaveBeenCalled();
+    expect(actorRateLimiter).not.toHaveBeenCalled();
+  });
+
+  it("advertises the exact live metadata handler in an invalid-token challenge", async () => {
+    const authorize = vi.fn(authorizationFor(undefined));
+    const app = makeApp({ authorizationMiddleware: authorize });
+
+    const unauthorizedResponse = await protocolRequest(app, {
+      jsonrpc: "2.0",
+      id: "prm-challenge",
+      method: "tools/list",
+      params: {},
+    }).set("host", "mcp.alphanet.test");
+    const challenge = String(unauthorizedResponse.headers["www-authenticate"]);
+    const metadataUrl = /resource_metadata="([^"]+)"/.exec(challenge)?.[1];
+
+    expect(unauthorizedResponse.status).toBe(401);
+    expect(metadataUrl).toBe(
+      "https://mcp.alphanet.test/.well-known/oauth-protected-resource/mcp",
+    );
+
+    const metadataResponse = await request(app.app)
+      .get(new URL(metadataUrl ?? "https://invalid.test/").pathname)
+      .set("host", "mcp.alphanet.test");
+
+    expect(metadataResponse.status).toBe(200);
+    expect(metadataResponse.body).toEqual({
+      resource,
+      authorization_servers: [oauthIssuer],
+      scopes_supported: AGENT_SCOPES,
+      bearer_methods_supported: ["header"],
+    });
+    expect(authorize).toHaveBeenCalledOnce();
   });
 
   it("completes the MCP initialize handshake through a stateless transport", async () => {

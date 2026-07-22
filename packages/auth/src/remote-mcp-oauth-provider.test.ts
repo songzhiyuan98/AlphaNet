@@ -15,7 +15,9 @@ import {
 const AUTH_USER_ID = "10000000-0000-4000-8000-000000000001";
 const GRANT_ID = "20000000-0000-4000-8000-000000000002";
 const CREDENTIAL_ID = "30000000-0000-4000-8000-000000000003";
+const OWNER_SESSION_ID = "40000000-0000-4000-8000-000000000004";
 const TOKEN_JTI_DIGEST = "A".repeat(43);
+const CODE_CHALLENGE = "abcdefghijklmnopqrstuvwxyz0123456789_-ABCDE";
 
 function fakeEs256Token(payload: Record<string, unknown>): string {
   return [
@@ -78,6 +80,8 @@ function streamingTokenRequest(chunks: readonly Uint8Array[]): Request {
 
 function securityHooks(): AlphaNetRemoteMcpOAuthSecurityHooks {
   return {
+    activateAuthorizationGrant: () => Promise.resolve(),
+    compensateFailedAuthorizationGrantExchange: () => Promise.resolve(),
     executeDomainRevocationTransaction: () =>
       Promise.resolve(new Response(null, { status: 204 })),
     persistAccessTokenAuthority: () =>
@@ -93,6 +97,8 @@ function securityHooks(): AlphaNetRemoteMcpOAuthSecurityHooks {
       shouldRedirect: () => Promise.resolve(true),
     },
     signAccessToken: (payload) => Promise.resolve(fakeEs256Token(payload)),
+    withAuthorizationCodeExchangeLock: async (_input, executeWhileLocked) =>
+      executeWhileLocked({ grantId: GRANT_ID }),
     withOwnerClientRefreshLock: async (_input, executeWhileLocked) =>
       executeWhileLocked({
         clientEnabled: true,
@@ -113,6 +119,43 @@ function securityHooks(): AlphaNetRemoteMcpOAuthSecurityHooks {
         refreshTokenIssuedAt: new Date("2026-07-21T00:00:00.000Z"),
         refreshTokenRevokedAt: null,
       }),
+  };
+}
+
+function authorizationCodeTokenRequest(): Request {
+  return new Request("https://auth.alphanet.example/api/auth/oauth2/token", {
+    body: new URLSearchParams({
+      client_id: "mcp-client-v1",
+      code: "authorization-code-secret",
+      code_verifier: "abcdefghijklmnopqrstuvwxyz0123456789-._~ABCDE",
+      grant_type: "authorization_code",
+      redirect_uri: "https://client.example/oauth/callback",
+      resource: "https://mcp.alphanet.example/mcp",
+    }),
+    method: "POST",
+  });
+}
+
+function authorizationCodeTokenFields() {
+  return {
+    grantType: "authorization_code" as const,
+    scopes: ["offline_access", "research:read"],
+    user: { id: AUTH_USER_ID },
+    verificationValue: {
+      query: {
+        client_id: "mcp-client-v1",
+        code_challenge: CODE_CHALLENGE,
+        code_challenge_method: "S256" as const,
+        redirect_uri: "https://client.example/oauth/callback",
+        resource: "https://mcp.alphanet.example/mcp",
+        response_type: "code" as const,
+        scope: "offline_access research:read",
+      },
+      referenceId: GRANT_ID,
+      sessionId: OWNER_SESSION_ID,
+      type: "authorization_code" as const,
+      userId: AUTH_USER_ID,
+    },
   };
 }
 
@@ -139,6 +182,11 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
             resource?: string;
             scopes: string[];
             user?: { id: string } | null;
+          }) => Promise<Record<string, unknown>>;
+          customTokenResponseFields?: (input: {
+            grantType: "refresh_token";
+            scopes: string[];
+            user: { id: string };
           }) => Promise<Record<string, unknown>>;
           storeTokens?: {
             hash(token: string, type: string): Promise<string> | string;
@@ -183,6 +231,13 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
     expect(accessDigest).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(refreshDigest).not.toBe(accessDigest);
     expect(refreshDigest).not.toContain("secret");
+    await expect(
+      providerOptions?.customTokenResponseFields?.({
+        grantType: "refresh_token",
+        scopes: ["research:read", "offline_access"],
+        user: { id: AUTH_USER_ID },
+      }),
+    ).resolves.toEqual({});
   });
 
   it("removes native introspection and its advertised metadata from the live boundary", async () => {
@@ -206,14 +261,15 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
     );
     expect(metadata).toMatchObject({
       issuer: "https://auth.alphanet.example/api/auth",
+      revocation_endpoint_auth_methods_supported: ["none"],
       token_endpoint: "https://auth.alphanet.example/api/auth/oauth2/token",
+      token_endpoint_auth_methods_supported: ["none"],
     });
     expect(metadata).not.toHaveProperty("introspection_endpoint");
     expect(metadata).not.toHaveProperty("introspection_endpoint_auth_methods_supported");
     expect(metadata).not.toHaveProperty(
       "introspection_endpoint_auth_signing_alg_values_supported",
     );
-
     await expect(
       live.plugins[0].onRequest?.(
         new Request("https://auth.alphanet.example/api/auth/oauth2/introspect", {
@@ -281,6 +337,173 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
     });
     expect(response.status).toBe(200);
     expect(events).toEqual(["envelope:persisted", "provider"]);
+  });
+
+  it("claims consent once per request and leaves failed pre-token Grants pending", async () => {
+    const phases: string[] = [];
+    const compensations: unknown[] = [];
+    const hooks = securityHooks();
+    hooks.postLogin.resolveGrantId = (_context, phase) => {
+      phases.push(phase);
+      return Promise.resolve(GRANT_ID);
+    };
+    hooks.compensateFailedAuthorizationGrantExchange = (input) => {
+      compensations.push(input);
+      return Promise.resolve();
+    };
+    const live = createAlphaNetRemoteMcpOAuthLiveBoundary({
+      consentPage: "/oauth/consent",
+      issuer: "https://auth.alphanet.example/api/auth",
+      jwksUrl: "https://keys.alphanet.example/remote-mcp/jwks.json",
+      loginPage: "/login",
+      resource: "https://mcp.alphanet.example/mcp",
+      security: hooks,
+      tokenStorageKey: Buffer.alloc(32, 0x77),
+    });
+    const provider = live.plugins.find((plugin) => plugin.id === "oauth-provider");
+    const postLogin = (
+      provider?.options as {
+        postLogin: { consentReferenceId(input: unknown): Promise<string> };
+      }
+    ).postLogin;
+    const consentContext = {
+      scopes: ["research:read"],
+      session: { id: OWNER_SESSION_ID },
+      user: { id: AUTH_USER_ID },
+    };
+    const successfulConsent = await live.wrapProviderHandler(async () => {
+      await expect(postLogin.consentReferenceId(consentContext)).resolves.toBe(GRANT_ID);
+      await expect(postLogin.consentReferenceId(consentContext)).resolves.toBe(GRANT_ID);
+      return new Response("consent-complete");
+    })({
+      authorizationHeaders: [],
+      request: new Request("https://auth.alphanet.example/api/auth/oauth2/consent", {
+        method: "POST",
+      }),
+    });
+    expect(successfulConsent.status).toBe(200);
+    expect(phases).toEqual(["claim"]);
+    expect(compensations).toEqual([]);
+
+    const failedConsent = await live.wrapProviderHandler(async () => {
+      await expect(postLogin.consentReferenceId(consentContext)).resolves.toBe(GRANT_ID);
+      await expect(postLogin.consentReferenceId(consentContext)).resolves.toBe(GRANT_ID);
+      return new Response(null, { status: 500 });
+    })({
+      authorizationHeaders: [],
+      request: new Request("https://auth.alphanet.example/api/auth/oauth2/consent", {
+        method: "POST",
+      }),
+    });
+    expect(failedConsent.status).toBe(500);
+    expect(phases).toEqual(["claim", "claim"]);
+    expect(compensations).toEqual([]);
+
+    const consentFailure = new Error("consent provider failed");
+    await expect(
+      live.wrapProviderHandler(async () => {
+        await expect(postLogin.consentReferenceId(consentContext)).resolves.toBe(
+          GRANT_ID,
+        );
+        throw consentFailure;
+      })({
+        authorizationHeaders: [],
+        request: new Request("https://auth.alphanet.example/api/auth/oauth2/consent", {
+          method: "POST",
+        }),
+      }),
+    ).rejects.toBe(consentFailure);
+    expect(phases).toEqual(["claim", "claim", "claim"]);
+    expect(compensations).toEqual([]);
+
+    const authorizeUrl = new URL(
+      "https://auth.alphanet.example/api/auth/oauth2/authorize",
+    );
+    authorizeUrl.search = new URLSearchParams({
+      client_id: "mcp-client-v1",
+      code_challenge: CODE_CHALLENGE,
+      code_challenge_method: "S256",
+      redirect_uri: "https://client.example/oauth/callback",
+      resource: "https://mcp.alphanet.example/mcp",
+      response_type: "code",
+      scope: "research:read",
+    }).toString();
+    const boundary = live.plugins[0];
+    const authorizeResponse = await live.wrapProviderHandler(async (request) => {
+      const guard = await boundary.onRequest?.(request, {} as never);
+      if (guard && "response" in guard) {
+        return guard.response;
+      }
+      await expect(postLogin.consentReferenceId(consentContext)).resolves.toBe(GRANT_ID);
+      return new Response("authorize-complete");
+    })({ authorizationHeaders: [], request: new Request(authorizeUrl) });
+    expect(authorizeResponse.status).toBe(200);
+    expect(phases).toEqual(["claim", "claim", "claim", "inspect"]);
+    expect(compensations).toEqual([]);
+  });
+
+  it("does not infer pre-token authority from Provider redirect representations", async () => {
+    const compensations: unknown[] = [];
+    const hooks = securityHooks();
+    hooks.compensateFailedAuthorizationGrantExchange = (input) => {
+      compensations.push(input);
+      return Promise.resolve();
+    };
+    const live = createAlphaNetRemoteMcpOAuthLiveBoundary({
+      consentPage: "/oauth/consent",
+      issuer: "https://auth.alphanet.example/api/auth",
+      jwksUrl: "https://keys.alphanet.example/remote-mcp/jwks.json",
+      loginPage: "/login",
+      resource: "https://mcp.alphanet.example/mcp",
+      security: hooks,
+      tokenStorageKey: Buffer.alloc(32, 0x77),
+    });
+    const provider = live.plugins.find((plugin) => plugin.id === "oauth-provider");
+    const postLogin = (
+      provider?.options as {
+        postLogin: { consentReferenceId(input: unknown): Promise<string> };
+      }
+    ).postLogin;
+    const consentContext = {
+      scopes: ["research:read"],
+      session: { id: OWNER_SESSION_ID },
+      user: { id: AUTH_USER_ID },
+    };
+    const consentRequest = () =>
+      new Request("https://auth.alphanet.example/api/auth/oauth2/consent", {
+        method: "POST",
+      });
+    const runRedirect = (location: string) =>
+      live.wrapProviderHandler(async () => {
+        await postLogin.consentReferenceId(consentContext);
+        return new Response(null, {
+          headers: { Location: location },
+          status: 302,
+        });
+      })({ authorizationHeaders: [], request: consentRequest() });
+
+    const success = new URL("https://client.example/oauth/callback");
+    success.searchParams.set("code", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6");
+    success.searchParams.set("state", "opaque-state");
+    success.searchParams.set("iss", "https://auth.alphanet.example/api/auth");
+    await expect(runRedirect(success.toString())).resolves.toMatchObject({
+      status: 302,
+    });
+    expect(compensations).toEqual([]);
+
+    const denied = new URL("https://client.example/oauth/callback");
+    denied.searchParams.set("error", "access_denied");
+    denied.searchParams.set("iss", "https://auth.alphanet.example/api/auth");
+    await expect(runRedirect(denied.toString())).resolves.toMatchObject({ status: 302 });
+    expect(compensations).toEqual([]);
+
+    const offTarget = new URL("https://attacker.example/oauth/callback");
+    offTarget.searchParams.set("code", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6");
+    offTarget.searchParams.set("iss", "https://auth.alphanet.example/api/auth");
+    await expect(runRedirect(offTarget.toString())).resolves.toMatchObject({
+      status: 302,
+    });
+    expect(compensations).toEqual([]);
   });
 
   it("blocks direct token serving and completes refresh handling inside the lock", async () => {
@@ -386,6 +609,312 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
     expect(replayedRequestObject.status).toBe(503);
   });
 
+  it("activates the exact authorization Grant before token signing and response", async () => {
+    const events: string[] = [];
+    const activationInputs: unknown[] = [];
+    const codeLockInputs: unknown[] = [];
+    const hooks = securityHooks();
+    hooks.withAuthorizationCodeExchangeLock = async (input, executeWhileLocked) => {
+      codeLockInputs.push(input);
+      events.push("code:lock");
+      const result = await executeWhileLocked({ grantId: GRANT_ID });
+      events.push("code:unlock");
+      return result;
+    };
+    hooks.activateAuthorizationGrant = (input) => {
+      activationInputs.push(input);
+      events.push("grant:activate");
+      return Promise.resolve();
+    };
+    hooks.persistAccessTokenAuthority = () => {
+      events.push("authority:persist");
+      return Promise.resolve({
+        credentialId: CREDENTIAL_ID,
+        grantEpoch: 7,
+        tokenJtiDigest: TOKEN_JTI_DIGEST,
+      });
+    };
+    hooks.signAccessToken = (payload) => {
+      events.push("token:sign");
+      return Promise.resolve(fakeEs256Token(payload));
+    };
+    hooks.compensateFailedAuthorizationGrantExchange = () => {
+      events.push("grant:compensate");
+      return Promise.resolve();
+    };
+    const live = createAlphaNetRemoteMcpOAuthLiveBoundary({
+      consentPage: "/oauth/consent",
+      issuer: "https://auth.alphanet.example/api/auth",
+      jwksUrl: "https://keys.alphanet.example/remote-mcp/jwks.json",
+      loginPage: "/login",
+      resource: "https://mcp.alphanet.example/mcp",
+      security: hooks,
+      tokenStorageKey: Buffer.alloc(32, 0x77),
+    });
+    const boundary = live.plugins[0];
+    const provider = live.plugins.find((plugin) => plugin.id === "oauth-provider");
+    const providerOptions = provider?.options as {
+      customTokenResponseFields(
+        input: ReturnType<typeof authorizationCodeTokenFields>,
+      ): Promise<Record<string, unknown>> | Record<string, unknown>;
+    };
+    const jwtOptions = (
+      live.plugins.find((plugin) => plugin.id === "jwt")?.options as {
+        jwt: { sign(payload: Record<string, unknown>): Promise<string> };
+      }
+    ).jwt;
+    const providerHandler = async (request: Request): Promise<Response> => {
+      const guard = await boundary.onRequest?.(request, {} as never);
+      if (guard && "response" in guard) {
+        return guard.response;
+      }
+      await providerOptions.customTokenResponseFields(authorizationCodeTokenFields());
+      await jwtOptions.sign({
+        aud: "https://mcp.alphanet.example/mcp",
+        azp: "mcp-client-v1",
+        exp: 1_800,
+        grant_id: GRANT_ID,
+        iat: 1_200,
+        iss: "https://auth.alphanet.example/api/auth",
+        jti: "50000000-0000-4000-8000-000000000005",
+        scope: "research:read offline_access",
+        sub: AUTH_USER_ID,
+      });
+      events.push("provider:response");
+      return new Response("token-complete");
+    };
+
+    const response = await live.wrapProviderHandler(providerHandler)({
+      authorizationHeaders: [],
+      request: authorizationCodeTokenRequest(),
+    });
+
+    expect(response.status).toBe(200);
+    expect(events).toEqual([
+      "code:lock",
+      "grant:activate",
+      "authority:persist",
+      "token:sign",
+      "provider:response",
+      "code:unlock",
+    ]);
+    expect(codeLockInputs).toEqual([
+      {
+        authorizationCode: "authorization-code-secret",
+        clientId: "mcp-client-v1",
+        codeVerifier: "abcdefghijklmnopqrstuvwxyz0123456789-._~ABCDE",
+        redirectUri: "https://client.example/oauth/callback",
+        resource: "https://mcp.alphanet.example/mcp",
+      },
+    ]);
+    expect(activationInputs).toEqual([
+      {
+        authUserId: AUTH_USER_ID,
+        codeChallenge: CODE_CHALLENGE,
+        codeChallengeMethod: "S256",
+        grantId: GRANT_ID,
+        oauthClientId: "mcp-client-v1",
+        ownerSessionId: OWNER_SESSION_ID,
+        redirectUri: "https://client.example/oauth/callback",
+        resource: "https://mcp.alphanet.example/mcp",
+        scopes: ["research:read", "offline_access"],
+      },
+    ]);
+    expect(JSON.stringify(activationInputs)).not.toContain("authorization-code-secret");
+    expect(JSON.stringify(activationInputs)).not.toContain("code_verifier");
+  });
+
+  it("compensates an activated Grant before propagating a thrown token failure", async () => {
+    const events: string[] = [];
+    const hooks = securityHooks();
+    hooks.activateAuthorizationGrant = () => {
+      events.push("grant:activate");
+      return Promise.resolve();
+    };
+    hooks.compensateFailedAuthorizationGrantExchange = (input) => {
+      expect(input).toEqual({ grantId: GRANT_ID });
+      events.push("grant:compensate");
+      return Promise.resolve();
+    };
+    const live = createAlphaNetRemoteMcpOAuthLiveBoundary({
+      consentPage: "/oauth/consent",
+      issuer: "https://auth.alphanet.example/api/auth",
+      jwksUrl: "https://keys.alphanet.example/remote-mcp/jwks.json",
+      loginPage: "/login",
+      resource: "https://mcp.alphanet.example/mcp",
+      security: hooks,
+      tokenStorageKey: Buffer.alloc(32, 0x77),
+    });
+    const boundary = live.plugins[0];
+    const provider = live.plugins.find((plugin) => plugin.id === "oauth-provider");
+    const providerOptions = provider?.options as {
+      customTokenResponseFields(
+        input: ReturnType<typeof authorizationCodeTokenFields>,
+      ): Promise<Record<string, unknown>> | Record<string, unknown>;
+    };
+    const providerFailure = new Error("provider failed without request values");
+    const providerHandler = async (request: Request): Promise<Response> => {
+      const guard = await boundary.onRequest?.(request, {} as never);
+      if (guard && "response" in guard) {
+        return guard.response;
+      }
+      await providerOptions.customTokenResponseFields(authorizationCodeTokenFields());
+      events.push("provider:throw");
+      throw providerFailure;
+    };
+
+    await expect(
+      live.wrapProviderHandler(providerHandler)({
+        authorizationHeaders: [],
+        request: authorizationCodeTokenRequest(),
+      }),
+    ).rejects.toBe(providerFailure);
+    expect(events).toEqual(["grant:activate", "provider:throw", "grant:compensate"]);
+  });
+
+  it("compensates a correlated pending Grant when Provider rejects before activation", async () => {
+    const events: string[] = [];
+    const hooks = securityHooks();
+    hooks.withAuthorizationCodeExchangeLock = async (_input, executeWhileLocked) => {
+      events.push("code:lock");
+      const response = await executeWhileLocked({ grantId: GRANT_ID });
+      events.push("code:unlock");
+      return response;
+    };
+    hooks.compensateFailedAuthorizationGrantExchange = (input) => {
+      expect(input).toEqual({ grantId: GRANT_ID });
+      events.push("grant:compensate");
+      return Promise.resolve();
+    };
+    const live = createAlphaNetRemoteMcpOAuthLiveBoundary({
+      consentPage: "/oauth/consent",
+      issuer: "https://auth.alphanet.example/api/auth",
+      jwksUrl: "https://keys.alphanet.example/remote-mcp/jwks.json",
+      loginPage: "/login",
+      resource: "https://mcp.alphanet.example/mcp",
+      security: hooks,
+      tokenStorageKey: Buffer.alloc(32, 0x77),
+    });
+
+    const response = await live.wrapProviderHandler(() => {
+      events.push("provider:reject");
+      return Promise.resolve(new Response(null, { status: 400 }));
+    })({
+      authorizationHeaders: [],
+      request: authorizationCodeTokenRequest(),
+    });
+
+    expect(response.status).toBe(400);
+    expect(events).toEqual([
+      "code:lock",
+      "provider:reject",
+      "grant:compensate",
+      "code:unlock",
+    ]);
+  });
+
+  it("compensates after Provider success when authorization-code lock completion fails", async () => {
+    const events: string[] = [];
+    const hooks = securityHooks();
+    const lockFailure = new Error("authorization-code lock commit failed");
+    hooks.withAuthorizationCodeExchangeLock = async (_input, executeWhileLocked) => {
+      events.push("code:lock");
+      await executeWhileLocked({ grantId: GRANT_ID });
+      events.push("code:commit-failed");
+      throw lockFailure;
+    };
+    hooks.compensateFailedAuthorizationGrantExchange = (input) => {
+      expect(input).toEqual({ grantId: GRANT_ID });
+      events.push("grant:compensate");
+      return Promise.resolve();
+    };
+    const live = createAlphaNetRemoteMcpOAuthLiveBoundary({
+      consentPage: "/oauth/consent",
+      issuer: "https://auth.alphanet.example/api/auth",
+      jwksUrl: "https://keys.alphanet.example/remote-mcp/jwks.json",
+      loginPage: "/login",
+      resource: "https://mcp.alphanet.example/mcp",
+      security: hooks,
+      tokenStorageKey: Buffer.alloc(32, 0x77),
+    });
+    const boundary = live.plugins[0];
+    const provider = live.plugins.find((plugin) => plugin.id === "oauth-provider");
+    const providerOptions = provider?.options as {
+      customTokenResponseFields(
+        input: ReturnType<typeof authorizationCodeTokenFields>,
+      ): Promise<Record<string, unknown>> | Record<string, unknown>;
+    };
+
+    await expect(
+      live.wrapProviderHandler(async (request) => {
+        const guard = await boundary.onRequest?.(request, {} as never);
+        if (guard && "response" in guard) return guard.response;
+        await providerOptions.customTokenResponseFields(authorizationCodeTokenFields());
+        events.push("provider:success");
+        return new Response("token-complete");
+      })({
+        authorizationHeaders: [],
+        request: authorizationCodeTokenRequest(),
+      }),
+    ).rejects.toBe(lockFailure);
+    expect(events).toEqual([
+      "code:lock",
+      "provider:success",
+      "code:commit-failed",
+      "grant:compensate",
+    ]);
+  });
+
+  it("compensates an activated Grant before returning a non-success token response", async () => {
+    const events: string[] = [];
+    const hooks = securityHooks();
+    hooks.activateAuthorizationGrant = () => {
+      events.push("grant:activate");
+      return Promise.resolve();
+    };
+    hooks.compensateFailedAuthorizationGrantExchange = (input) => {
+      expect(input).toEqual({ grantId: GRANT_ID });
+      events.push("grant:compensate");
+      return Promise.resolve();
+    };
+    const live = createAlphaNetRemoteMcpOAuthLiveBoundary({
+      consentPage: "/oauth/consent",
+      issuer: "https://auth.alphanet.example/api/auth",
+      jwksUrl: "https://keys.alphanet.example/remote-mcp/jwks.json",
+      loginPage: "/login",
+      resource: "https://mcp.alphanet.example/mcp",
+      security: hooks,
+      tokenStorageKey: Buffer.alloc(32, 0x77),
+    });
+    const boundary = live.plugins[0];
+    const provider = live.plugins.find((plugin) => plugin.id === "oauth-provider");
+    const providerOptions = provider?.options as {
+      customTokenResponseFields(
+        input: ReturnType<typeof authorizationCodeTokenFields>,
+      ): Promise<Record<string, unknown>> | Record<string, unknown>;
+    };
+    const providerHandler = async (request: Request): Promise<Response> => {
+      const guard = await boundary.onRequest?.(request, {} as never);
+      if (guard && "response" in guard) {
+        return guard.response;
+      }
+      await providerOptions.customTokenResponseFields(authorizationCodeTokenFields());
+      events.push("provider:error-response");
+      return new Response(null, { status: 500 });
+    };
+
+    const response = await live.wrapProviderHandler(providerHandler)({
+      authorizationHeaders: [],
+      request: authorizationCodeTokenRequest(),
+    });
+    expect(response.status).toBe(500);
+    expect(events).toEqual([
+      "grant:activate",
+      "provider:error-response",
+      "grant:compensate",
+    ]);
+  });
+
   it("rejects an oversized chunked token body by actual bytes read", async () => {
     let lockCalls = 0;
     let providerCalls = 0;
@@ -427,9 +956,14 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
   });
 
   it("preserves repeated raw Authorization rejection before Provider admission", async () => {
+    let compensationCalls = 0;
     let lockCalls = 0;
     let providerCalls = 0;
     const hooks = securityHooks();
+    hooks.compensateFailedAuthorizationGrantExchange = () => {
+      compensationCalls += 1;
+      return Promise.resolve();
+    };
     hooks.withOwnerClientRefreshLock = () => {
       lockCalls += 1;
       return Promise.reject(new Error("refresh lock must not run"));
@@ -464,6 +998,7 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
     expect(response.status).toBe(400);
     const body: unknown = await response.json();
     expect(body).toMatchObject({ error: "invalid_request" });
+    expect(compensationCalls).toBe(0);
     expect(lockCalls).toBe(0);
     expect(providerCalls).toBe(0);
   });
@@ -584,12 +1119,14 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
         grantId: GRANT_ID,
         issuedAt: new Date(1_200_000),
         jti: claims.jti,
+        oauthClientId: "mcp-client-v1",
+        protocolScopes: ["community:read", "offline_access"],
         resource: "https://mcp.alphanet.example/mcp",
         scopes: ["community:read"],
       }),
     ]);
-    await expect(providerOptions.postLogin.consentReferenceId({})).resolves.toBe(
-      GRANT_ID,
+    await expect(providerOptions.postLogin.consentReferenceId({})).rejects.toThrow(
+      "consent Grant is unavailable",
     );
 
     await expect(
@@ -767,6 +1304,10 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
     expect(metadata).not.toHaveProperty(
       "introspection_endpoint_auth_signing_alg_values_supported",
     );
+    expect(metadata).toMatchObject({
+      revocation_endpoint_auth_methods_supported: ["none"],
+      token_endpoint_auth_methods_supported: ["none"],
+    });
     const blocked = await schemaOnly[0].onRequest?.(
       new Request("http://[::1]:4000/api/auth/oauth2/token"),
       {} as never,

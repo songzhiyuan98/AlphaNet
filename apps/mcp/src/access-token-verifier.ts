@@ -18,6 +18,7 @@ import {
 } from "jose";
 
 export const REMOTE_MCP_ACCESS_TOKEN_MAX_BYTES = 16 * 1_024;
+export const REMOTE_MCP_ACCESS_TOKEN_CLOCK_TOLERANCE_SECONDS = 5;
 export const REMOTE_MCP_ACCESS_TOKEN_TTL_SECONDS = 10 * 60;
 
 export interface RemoteMcpAccessTokenVerifierConfig {
@@ -325,6 +326,7 @@ export function createRemoteMcpAccessTokenVerifier(
         const result = await jwtVerify(token, keyResolver, {
           algorithms: ["ES256"],
           audience: resource,
+          clockTolerance: REMOTE_MCP_ACCESS_TOKEN_CLOCK_TOLERANCE_SECONDS,
           ...(currentDate ? { currentDate } : {}),
           issuer,
           requiredClaims: [...ACCESS_TOKEN_PAYLOAD_KEYS],

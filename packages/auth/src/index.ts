@@ -5,5 +5,7 @@ export * from "./mcp-actor-replay.js";
 export * from "./oidc-jwt.js";
 export * from "./rate-limit.js";
 export * from "./remote-mcp-oauth-guard.js";
+export * from "./remote-mcp-oauth-consent.js";
 export * from "./remote-mcp-oauth-provider.js";
+export * from "./remote-mcp-oauth-store.js";
 export * from "./runtime.js";

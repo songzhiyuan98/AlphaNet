@@ -16,7 +16,9 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import {
   createRemoteMcpAccessTokenVerifier,
+  REMOTE_MCP_ACCESS_TOKEN_CLOCK_TOLERANCE_SECONDS,
   REMOTE_MCP_ACCESS_TOKEN_MAX_BYTES,
+  REMOTE_MCP_ACCESS_TOKEN_TTL_SECONDS,
 } from "./access-token-verifier.js";
 
 const ISSUER = "https://auth.alphanet.example/api/auth";
@@ -48,7 +50,7 @@ function canonicalPayload(overrides: Record<string, unknown> = {}): JWTPayload {
     aud: RESOURCE,
     azp: "mcp-client-v1",
     credential_id: CREDENTIAL_ID,
-    exp: NOW_SECONDS + 600,
+    exp: NOW_SECONDS + REMOTE_MCP_ACCESS_TOKEN_TTL_SECONDS,
     grant_epoch: 7,
     iat: NOW_SECONDS,
     iss: ISSUER,
@@ -103,7 +105,7 @@ describe("Remote MCP Access Token verifier", () => {
 
     await expect(verifier(keyResolver).verifyAccessToken(signed)).resolves.toEqual({
       clientId: "mcp-client-v1",
-      expiresAt: NOW_SECONDS + 600,
+      expiresAt: NOW_SECONDS + REMOTE_MCP_ACCESS_TOKEN_TTL_SECONDS,
       extra: {
         actor: {
           credentialId: CREDENTIAL_ID,
@@ -269,15 +271,51 @@ describe("Remote MCP Access Token verifier", () => {
     ["nbf does not equal iat", { nbf: NOW_SECONDS + 1 }],
     [
       "expired token",
-      { exp: NOW_SECONDS, iat: NOW_SECONDS - 600, nbf: NOW_SECONDS - 600 },
+      {
+        exp: NOW_SECONDS - REMOTE_MCP_ACCESS_TOKEN_CLOCK_TOLERANCE_SECONDS - 1,
+        iat:
+          NOW_SECONDS -
+          REMOTE_MCP_ACCESS_TOKEN_TTL_SECONDS -
+          REMOTE_MCP_ACCESS_TOKEN_CLOCK_TOLERANCE_SECONDS -
+          1,
+        nbf:
+          NOW_SECONDS -
+          REMOTE_MCP_ACCESS_TOKEN_TTL_SECONDS -
+          REMOTE_MCP_ACCESS_TOKEN_CLOCK_TOLERANCE_SECONDS -
+          1,
+      },
     ],
     [
       "not-yet-active token",
-      { exp: NOW_SECONDS + 601, iat: NOW_SECONDS + 1, nbf: NOW_SECONDS + 1 },
+      {
+        exp:
+          NOW_SECONDS +
+          REMOTE_MCP_ACCESS_TOKEN_TTL_SECONDS +
+          REMOTE_MCP_ACCESS_TOKEN_CLOCK_TOLERANCE_SECONDS +
+          1,
+        iat: NOW_SECONDS + REMOTE_MCP_ACCESS_TOKEN_CLOCK_TOLERANCE_SECONDS + 1,
+        nbf: NOW_SECONDS + REMOTE_MCP_ACCESS_TOKEN_CLOCK_TOLERANCE_SECONDS + 1,
+      },
     ],
   ])("rejects %s", async (_label, overrides) => {
     await expectInvalid(await token(overrides));
   });
+
+  it.each([1, REMOTE_MCP_ACCESS_TOKEN_CLOCK_TOLERANCE_SECONDS])(
+    "accepts an exact-TTL token issued %i second(s) in the future",
+    async (futureOffsetSeconds) => {
+      const issuedAt = NOW_SECONDS + futureOffsetSeconds;
+      const signed = await token({
+        exp: issuedAt + REMOTE_MCP_ACCESS_TOKEN_TTL_SECONDS,
+        iat: issuedAt,
+        nbf: issuedAt,
+      });
+
+      await expect(verifier().verifyAccessToken(signed)).resolves.toMatchObject({
+        expiresAt: issuedAt + REMOTE_MCP_ACCESS_TOKEN_TTL_SECONDS,
+      });
+    },
+  );
 
   it("rejects a non-ES256 algorithm before key resolution", async () => {
     const hmacKey = new TextEncoder().encode(

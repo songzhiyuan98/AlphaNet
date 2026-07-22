@@ -18,8 +18,10 @@ AlphaNet 的 Remote MCP 是独立部署的 OAuth 2.1 Resource Server 和 REST
 2. Authorization Server 使用与 `better-auth@1.6.23` 精确配套的
    `@better-auth/oauth-provider@1.6.23`，并使用 Better Auth JWT plugin
    生成 ES256 签名的短时 Access Token。
-3. 外部 OAuth 只支持 Authorization Code + PKCE S256 和 Refresh Token；
-   关闭 Client Credentials、匿名 Dynamic Client Registration 和跳过同意。
+3. 外部 OAuth 只接纳预注册的 public Client，使用 Authorization Code + PKCE
+   S256，并在 Client 明确支持时使用 Refresh Token；Token endpoint authentication
+   固定为 `none`。关闭 confidential Client authentication、Client Credentials、
+   所有 Dynamic Client Registration、public pre-login 和跳过同意。
 4. OAuth Grant 必须绑定一个 Owner、一个 Agent、一个预注册 Client、一个
    MCP Resource、一个 `oauth_grant` Credential 和 Owner 明确同意的 scopes。
 5. Access Token 只携带定位 Grant 所需的稳定标识；MCP 每次请求都验证
@@ -87,6 +89,15 @@ Grant、Credential、token epoch 或 JTI authority，因此 V1 明确移除该 e
 Authorization Server Metadata 也不声明 introspection。直接请求会 fail closed；只有
 后续实现逐次领域复核的 domain-aware Introspection 后才允许重新开放。
 
+V1 不提供任何动态注册入口。Client 必须由平台预先写入并显式启用，且同时满足
+`public=true`、`require_pkce=true`、`skip_consent=false`、`client_secret=null` 和
+`token_endpoint_auth_method=none`。Authorization Server Metadata 只声明
+`token_endpoint_auth_methods_supported=["none"]` 与
+`revocation_endpoint_auth_methods_supported=["none"]`，不能把 Provider 原生支持的
+confidential 方法误报给客户端。申请 `offline_access` 的 Client 还必须在当前
+`grant_types` 中包含 `refresh_token`；只支持 `authorization_code` 的 Client 不能
+获得离线授权。
+
 ### 3.2 RFC 8707 Resource Indicator
 
 OAuth Provider 1.6.23 的 Token endpoint 支持 `resource`，但其 Authorize query
@@ -110,10 +121,9 @@ Authorization Request、Grant 与 Access Token JTI authority 都外键绑定它�
 
 AWS 公网门同样 fail closed：`mcp_public_enabled=true` 必须同时配置固定的自定义
 `domain_name`，Terraform 不允许把自动生成、可能随环境重建变化的 CloudFront hostname
-写成不可变 Resource。ALB 预留规范的
-`/.well-known/oauth-protected-resource/mcp` 路由；公网门关闭时该路由与 `/mcp` 一样
-显式返回 404，只有后续 Protected Resource Metadata handler 和完整 public gate
-通过后才转发到 MCP。
+写成不可变 Resource。RFC 9728 Protected Resource Metadata handler 已在私有运行切片
+中实现；公网门关闭时 `/.well-known/oauth-protected-resource/mcp` 与 `/mcp` 仍显式
+返回 404，只有完整 public gate 通过后才对外转发。
 
 API 在 Provider 前后增加 fail-closed guard：
 
@@ -157,6 +167,19 @@ flow digest 查找一次性 Envelope；Owner、Client、scopes、PKCE challenge 
 任一不匹配都不能继续。由此同一 session 可以并发授权，但每个 flow 仍只能选择和
 同意一个 Agent。禁止使用无过期、可静默覆盖的“当前选中 Agent”状态。
 
+Continuation 明确分为 `inspect` 与 `claim` 两个阶段。`inspect` 只复核当前 Owner
+session、Agent／Actor、Client、Resource、scope 与待激活 Grant，不改变状态；
+`claim` 在同一数据库事务中一次性把 Authorization Request 变为 `consumed` 并绑定
+Grant，但 **Grant 仍保持 `pending`**。Provider 在同一个 Consent HTTP 请求内可能读取
+reference 两次，request-local 状态只允许第一次进入 `claim`；新的 HTTP 请求再次
+使用同一 continuation 必须得到 replay 拒绝。
+
+`claim` 不是 Access Token authority 边界。若 Consent claim 后 Provider 只返回重定向、
+非成功响应或抛错，而请求尚未与 Authorization Code 的 Token exchange 关联，平台不
+把该 Grant 提前标记为 active 或 compromised；它保持 pending，且可激活窗口仍受原始
+五分钟 Authorization Request／Code expiry 限制。显式拒绝和 claim 失败的专用终态化
+属于后续有界增强，不是 V1 的隐式授权路径。
+
 ## 4. Token、Grant 与撤销
 
 ### 4.1 Token 形态与寿命
@@ -172,6 +195,27 @@ JWKS 私钥在数据库中加密保存；签名 key 每 30 天轮换，旧公钥
 Access Token 固定包含 `iss`、`aud`、`exp`、`iat`、`jti`、`azp`、`scope` 和
 AlphaNet Grant id。Owner email、正文、持仓、Policy rules 和密钥材料不得进入
 Token。
+
+Authorization Code 的 Token boundary 在进入 Provider 前只读取一次不超过 16 KiB
+的原始 form，提取有界的 raw code 与 PKCE verifier，并以 Provider 存储键计算 code
+digest。每个 code 在独立 `lockPool` 的 PostgreSQL advisory transaction 内串行兑换；
+锁内重新读取 Provider verification，验证 code expiry、S256 verifier、Client、
+redirect URI、Resource、完整 protocol scopes 和已经 `consumed` 的 Authorization
+Request，再把它与唯一 pending／active Grant 关联。原始 code 与 verifier 不落库、
+不进日志。
+
+关联成功后，Provider 的 `customTokenResponseFields` callback 先把 pending Grant 原子
+激活，Provider 才能继续并行创建 Access Token 与可选 Refresh Token。JWT signer 只为
+`active` Grant 写入 keyed-digest JTI authority；pending Grant 永远不能持有 active
+JTI。Grant 与 Credential 在每次激活和签发检查时必须从数据库时钟起至少再有效
+605 秒，即 600 秒 Access Token TTL 加允许的 5 秒 signer clock lead。这样预检通过后
+不会在最后五秒因 token `iat` 领先而签发失败。
+
+一旦 Token request 已由 code lock 关联到 Grant，Provider 抛错、非 2xx、无效响应或
+lock completion 失败都会执行一次补偿：撤销 Credential、JTI 和相关 Provider token
+记录，并把仍为 pending／active 的 Grant 标记为 compromised。这个补偿只针对已经
+建立 code→Grant 关联、因而可能产生 bearer authority 的请求；它不会把单纯的 Consent
+claim 失败误判为 token compromise。
 
 ### 4.2 Credential 与 Policy ceiling
 
@@ -205,10 +249,25 @@ Grant、固定 30 天绝对寿命和 resource，关闭并发重放窗口。Provi
 并发 refresh/reuse 集成测试。
 
 该锁必须包住 Provider handler 的完整执行，而不只是 preflight。Live boundary 从
-原始 form 与未折叠的 Authorization header 列表验证 client authentication；只有
-一次性放行标记能进入 handler。同一请求重放、直接调用未包装 handler、缩小或扩大
-scope、以及 handler 在锁外完成都 fail closed。Provider 的滑动 Refresh expiry 在
-数据库写入时截断到 Grant 与 Credential 的最早绝对到期时间，绝不延长授权窗口。
+原始 form 与未折叠的 Authorization header 列表验证 client authentication。V1 只
+接受 public Client 的 `none`；HTTP Basic、`client_secret_post`、重复或混合认证在
+Authorization Code lock 和 Refresh lock 之前拒绝，因此无效 secret 不会被误当成
+Refresh family compromise 信号。只有一次性放行标记能进入 handler。同一请求重放、
+直接调用未包装 handler、缩小或扩大 scope、以及 handler 在锁外完成都 fail closed。
+Provider 的滑动 Refresh expiry 在数据库写入时截断到 Grant 与 Credential 的最早
+绝对到期时间，绝不延长授权窗口。
+
+Refresh lock 内的 AlphaNet authority guard 若在 Provider 启动前拒绝请求，只返回
+`invalid_grant`，不破坏整个 family。Provider 一旦开始执行，普通异常或非 2xx 结果
+无法证明其非事务性 delete/create rotation 尚未部分完成，因此平台保守地把同一
+Owner + Client family 标记为 compromised；这是安全退出，不是对失败原因的事实判断。
+
+Exchange lock 与 authority write 必须使用两个不同的 PostgreSQL Pool：`lockPool`
+只持有 code／Owner+Client advisory transaction，`pool` 供锁内 Provider callback
+执行 Grant activation、JTI persistence 和补偿。构造器拒绝二者为同一 Pool identity，
+避免 callback 等待自己占用的连接。真实 PostgreSQL 回归测试把 lock pool 和 authority
+pool 都配置为 `max=1`，证明嵌套签发不会因连接池反转而死锁；生产容量可以更高，但
+隔离约束不能取消。
 
 Token endpoint 在进入 Provider 或跨副本 Refresh lock 前按实际流读取字节执行
 16 KiB 硬上限，不信任 `Content-Length`。通过后只用这组有界字节重建 Request 并
@@ -244,6 +303,13 @@ IP 与 Actor limiter 各自最多等待 2 秒，超时或依赖异常均 fail cl
 必须包含有限且仍在未来的 expiry；MCP 为每个 HTTP 请求生成独立 UUID request id，
 不会把客户端 JSON-RPC id 当作审计或 ActorContext request id。Scope 需求只来自
 contracts 中覆盖全部 16 个规范工具的权威映射，不接受 registration-local 覆盖。
+
+签发时的 Client 配置不是永久授权快照。Consent inspect／claim、Grant activation、
+JTI persistence、Refresh lock 和每次 MCP 领域 authority 复核都会重新读取当前 Client；
+禁用 Client、改为 confidential、加入 secret、取消 PKCE／Consent、改变 auth method、
+redirect、scope 或 grant type 后，尚未签发或已经签发但尚未过期的 Token 都不能仅凭
+旧快照继续取得领域权限。`offline_access` 还逐次要求当前 Client 支持
+`refresh_token`。
 
 工具结果必须同时返回符合 `outputSchema` 的 `structuredContent` 和内容相同的
 单一 JSON text block。输入和最终 JSON 规范化后的输出都独立执行公开 JSON Schema
@@ -307,6 +373,19 @@ Phase B 固定五工具装配为一个由 `MCP_RUNTIME_ENABLED` 控制的私有�
 闭环和下方 Public gate 的全部证据完成前，部署配置仍必须保持公网 MCP 关闭。
 配置字段或 schema 存在不等于公网运行时已经可用。
 
+当前工程还已实现 RFC 9728 Protected Resource Metadata、一次性 Authorization
+Request 安全存储、Owner-only Agent 选择和 Consent 领域服务、pending Grant／
+Credential、Authorization Code 与 Refresh 串行锁、Grant 激活、active-only JTI
+authority、失败补偿和 Owner + Client 粒度的 Refresh reuse 防护。public PKCE Client
+约束、`offline_access` 不变量、605 秒签发 horizon、当前 Client 逐次复核与双 Pool
+隔离都有单元或真实 PostgreSQL 回归证据。
+
+这些仍是可独立验证的领域与协议原语，不等于已部署的 Authorization Server。Better
+Auth OAuth Provider 的 live HTTP handler 与 API runtime assembly、生产签名密钥／
+JWKS runtime、Owner Consent Web 路由、领域撤销 transaction 实现和入口、真实 Host
+端到端 Authorization Code／Refresh 互操作仍未装配或验收。因此当前状态不得描述为
+真实 OAuth 已经对外可用，`MCP_PUBLIC_ENABLED` 必须保持关闭。
+
 ### Phase B：五工具纵向切片
 
 - `get_agent_context`；
@@ -333,9 +412,18 @@ MCP→API 默认调用上限为 15 秒：覆盖写事务最多 10 秒的数据�
 以下证据全部满足前不得把 `mcp_public_enabled` 设为 `true`：
 
 - Authorization 与 Token 两端的 exact resource 绑定；
-- PKCE plain、错误 redirect、issuer、audience、signature、exp/nbf 全部拒绝；
+- 只有预注册 public PKCE Client；dynamic registration、confidential auth、PKCE plain、
+  错误 redirect、issuer、audience、signature、exp/nbf 全部拒绝；
 - 不能选择其他 Owner 的 Agent；request、code、refresh、assertion 不能重放；
 - Grant/Credential/Agent/Owner/Client 状态改变在下一请求生效；
+- Consent claim 不提前激活，code 兑换与 active-only JTI 顺序、605 秒 horizon、双 Pool
+  `max=1` 回归和 token-correlated compensation 全部通过；
+- `/oauth2/authorize` 必须在持久化 Authorization Request Envelope 之前经过专用限流，
+  并通过过期行清理、保留窗口和写放大负载测试；Provider handler 内部限流与粗粒度
+  WAF 规则不能替代这个前置门；
+- 固定 Provider 版本的真实 HTTP 全链路 E2E 必须覆盖 authorize、登录／Consent、302
+  恢复、code 兑换、并行 Access／Refresh 创建、Refresh rotation、依赖超时和故障注入；
+- 进程在签发或补偿中途崩溃后的持久化对账／补偿机制必须完成演练；
 - MCP 不直连业务数据库、不透传外部 Token；
 - 16 个工具、schema、structured result、REST 等价和 4 MiB wire gate 通过；
 - Assisted `create_post` 在批准前没有公开 ContentItem；

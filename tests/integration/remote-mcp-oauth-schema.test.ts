@@ -7,6 +7,7 @@ import {
   closeDependencies,
   createPostgresDependency,
   type HealthDependency,
+  type PostgresClient,
 } from "../../packages/database/src/index.js";
 import {
   PostgresRemoteMcpAuthorityService,
@@ -53,6 +54,40 @@ function digest(): Buffer {
 
 function protocolDigest(): string {
   return randomBytes(32).toString("base64url");
+}
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve(value: T): void;
+}
+
+function createDeferred<T>(): Deferred<T> {
+  let resolveDeferred: ((value: T) => void) | undefined;
+  const promise = new Promise<T>((resolve) => {
+    resolveDeferred = resolve;
+  });
+  return {
+    promise,
+    resolve(value) {
+      if (!resolveDeferred) throw new Error("Deferred resolver was not initialized");
+      resolveDeferred(value);
+    },
+  };
+}
+
+async function waitForBackendBlock(
+  sql: PostgresClient,
+  backendPid: number,
+): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const blocked = await sql<{ blocked: boolean }[]>`
+      select cardinality(pg_catalog.pg_blocking_pids(${backendPid})) > 0 as blocked
+    `;
+    if (blocked[0]?.blocked === true) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("OAuth Agent selection did not wait for the authority mutation");
 }
 
 describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
@@ -324,6 +359,32 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
           owner_session_id = ${sessionId}
       where id = ${requestId}
     `;
+  }
+
+  async function beginAgentSelection(
+    requestId: string,
+    fixture: OwnerAgentFixture,
+  ): Promise<{ backendPid: number; completion: Promise<void> }> {
+    const backendPid = createDeferred<number>();
+    const completion = Promise.resolve(
+      postgres.sql.begin(async (transaction) => {
+        const connection = await transaction<{ backend_pid: number }[]>`
+          select pg_catalog.pg_backend_pid()::integer as backend_pid
+        `;
+        const pid = connection[0]?.backend_pid;
+        if (!pid) throw new Error("Selection backend pid was not returned");
+        backendPid.resolve(pid);
+        await transaction`
+          update platform.oauth_authorization_requests
+          set status = 'selected',
+              owner_id = ${fixture.ownerId},
+              agent_id = ${fixture.agentId},
+              owner_session_id = ${fixture.sessionId}
+          where id = ${requestId}
+        `;
+      }),
+    );
+    return { backendPid: await backendPid.promise, completion };
   }
 
   async function createPendingGrant(
@@ -670,6 +731,287 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
     ]);
   });
 
+  it("records OAuth hardening and makes incomplete clients fail closed", async () => {
+    const migration = await readFile(
+      `${process.cwd()}/db/migrations/000019_remote_mcp_oauth_hardening_v1.up.sql`,
+    );
+    const checksum = createHash("sha256").update(migration).digest("hex");
+    const ledger = await postgres.sql<
+      { checksum: string; name: string; version: string }[]
+    >`
+      select version, name, checksum
+      from system.schema_migrations
+      where version = '000019'
+    `;
+    expect(ledger).toEqual([
+      {
+        checksum,
+        name: "remote_mcp_oauth_hardening_v1",
+        version: "000019",
+      },
+    ]);
+
+    const securityColumns = await postgres.sql<
+      { column_default: string | null; column_name: string; is_nullable: string }[]
+    >`
+      select column_name, is_nullable, column_default
+      from information_schema.columns
+      where table_schema = 'auth'
+        and table_name = 'oauth_clients'
+        and column_name in (
+          'disabled',
+          'skip_consent',
+          'require_pkce',
+          'scopes',
+          'grant_types'
+        )
+      order by column_name
+    `;
+    expect(securityColumns).toEqual([
+      { column_default: "true", column_name: "disabled", is_nullable: "NO" },
+      {
+        column_default: "'[]'::jsonb",
+        column_name: "grant_types",
+        is_nullable: "NO",
+      },
+      { column_default: "true", column_name: "require_pkce", is_nullable: "NO" },
+      { column_default: null, column_name: "scopes", is_nullable: "NO" },
+      { column_default: "false", column_name: "skip_consent", is_nullable: "NO" },
+    ]);
+
+    const defaultedClientId = `${clientId}-defaulted`;
+    await postgres.sql`
+      insert into auth.oauth_clients (
+        client_id,
+        scopes,
+        redirect_uris,
+        token_endpoint_auth_method,
+        response_types,
+        public
+      )
+      values (
+        ${defaultedClientId},
+        ${postgres.sql.json([...providerScopes])},
+        ${postgres.sql.json([redirectUri])},
+        'none',
+        ${postgres.sql.json(["code"])},
+        true
+      )
+    `;
+    const defaultedClient = await postgres.sql<
+      {
+        disabled: boolean;
+        grant_types: unknown;
+        require_pkce: boolean;
+        skip_consent: boolean;
+      }[]
+    >`
+      select disabled, skip_consent, require_pkce, grant_types
+      from auth.oauth_clients
+      where client_id = ${defaultedClientId}
+    `;
+    expect(defaultedClient).toEqual([
+      {
+        disabled: true,
+        grant_types: [],
+        require_pkce: true,
+        skip_consent: false,
+      },
+    ]);
+
+    await expect(
+      postgres.sql`
+        update auth.oauth_clients
+        set disabled = null
+        where client_id = ${defaultedClientId}
+      `,
+    ).rejects.toMatchObject({ code: "23502" });
+    await expect(
+      postgres.sql`
+        update auth.oauth_clients
+        set skip_consent = null
+        where client_id = ${defaultedClientId}
+      `,
+    ).rejects.toMatchObject({ code: "23502" });
+    await expect(
+      postgres.sql`
+        update auth.oauth_clients
+        set require_pkce = null
+        where client_id = ${defaultedClientId}
+      `,
+    ).rejects.toMatchObject({ code: "23502" });
+    await expect(
+      postgres.sql`
+        update auth.oauth_clients
+        set scopes = null
+        where client_id = ${defaultedClientId}
+      `,
+    ).rejects.toMatchObject({ code: "23502" });
+    await expect(
+      postgres.sql`
+        update auth.oauth_clients
+        set grant_types = null
+        where client_id = ${defaultedClientId}
+      `,
+    ).rejects.toMatchObject({ code: "23502" });
+    await expect(
+      postgres.sql`
+        update auth.oauth_clients
+        set skip_consent = true
+        where client_id = ${defaultedClientId}
+      `,
+    ).rejects.toMatchObject({ code: "23514" });
+    await expect(
+      postgres.sql`
+        update auth.oauth_clients
+        set require_pkce = false
+        where client_id = ${defaultedClientId}
+      `,
+    ).rejects.toMatchObject({ code: "23514" });
+
+    await expect(createAuthorizationRequest(defaultedClientId)).rejects.toMatchObject({
+      code: "23514",
+    });
+  });
+
+  it("admits authorization requests only for complete enabled clients", async () => {
+    const disabledClientId = `${clientId}-disabled`;
+    await insertClient(disabledClientId);
+    await postgres.sql`
+      update auth.oauth_clients
+      set disabled = true,
+          updated_at = clock_timestamp()
+      where client_id = ${disabledClientId}
+    `;
+
+    const incompleteScopeClientId = `${clientId}-incomplete-scope`;
+    await insertClient(incompleteScopeClientId, domainScopes);
+
+    const noAuthorizationCodeClientId = `${clientId}-no-code`;
+    await insertClient(noAuthorizationCodeClientId);
+    await postgres.sql`
+      update auth.oauth_clients
+      set grant_types = ${postgres.sql.json(["refresh_token"])},
+          updated_at = clock_timestamp()
+      where client_id = ${noAuthorizationCodeClientId}
+    `;
+
+    const noRefreshClientId = `${clientId}-no-refresh`;
+    await insertClient(noRefreshClientId);
+    await postgres.sql`
+      update auth.oauth_clients
+      set grant_types = ${postgres.sql.json(["authorization_code"])},
+          updated_at = clock_timestamp()
+      where client_id = ${noRefreshClientId}
+    `;
+
+    const confidentialMethodClientId = `${clientId}-confidential-method`;
+    await insertClient(confidentialMethodClientId);
+    await postgres.sql`
+      update auth.oauth_clients
+      set token_endpoint_auth_method = 'client_secret_post',
+          updated_at = clock_timestamp()
+      where client_id = ${confidentialMethodClientId}
+    `;
+
+    const nonPublicClientId = `${clientId}-non-public`;
+    await insertClient(nonPublicClientId);
+    await postgres.sql`
+      update auth.oauth_clients
+      set public = false,
+          updated_at = clock_timestamp()
+      where client_id = ${nonPublicClientId}
+    `;
+
+    const secretClientId = `${clientId}-with-secret`;
+    await insertClient(secretClientId);
+    await postgres.sql`
+      update auth.oauth_clients
+      set client_secret = ${"A".repeat(43)},
+          updated_at = clock_timestamp()
+      where client_id = ${secretClientId}
+    `;
+
+    await expect(createAuthorizationRequest(disabledClientId)).rejects.toMatchObject({
+      code: "23514",
+    });
+    await expect(
+      createAuthorizationRequest(incompleteScopeClientId),
+    ).rejects.toMatchObject({ code: "23514" });
+    await expect(
+      createAuthorizationRequest(noAuthorizationCodeClientId),
+    ).rejects.toMatchObject({ code: "23514" });
+    await expect(createAuthorizationRequest(noRefreshClientId)).rejects.toMatchObject({
+      code: "23514",
+    });
+    await expect(
+      createAuthorizationRequest(confidentialMethodClientId),
+    ).rejects.toMatchObject({ code: "23514" });
+    await expect(createAuthorizationRequest(nonPublicClientId)).rejects.toMatchObject({
+      code: "23514",
+    });
+    await expect(createAuthorizationRequest(secretClientId)).rejects.toMatchObject({
+      code: "23514",
+    });
+
+    await expect(
+      createAuthorizationRequest(noRefreshClientId, {
+        requestedScopes: domainScopes,
+      }),
+    ).resolves.toEqual(expect.any(String));
+
+    const validClientId = `${clientId}-complete`;
+    await insertClient(validClientId);
+    const validRequestId = await createAuthorizationRequest(validClientId);
+    const validRequest = await postgres.sql<
+      { oauth_client_id: string; status: string }[]
+    >`
+      select oauth_client_id, status
+      from platform.oauth_authorization_requests
+      where id = ${validRequestId}
+    `;
+    expect(validRequest).toEqual([{ oauth_client_id: validClientId, status: "pending" }]);
+  });
+
+  it("revalidates current public-client refresh authority at Grant activation", async () => {
+    const activationClientId = `${clientId}-activation-client`;
+    await insertClient(activationClientId);
+    const authorizationRequestId = await createAuthorizationRequest(activationClientId);
+    await selectAgent(authorizationRequestId, primary);
+    const grant = await createPendingGrant(
+      authorizationRequestId,
+      primary,
+      activationClientId,
+    );
+    await postgres.sql`
+      update platform.oauth_authorization_requests
+      set status = 'consumed',
+          grant_id = ${grant.grantId}
+      where id = ${authorizationRequestId}
+    `;
+    await postgres.sql`
+      update auth.oauth_clients
+      set grant_types = ${postgres.sql.json(["authorization_code"])},
+          updated_at = clock_timestamp()
+      where client_id = ${activationClientId}
+    `;
+
+    await expect(
+      postgres.sql`
+        update platform.oauth_grants
+        set status = 'active'
+        where id = ${grant.grantId}
+      `,
+    ).rejects.toMatchObject({ code: "23514" });
+
+    const persisted = await postgres.sql<{ status: string }[]>`
+      select status
+      from platform.oauth_grants
+      where id = ${grant.grantId}
+    `;
+    expect(persisted).toEqual([{ status: "pending" }]);
+  });
+
   it("allows only exact /mcp resources and configures one immutable audience", async () => {
     const resourceCases = [
       { resource: "https://mcp.alphanet.example/mcp", valid: true },
@@ -843,6 +1185,153 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
         targetResource: "https://other-mcp.alphanet.example/mcp",
       }),
     ).rejects.toMatchObject({ code: "23503" });
+  });
+
+  it("serializes Agent selection with a concurrent Owner session logout", async () => {
+    const fixture = await createOwnerAgent("logout");
+    const requestId = await createAuthorizationRequest(clientId);
+    const logoutLocked = createDeferred<void>();
+    const releaseLogout = createDeferred<void>();
+    const logoutCompletion = Promise.resolve(
+      postgres.sql.begin(async (transaction) => {
+        await transaction`
+          delete from auth.sessions
+          where id = ${fixture.sessionId}
+        `;
+        logoutLocked.resolve(undefined);
+        await releaseLogout.promise;
+      }),
+    );
+
+    await logoutLocked.promise;
+    const selection = await beginAgentSelection(requestId, fixture);
+    const selectionRejected = expect(selection.completion).rejects.toMatchObject({
+      code: "42501",
+    });
+    try {
+      await waitForBackendBlock(postgres.sql, selection.backendPid);
+    } finally {
+      releaseLogout.resolve(undefined);
+    }
+
+    await logoutCompletion;
+    await selectionRejected;
+    const request = await postgres.sql<
+      { agent_id: string | null; owner_id: string | null; status: string }[]
+    >`
+      select owner_id, agent_id, status
+      from platform.oauth_authorization_requests
+      where id = ${requestId}
+    `;
+    expect(request).toEqual([{ agent_id: null, owner_id: null, status: "pending" }]);
+  });
+
+  it("serializes Agent selection with concurrent email-verification loss", async () => {
+    const fixture = await createOwnerAgent("unverified");
+    const requestId = await createAuthorizationRequest(clientId);
+    const verificationLocked = createDeferred<void>();
+    const releaseVerification = createDeferred<void>();
+    const verificationCompletion = Promise.resolve(
+      postgres.sql.begin(async (transaction) => {
+        await transaction`
+          update auth.users
+          set email_verified = false,
+              updated_at = clock_timestamp()
+          where id = ${fixture.authUserId}
+        `;
+        verificationLocked.resolve(undefined);
+        await releaseVerification.promise;
+      }),
+    );
+
+    await verificationLocked.promise;
+    const selection = await beginAgentSelection(requestId, fixture);
+    const selectionRejected = expect(selection.completion).rejects.toMatchObject({
+      code: "42501",
+    });
+    try {
+      await waitForBackendBlock(postgres.sql, selection.backendPid);
+    } finally {
+      releaseVerification.resolve(undefined);
+    }
+
+    await verificationCompletion;
+    await selectionRejected;
+    const authority = await postgres.sql<
+      { email_verified: boolean; email_verified_at: Date | null; status: string }[]
+    >`
+      select auth_user.email_verified,
+             owner.email_verified_at,
+             owner.status
+      from auth.users as auth_user
+      join platform.owners as owner
+        on owner.auth_user_id = auth_user.id
+      where auth_user.id = ${fixture.authUserId}
+    `;
+    expect(authority).toEqual([
+      {
+        email_verified: false,
+        email_verified_at: null,
+        status: "pending_verification",
+      },
+    ]);
+  });
+
+  it("revalidates Owner, Agent, and Actor lifecycle at Agent selection", async () => {
+    const ownerFixture = await createOwnerAgent("owner-state");
+    const ownerRequestId = await createAuthorizationRequest(clientId);
+    await postgres.sql`
+      update platform.owners
+      set status = 'restricted',
+          restriction_reason_code = 'oauth_schema_test',
+          restricted_at = clock_timestamp()
+      where id = ${ownerFixture.ownerId}
+    `;
+    await expect(selectAgent(ownerRequestId, ownerFixture)).rejects.toMatchObject({
+      code: "42501",
+    });
+
+    const agentFixture = await createOwnerAgent("agent-state");
+    const agentRequestId = await createAuthorizationRequest(clientId);
+    await expect(
+      postgres.sql.begin(async (transaction) => {
+        await transaction`
+          update platform.agents
+          set status = 'restricted',
+              restriction_reason_code = 'oauth_schema_test',
+              restricted_at = clock_timestamp()
+          where id = ${agentFixture.agentId}
+        `;
+        await transaction`
+          update platform.oauth_authorization_requests
+          set status = 'selected',
+              owner_id = ${agentFixture.ownerId},
+              agent_id = ${agentFixture.agentId},
+              owner_session_id = ${agentFixture.sessionId}
+          where id = ${agentRequestId}
+        `;
+      }),
+    ).rejects.toMatchObject({ code: "42501" });
+
+    const actorFixture = await createOwnerAgent("actor-state");
+    const actorRequestId = await createAuthorizationRequest(clientId);
+    await expect(
+      postgres.sql.begin(async (transaction) => {
+        await transaction`
+          update platform.actors
+          set status = 'restricted'
+          where id = ${actorFixture.actorId}
+        `;
+        await transaction`
+          update platform.oauth_authorization_requests
+          set status = 'selected',
+              owner_id = ${actorFixture.ownerId},
+              agent_id = ${actorFixture.agentId},
+              owner_session_id = ${actorFixture.sessionId}
+          where id = ${actorRequestId}
+        `;
+      }),
+    ).rejects.toMatchObject({ code: "42501" });
   });
 
   it("expires a stranded pending Grant before admitting reauthorization", async () => {
@@ -1837,6 +2326,81 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
       retryable: false,
       statusCode: 401,
     });
+  });
+
+  it("normalizes JTI revocation against a slightly future issuance clock", async () => {
+    const fixture = await createActiveAuthority("future-jti-clock");
+    const futureJtiId = randomUUID();
+    const futureIssuedAt = new Date(Date.now() + 4_000);
+    await postgres.sql`
+      insert into platform.oauth_access_token_jtis (
+        id,
+        jti_digest,
+        grant_id,
+        owner_id,
+        agent_id,
+        grant_epoch,
+        oauth_client_id,
+        resource,
+        scopes,
+        issued_at,
+        expires_at,
+        created_at,
+        updated_at
+      )
+      values (
+        ${futureJtiId},
+        ${digest()},
+        ${fixture.input.grantId},
+        ${primary.ownerId},
+        ${primary.agentId},
+        1,
+        ${fixture.clientId},
+        ${resource},
+        ${[...domainScopes]},
+        ${futureIssuedAt},
+        ${new Date(futureIssuedAt.getTime() + 9 * 60 * 1_000)},
+        ${futureIssuedAt},
+        ${futureIssuedAt}
+      )
+    `;
+
+    await postgres.sql`
+      update platform.oauth_access_token_jtis
+      set status = 'revoked',
+          revoked_at = clock_timestamp(),
+          revocation_reason_code = 'future_clock_revoked'
+      where id = ${futureJtiId}
+    `;
+
+    const persisted = await postgres.sql<
+      {
+        created_at: Date;
+        issued_at: Date;
+        revoked_at: Date;
+        status: string;
+        updated_at: Date;
+      }[]
+    >`
+      select status, issued_at, created_at, revoked_at, updated_at
+      from platform.oauth_access_token_jtis
+      where id = ${futureJtiId}
+    `;
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0]).toMatchObject({
+      created_at: futureIssuedAt,
+      issued_at: futureIssuedAt,
+      status: "revoked",
+    });
+    expect(persisted[0]?.revoked_at.getTime()).toBeGreaterThanOrEqual(
+      futureIssuedAt.getTime(),
+    );
+    expect(persisted[0]?.updated_at.getTime()).toBeGreaterThanOrEqual(
+      persisted[0]?.created_at.getTime() ?? Number.POSITIVE_INFINITY,
+    );
+    expect(persisted[0]?.updated_at.getTime()).toBeGreaterThanOrEqual(
+      persisted[0]?.revoked_at.getTime() ?? Number.POSITIVE_INFINITY,
+    );
   });
 
   it("rejects current authority after its access-token JTI is revoked", async () => {
