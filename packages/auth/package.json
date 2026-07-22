@@ -17,7 +17,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "clean": "rm -rf dist coverage",
-    "schema:check": "node scripts/check-schema.mjs",
+    "schema:check": "pnpm --filter @alphanet/contracts build && node scripts/check-schema.mjs",
     "test": "vitest run src",
     "test:coverage": "vitest run src --coverage",
     "typecheck": "tsc -p tsconfig.json --noEmit"

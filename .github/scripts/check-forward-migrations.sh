@@ -22,6 +22,7 @@ readonly content_delete_antispam_v1_checksum="c02af8f023edc8ab6eb58fc78afef9a5e4
 readonly web_reporting_content_moderation_v1_checksum="d5d7e900d8270914ff927c7a08ec89f677a9fcfbd71d33238756394f5ec60c3b"
 readonly notifications_v1_checksum="41af3431fa6d8cbaa7ac7aea9aaf35a3791a02ec5407cda7ae159ff572fbf95e"
 readonly content_ranking_v1_checksum="2fc7d315c16559f29e0688fce09a16d4053e2a09b7d7fa1a00a546fd6d572dc9"
+readonly remote_mcp_v1_checksum="a43f96760a7734c6b036f74275f9a349a09f5ef8ae3328ae6c80ff2488d152a5"
 readonly suffix="${GITHUB_RUN_ID:-local}_${RANDOM}_$$"
 readonly empty_database="alphanet_migration_empty_${suffix}"
 readonly owner_database="alphanet_migration_owner_${suffix}"
@@ -1029,9 +1030,10 @@ for database in \
       --set=content_delete_antispam_v1_checksum="${content_delete_antispam_v1_checksum}" \
       --set=web_reporting_content_moderation_v1_checksum="${web_reporting_content_moderation_v1_checksum}" \
       --set=notifications_v1_checksum="${notifications_v1_checksum}" \
-      --set=content_ranking_v1_checksum="${content_ranking_v1_checksum}" <<'SQL'
+      --set=content_ranking_v1_checksum="${content_ranking_v1_checksum}" \
+      --set=remote_mcp_v1_checksum="${remote_mcp_v1_checksum}" <<'SQL'
 SELECT
-  (SELECT count(*) FROM system.schema_migrations) = 17
+  (SELECT count(*) FROM system.schema_migrations) = 18
   AND EXISTS (
     SELECT 1
     FROM system.schema_migrations
@@ -1118,6 +1120,58 @@ SELECT
     WHERE version = '000017'
       AND name = 'content_ranking_v1'
       AND checksum = :'content_ranking_v1_checksum'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM system.schema_migrations
+    WHERE version = '000018'
+      AND name = 'remote_mcp_oauth_v1'
+      AND checksum = :'remote_mcp_v1_checksum'
+  )
+  AND (
+    SELECT count(*) = 5
+    FROM pg_class AS relation
+    JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname = 'auth'
+      AND relation.relkind IN ('p', 'r')
+      AND relation.relname IN (
+        'oauth_access_tokens',
+        'oauth_clients',
+        'oauth_consents',
+        'oauth_jwks',
+        'oauth_refresh_tokens'
+      )
+  )
+  AND (
+    SELECT count(*) = 4
+    FROM pg_class AS relation
+    JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname = 'platform'
+      AND relation.relkind IN ('p', 'r')
+      AND relation.relname IN (
+        'oauth_access_token_jtis',
+        'oauth_authorization_requests',
+        'oauth_grants',
+        'oauth_resource_configuration'
+      )
+  )
+  AND to_regprocedure('platform.oauth_resource_is_valid(text)') IS NOT NULL
+  AND to_regprocedure(
+    'platform.expire_stale_oauth_pending_grants(uuid,text)'
+  ) IS NOT NULL
+  AND to_regprocedure(
+    'platform.expire_stale_oauth_active_grants(uuid,text)'
+  ) IS NOT NULL
+  AND (
+    SELECT count(*) = 3
+    FROM pg_trigger AS trigger_record
+    WHERE trigger_record.tgname IN (
+      'oauth_consents_validate_grant_reference',
+      'oauth_refresh_tokens_validate_grant_reference',
+      'oauth_access_tokens_validate_grant_reference'
+    )
+      AND NOT trigger_record.tgisinternal
+      AND trigger_record.tgenabled IN ('O', 'A')
   )
   AND (
     SELECT count(*) = 4
@@ -1956,4 +2010,4 @@ SQL
   fi
 done
 
-echo "Empty, Owner-schema, and published Agent-v1 paths all reach the Content Ranking v1 schema."
+echo "Empty, Owner-schema, and published Agent-v1 paths all reach the Remote MCP OAuth v1 schema."
