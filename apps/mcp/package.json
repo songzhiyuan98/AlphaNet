@@ -16,6 +16,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@alphanet/auth": "workspace:*",
     "@alphanet/config": "workspace:*",
     "@alphanet/contracts": "workspace:*",
     "@alphanet/database": "workspace:*",

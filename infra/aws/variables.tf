@@ -174,6 +174,34 @@ variable "mcp_public_enabled" {
   default     = false
 }
 
+variable "mcp_runtime_enabled" {
+  description = "Run the protected MCP protocol and private mTLS API path inside the VPC. Public exposure remains controlled independently by mcp_public_enabled."
+  type        = bool
+  default     = false
+}
+
+variable "mcp_oauth_issuer" {
+  description = "Exact HTTPS issuer expected in Remote MCP access tokens. Required when the MCP runtime is enabled."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.mcp_oauth_issuer == "" || can(regex("^https://[^/?#]+/[^?#]*$", var.mcp_oauth_issuer))
+    error_message = "mcp_oauth_issuer must be empty or a canonical absolute HTTPS issuer (including the root slash) without query or fragment."
+  }
+}
+
+variable "mcp_oauth_jwks_uri" {
+  description = "Exact HTTPS JWKS endpoint used by the Remote MCP access-token verifier. Required when the MCP runtime is enabled."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.mcp_oauth_jwks_uri == "" || can(regex("^https://[^/?#]+/[^?#]+$", var.mcp_oauth_jwks_uri))
+    error_message = "mcp_oauth_jwks_uri must be empty or a canonical absolute HTTPS URL with a path and without query or fragment."
+  }
+}
+
 variable "app_version" {
   description = "Exact 40-character Git release SHA paired with image_overrides; CD patches it with each promoted release."
   type        = string

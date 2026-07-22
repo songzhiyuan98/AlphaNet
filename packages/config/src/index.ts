@@ -1,4 +1,6 @@
+import { createPrivateKey, X509Certificate } from "node:crypto";
 import { isIP } from "node:net";
+import { createSecureContext } from "node:tls";
 
 import { z } from "zod";
 
@@ -13,6 +15,9 @@ const LocalDevelopmentSsrInternalRequestSecret =
   "L8wq2Uox9sV7Gm1Xc4Kd6aJ0Ph5Rt3NyE1bZfQ7i";
 const TitanTextEmbedV2ModelId = "amazon.titan-embed-text-v2:0";
 const SearchIndexDatabaseMarginMilliseconds = 5_000;
+const RemoteMcpInternalApiDefaultPort = 4_443;
+const RemoteMcpInternalApiDefaultTimeoutMilliseconds = 5_000;
+const RemoteMcpInternalApiDefaultMaximumResponseBytes = 4 * 1_024 * 1_024;
 
 const CommonServiceEnvironmentSchema = z.object({
   NODE_ENV: NodeEnvironmentSchema.default("development"),
@@ -223,6 +228,191 @@ const AuthSecretSchema = z
     (value) => !/(change.?me|example|placeholder|replace.?me)/i.test(value),
     "must not be a placeholder",
   );
+
+function decodeCanonicalBase64(value: string): Buffer | undefined {
+  if (
+    value.length < 4 ||
+    value.length % 4 !== 0 ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)
+  ) {
+    return undefined;
+  }
+  const decoded = Buffer.from(value, "base64");
+  return decoded.toString("base64") === value ? decoded : undefined;
+}
+
+function canonicalBase64BytesSchema(
+  minimumBytes: number,
+  maximumBytes: number,
+  description: string,
+) {
+  return z
+    .string()
+    .min(1)
+    .max(Math.ceil((maximumBytes * 4) / 3) + 4)
+    .transform((value, context) => {
+      const decoded = decodeCanonicalBase64(value);
+      if (
+        decoded === undefined ||
+        decoded.byteLength < minimumBytes ||
+        decoded.byteLength > maximumBytes
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: `must be canonical base64 containing ${description}`,
+        });
+        return z.NEVER;
+      }
+      return decoded;
+    });
+}
+
+const McpIndependentKeyBase64Schema = canonicalBase64BytesSchema(
+  32,
+  32,
+  "exactly 32 random bytes",
+).refine((value) => new Set(value).size >= 12, {
+  message: "must contain high-entropy independent key material",
+});
+
+function parseCertificateBundle(value: Buffer): X509Certificate[] {
+  const text = value.toString("utf8");
+  if (!Buffer.from(text, "utf8").equals(value)) {
+    throw new TypeError("certificate PEM must be valid UTF-8");
+  }
+  const certificates: X509Certificate[] = [];
+  const certificatePattern =
+    /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g;
+  let consumedUntil = 0;
+  for (const match of text.matchAll(certificatePattern)) {
+    const index = match.index;
+    const pem = match[0];
+    if (index === undefined || !/^\s*$/.test(text.slice(consumedUntil, index))) {
+      throw new TypeError("certificate PEM bundle contains non-certificate data");
+    }
+    certificates.push(new X509Certificate(pem));
+    consumedUntil = index + pem.length;
+  }
+  if (
+    certificates.length < 1 ||
+    certificates.length > 10 ||
+    !/^\s*$/.test(text.slice(consumedUntil))
+  ) {
+    throw new TypeError("certificate PEM bundle must contain one to ten certificates");
+  }
+  return certificates;
+}
+
+const McpCertificatePemBase64Schema = canonicalBase64BytesSchema(
+  1,
+  256 * 1_024,
+  "a PEM certificate bundle no larger than 256 KiB",
+).transform((value, context) => {
+  try {
+    parseCertificateBundle(value);
+    return value;
+  } catch {
+    context.addIssue({
+      code: "custom",
+      message: "must decode to a valid PEM certificate bundle",
+    });
+    return z.NEVER;
+  }
+});
+
+const McpPrivateKeyPemBase64Schema = canonicalBase64BytesSchema(
+  1,
+  64 * 1_024,
+  "an unencrypted PEM private key no larger than 64 KiB",
+).transform((value, context) => {
+  try {
+    createPrivateKey(value);
+    return value;
+  } catch {
+    context.addIssue({
+      code: "custom",
+      message: "must decode to a valid unencrypted PEM private key",
+    });
+    return z.NEVER;
+  }
+});
+
+const OptionalMcpCertificatePemBase64Schema = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  McpCertificatePemBase64Schema.optional(),
+);
+const OptionalMcpPrivateKeyPemBase64Schema = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  McpPrivateKeyPemBase64Schema.optional(),
+);
+const OptionalMcpIndependentKeyBase64Schema = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  McpIndependentKeyBase64Schema.optional(),
+);
+
+const McpCertificateFingerprintListSchema = z
+  .string()
+  .default("")
+  .transform((value) => parseCommaSeparated(value))
+  .pipe(
+    z
+      .array(
+        z
+          .string()
+          .regex(
+            /^[0-9A-F]{64}$/,
+            "must be a canonical uppercase SHA-256 fingerprint without separators",
+          ),
+      )
+      .max(3)
+      .refine((value) => new Set(value).size === value.length, {
+        message: "must not contain duplicate client-certificate fingerprints",
+      }),
+  );
+
+const OptionalMcpKeyVersionSchema = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  z.coerce.number().int().min(1).max(32_767).optional(),
+);
+
+const CanonicalUtcInstantSchema = z
+  .string()
+  .refine((value) => {
+    const parsed = new Date(value);
+    return Number.isFinite(parsed.valueOf()) && parsed.toISOString() === value;
+  }, "must be a canonical UTC ISO-8601 instant")
+  .transform((value) => new Date(value));
+
+const McpActorPreviousKeyRingSchema = z.preprocess(
+  (value) => {
+    if (value === undefined || value === "") {
+      return {};
+    }
+    if (typeof value !== "string") {
+      return value;
+    }
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      // Requiring JSON.stringify's compact representation rejects duplicate
+      // object keys and ambiguous alternate spellings before key selection.
+      return JSON.stringify(parsed) === value ? parsed : value;
+    } catch {
+      return value;
+    }
+  },
+  z.record(
+    z
+      .string()
+      .regex(/^[1-9][0-9]{0,4}$/, "key versions must be positive integers")
+      .refine((value) => Number(value) <= 32_767, "key versions must not exceed 32767"),
+    z
+      .object({
+        keyBase64: McpIndependentKeyBase64Schema,
+        verificationExpiresAt: CanonicalUtcInstantSchema,
+      })
+      .strict(),
+  ),
+);
 
 const AgentPreviousPepperRingSchema = z.preprocess(
   (value) => {
@@ -683,6 +873,317 @@ function validateProductionPostgresTransport(
   }
 }
 
+function isCanonicalRemoteMcpOAuthUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      value.length <= 2_048 &&
+      url.username === "" &&
+      url.password === "" &&
+      url.search === "" &&
+      url.hash === "" &&
+      url.toString() === value &&
+      (url.protocol === "https:" ||
+        (url.protocol === "http:" && isLoopbackHostname(url.hostname)))
+    );
+  } catch {
+    return false;
+  }
+}
+
+const OptionalRemoteMcpOAuthUrlSchema = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  z
+    .string()
+    .min(1)
+    .max(2_048)
+    .refine(
+      isCanonicalRemoteMcpOAuthUrl,
+      "must be a canonical HTTPS URL (or loopback HTTP URL) without credentials, query, or fragment",
+    )
+    .optional(),
+);
+
+function isCanonicalMcpInternalApiOrigin(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      value.length <= 2_048 &&
+      url.protocol === "https:" &&
+      url.username === "" &&
+      url.password === "" &&
+      url.pathname === "/" &&
+      url.search === "" &&
+      url.hash === "" &&
+      url.origin === value
+    );
+  } catch {
+    return false;
+  }
+}
+
+const OptionalMcpInternalApiOriginSchema = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  z
+    .string()
+    .min(1)
+    .max(2_048)
+    .refine(
+      isCanonicalMcpInternalApiOrigin,
+      "must be a canonical HTTPS origin without a path, credentials, query, or fragment",
+    )
+    .optional(),
+);
+
+const McpActorAssertionEnvironmentFields = {
+  MCP_ACTOR_ASSERTION_CURRENT_KEY_BASE64: OptionalMcpIndependentKeyBase64Schema,
+  MCP_ACTOR_ASSERTION_CURRENT_KEY_VERSION: OptionalMcpKeyVersionSchema,
+  MCP_ACTOR_ASSERTION_PREVIOUS_KEYS: McpActorPreviousKeyRingSchema,
+} satisfies z.ZodRawShape;
+
+const McpInternalApiEnvironmentFields = {
+  MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64: OptionalMcpIndependentKeyBase64Schema,
+  MCP_INTERNAL_API_ALLOWED_CLIENT_CERT_SHA256_FINGERPRINTS:
+    McpCertificateFingerprintListSchema,
+  MCP_INTERNAL_API_CLIENT_CA_PEM_BASE64: OptionalMcpCertificatePemBase64Schema,
+  MCP_INTERNAL_API_ENABLED: BooleanStringSchema.default(false),
+  MCP_INTERNAL_API_PORT: PortSchema.default(RemoteMcpInternalApiDefaultPort),
+  MCP_INTERNAL_API_SERVER_CERT_PEM_BASE64: OptionalMcpCertificatePemBase64Schema,
+  MCP_INTERNAL_API_SERVER_KEY_PEM_BASE64: OptionalMcpPrivateKeyPemBase64Schema,
+  MCP_ACTOR_ASSERTION_REPLAY_DIGEST_KEY_BASE64: OptionalMcpIndependentKeyBase64Schema,
+  ...McpActorAssertionEnvironmentFields,
+} satisfies z.ZodRawShape;
+
+const McpRuntimeEnvironmentFields = {
+  MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64: OptionalMcpIndependentKeyBase64Schema,
+  MCP_INTERNAL_API_CLIENT_CERT_PEM_BASE64: OptionalMcpCertificatePemBase64Schema,
+  MCP_INTERNAL_API_CLIENT_KEY_PEM_BASE64: OptionalMcpPrivateKeyPemBase64Schema,
+  MCP_INTERNAL_API_MAX_RESPONSE_BYTES: z.coerce
+    .number()
+    .int()
+    .min(1_024)
+    .max(RemoteMcpInternalApiDefaultMaximumResponseBytes)
+    .default(RemoteMcpInternalApiDefaultMaximumResponseBytes),
+  MCP_INTERNAL_API_SERVER_CA_PEM_BASE64: OptionalMcpCertificatePemBase64Schema,
+  MCP_INTERNAL_API_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .min(100)
+    .max(29_000)
+    .default(RemoteMcpInternalApiDefaultTimeoutMilliseconds),
+  MCP_INTERNAL_API_URL: OptionalMcpInternalApiOriginSchema,
+  MCP_OAUTH_ISSUER: OptionalRemoteMcpOAuthUrlSchema,
+  MCP_OAUTH_JWKS_URI: OptionalRemoteMcpOAuthUrlSchema,
+  MCP_RUNTIME_ENABLED: BooleanStringSchema.default(false),
+  ...McpActorAssertionEnvironmentFields,
+} satisfies z.ZodRawShape;
+
+type McpActorAssertionValidationTarget = {
+  MCP_ACTOR_ASSERTION_CURRENT_KEY_BASE64?: Buffer | undefined;
+  MCP_ACTOR_ASSERTION_CURRENT_KEY_VERSION?: number | undefined;
+  MCP_ACTOR_ASSERTION_PREVIOUS_KEYS: Record<
+    string,
+    { keyBase64: Buffer; verificationExpiresAt: Date }
+  >;
+};
+
+function validateMcpActorAssertionEnvironment(
+  value: McpActorAssertionValidationTarget,
+  context: z.RefinementCtx,
+  required: boolean,
+): void {
+  const previousEntries = Object.entries(value.MCP_ACTOR_ASSERTION_PREVIOUS_KEYS);
+  const hasAnyConfiguration =
+    value.MCP_ACTOR_ASSERTION_CURRENT_KEY_BASE64 !== undefined ||
+    value.MCP_ACTOR_ASSERTION_CURRENT_KEY_VERSION !== undefined ||
+    previousEntries.length > 0;
+  const hasCurrentTuple =
+    value.MCP_ACTOR_ASSERTION_CURRENT_KEY_BASE64 !== undefined &&
+    value.MCP_ACTOR_ASSERTION_CURRENT_KEY_VERSION !== undefined;
+
+  if (hasAnyConfiguration && !hasCurrentTuple) {
+    context.addIssue({
+      code: "custom",
+      message:
+        "current key version and key material must be configured together before adding previous keys",
+      path: ["MCP_ACTOR_ASSERTION_CURRENT_KEY_VERSION"],
+    });
+  }
+  if (required && !hasCurrentTuple) {
+    context.addIssue({
+      code: "custom",
+      message: "a complete ActorContext assertion key ring is required when enabled",
+      path: ["MCP_ACTOR_ASSERTION_CURRENT_KEY_VERSION"],
+    });
+  }
+  if (
+    value.MCP_ACTOR_ASSERTION_CURRENT_KEY_VERSION !== undefined &&
+    Object.hasOwn(
+      value.MCP_ACTOR_ASSERTION_PREVIOUS_KEYS,
+      String(value.MCP_ACTOR_ASSERTION_CURRENT_KEY_VERSION),
+    )
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "must not include the current key version in the previous key ring",
+      path: ["MCP_ACTOR_ASSERTION_PREVIOUS_KEYS"],
+    });
+  }
+  if (previousEntries.length > 5) {
+    context.addIssue({
+      code: "custom",
+      message: "must contain at most five previous ActorContext keys",
+      path: ["MCP_ACTOR_ASSERTION_PREVIOUS_KEYS"],
+    });
+  }
+  const keyMaterial = [
+    value.MCP_ACTOR_ASSERTION_CURRENT_KEY_BASE64,
+    ...previousEntries.map(([, entry]) => entry.keyBase64),
+  ].filter((entry): entry is Buffer => entry !== undefined);
+  if (
+    keyMaterial.some((entry, index) =>
+      keyMaterial.slice(index + 1).some((other) => entry.equals(other)),
+    )
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "must not reuse ActorContext key material across versions",
+      path: ["MCP_ACTOR_ASSERTION_PREVIOUS_KEYS"],
+    });
+  }
+}
+
+function validateCertificateAndPrivateKeyPair(
+  certificate: Buffer | undefined,
+  privateKey: Buffer | undefined,
+  context: z.RefinementCtx,
+  path: string,
+): void {
+  if (certificate === undefined || privateKey === undefined) return;
+  try {
+    createSecureContext({ cert: certificate, key: privateKey });
+  } catch {
+    context.addIssue({
+      code: "custom",
+      message: "certificate and private key must be a valid matching TLS identity",
+      path: [path],
+    });
+  }
+}
+
+function buffersEqual(left: Buffer | undefined, right: Buffer | undefined): boolean {
+  return left !== undefined && right !== undefined && left.equals(right);
+}
+
+type McpInternalApiValidationTarget = McpActorAssertionValidationTarget & {
+  MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64?: Buffer | undefined;
+  MCP_ACTOR_ASSERTION_REPLAY_DIGEST_KEY_BASE64?: Buffer | undefined;
+  MCP_INTERNAL_API_ALLOWED_CLIENT_CERT_SHA256_FINGERPRINTS: string[];
+  MCP_INTERNAL_API_CLIENT_CA_PEM_BASE64?: Buffer | undefined;
+  MCP_INTERNAL_API_ENABLED: boolean;
+  MCP_INTERNAL_API_PORT: number;
+  MCP_INTERNAL_API_SERVER_CERT_PEM_BASE64?: Buffer | undefined;
+  MCP_INTERNAL_API_SERVER_KEY_PEM_BASE64?: Buffer | undefined;
+  PORT: number;
+};
+
+function validateMcpInternalApiEnvironment(
+  value: McpInternalApiValidationTarget,
+  context: z.RefinementCtx,
+): void {
+  const tlsTuple = [
+    value.MCP_INTERNAL_API_SERVER_CERT_PEM_BASE64,
+    value.MCP_INTERNAL_API_SERVER_KEY_PEM_BASE64,
+    value.MCP_INTERNAL_API_CLIENT_CA_PEM_BASE64,
+  ];
+  const actorTupleConfigured =
+    value.MCP_ACTOR_ASSERTION_CURRENT_KEY_BASE64 !== undefined ||
+    value.MCP_ACTOR_ASSERTION_CURRENT_KEY_VERSION !== undefined ||
+    Object.keys(value.MCP_ACTOR_ASSERTION_PREVIOUS_KEYS).length > 0;
+  const hasAnyConfiguration =
+    tlsTuple.some((entry) => entry !== undefined) ||
+    value.MCP_INTERNAL_API_ALLOWED_CLIENT_CERT_SHA256_FINGERPRINTS.length > 0 ||
+    actorTupleConfigured ||
+    value.MCP_ACTOR_ASSERTION_REPLAY_DIGEST_KEY_BASE64 !== undefined ||
+    value.MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64 !== undefined;
+  const tupleRequired = value.MCP_INTERNAL_API_ENABLED || hasAnyConfiguration;
+
+  if (
+    tupleRequired &&
+    (tlsTuple.some((entry) => entry === undefined) ||
+      value.MCP_INTERNAL_API_ALLOWED_CLIENT_CERT_SHA256_FINGERPRINTS.length < 1)
+  ) {
+    context.addIssue({
+      code: "custom",
+      message:
+        "server certificate, matching key, client CA, and at least one pinned client fingerprint are required together",
+      path: ["MCP_INTERNAL_API_ENABLED"],
+    });
+  }
+  validateMcpActorAssertionEnvironment(value, context, tupleRequired);
+  if (tupleRequired && value.MCP_ACTOR_ASSERTION_REPLAY_DIGEST_KEY_BASE64 === undefined) {
+    context.addIssue({
+      code: "custom",
+      message:
+        "an independent ActorContext replay digest key is required when configured",
+      path: ["MCP_ACTOR_ASSERTION_REPLAY_DIGEST_KEY_BASE64"],
+    });
+  }
+  if (tupleRequired && value.MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64 === undefined) {
+    context.addIssue({
+      code: "custom",
+      message:
+        "the shared Access Token jti digest key is required when Remote MCP is configured",
+      path: ["MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64"],
+    });
+  }
+  const replayDigestKey = value.MCP_ACTOR_ASSERTION_REPLAY_DIGEST_KEY_BASE64;
+  const accessTokenJtiDigestKey = value.MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64;
+  if (
+    replayDigestKey !== undefined &&
+    (buffersEqual(replayDigestKey, value.MCP_ACTOR_ASSERTION_CURRENT_KEY_BASE64) ||
+      Object.values(value.MCP_ACTOR_ASSERTION_PREVIOUS_KEYS).some((entry) =>
+        entry.keyBase64.equals(replayDigestKey),
+      ))
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "must be independent from every ActorContext signing key",
+      path: ["MCP_ACTOR_ASSERTION_REPLAY_DIGEST_KEY_BASE64"],
+    });
+  }
+  if (
+    accessTokenJtiDigestKey !== undefined &&
+    (buffersEqual(accessTokenJtiDigestKey, replayDigestKey) ||
+      buffersEqual(
+        accessTokenJtiDigestKey,
+        value.MCP_ACTOR_ASSERTION_CURRENT_KEY_BASE64,
+      ) ||
+      Object.values(value.MCP_ACTOR_ASSERTION_PREVIOUS_KEYS).some((entry) =>
+        entry.keyBase64.equals(accessTokenJtiDigestKey),
+      ))
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "must be independent from ActorContext signing and replay digest keys",
+      path: ["MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64"],
+    });
+  }
+  if (tupleRequired && value.MCP_INTERNAL_API_PORT === value.PORT) {
+    context.addIssue({
+      code: "custom",
+      message: "must use a listener port distinct from the public API port",
+      path: ["MCP_INTERNAL_API_PORT"],
+    });
+  }
+  validateCertificateAndPrivateKeyPair(
+    value.MCP_INTERNAL_API_SERVER_CERT_PEM_BASE64,
+    value.MCP_INTERNAL_API_SERVER_KEY_PEM_BASE64,
+    context,
+    "MCP_INTERNAL_API_SERVER_KEY_PEM_BASE64",
+  );
+}
+
 const AuthEnvironmentBaseSchema = z
   .object({
     NODE_ENV: NodeEnvironmentSchema.default("development"),
@@ -697,6 +1198,7 @@ export const ApiEnvironmentSchema = CommonServiceEnvironmentSchema.extend({
   ...AuthEnvironmentFields,
   ...AdminApiEnvironmentFields,
   ...AgentCredentialEnvironmentFields,
+  ...McpInternalApiEnvironmentFields,
   ...PendingActionCryptoEnvironmentFields,
   ...SearchEmbeddingEnvironmentFields,
   API_TRUSTED_PROXY_CIDRS: TrustedProxyListSchema,
@@ -713,6 +1215,7 @@ export const ApiEnvironmentSchema = CommonServiceEnvironmentSchema.extend({
 }).superRefine((value, context) => {
   validateAuthEnvironment(value, context);
   validateAdminApiEnvironment(value, context);
+  validateMcpInternalApiEnvironment(value, context);
   validatePendingActionCryptoEnvironment(value, context);
   validateProductionPostgresTransport(value, context);
   validateProductionRedisTransport(value, context);
@@ -869,15 +1372,104 @@ const OptionalMcpResourceSchema = z.preprocess(
     .optional(),
 );
 
+type McpRuntimeValidationTarget = McpActorAssertionValidationTarget & {
+  MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64?: Buffer | undefined;
+  MCP_INTERNAL_API_CLIENT_CERT_PEM_BASE64?: Buffer | undefined;
+  MCP_INTERNAL_API_CLIENT_KEY_PEM_BASE64?: Buffer | undefined;
+  MCP_INTERNAL_API_SERVER_CA_PEM_BASE64?: Buffer | undefined;
+  MCP_INTERNAL_API_URL?: string | undefined;
+  MCP_OAUTH_ISSUER?: string | undefined;
+  MCP_OAUTH_JWKS_URI?: string | undefined;
+  MCP_PUBLIC_ENABLED: boolean;
+  MCP_RESOURCE?: string | undefined;
+  MCP_RUNTIME_ENABLED: boolean;
+  NODE_ENV: z.infer<typeof NodeEnvironmentSchema>;
+};
+
+function validateMcpRuntimeEnvironment(
+  value: McpRuntimeValidationTarget,
+  context: z.RefinementCtx,
+): void {
+  const runtimeTuple = [
+    value.MCP_RESOURCE,
+    value.MCP_OAUTH_ISSUER,
+    value.MCP_OAUTH_JWKS_URI,
+    value.MCP_INTERNAL_API_URL,
+    value.MCP_INTERNAL_API_CLIENT_CERT_PEM_BASE64,
+    value.MCP_INTERNAL_API_CLIENT_KEY_PEM_BASE64,
+    value.MCP_INTERNAL_API_SERVER_CA_PEM_BASE64,
+    value.MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64,
+  ];
+  const actorTupleConfigured =
+    value.MCP_ACTOR_ASSERTION_CURRENT_KEY_BASE64 !== undefined ||
+    value.MCP_ACTOR_ASSERTION_CURRENT_KEY_VERSION !== undefined ||
+    Object.keys(value.MCP_ACTOR_ASSERTION_PREVIOUS_KEYS).length > 0;
+  const hasAnyConfiguration =
+    runtimeTuple.some((entry) => entry !== undefined) || actorTupleConfigured;
+  const tupleRequired = value.MCP_RUNTIME_ENABLED || hasAnyConfiguration;
+
+  if (tupleRequired && runtimeTuple.some((entry) => entry === undefined)) {
+    context.addIssue({
+      code: "custom",
+      message:
+        "the OAuth verifier, internal mTLS client, and token-jti digest tuple must be configured together",
+      path: ["MCP_RUNTIME_ENABLED"],
+    });
+  }
+  validateMcpActorAssertionEnvironment(value, context, tupleRequired);
+  const tokenJtiDigestKey = value.MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64;
+  if (
+    tokenJtiDigestKey !== undefined &&
+    (buffersEqual(tokenJtiDigestKey, value.MCP_ACTOR_ASSERTION_CURRENT_KEY_BASE64) ||
+      Object.values(value.MCP_ACTOR_ASSERTION_PREVIOUS_KEYS).some((entry) =>
+        entry.keyBase64.equals(tokenJtiDigestKey),
+      ))
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "must be independent from every ActorContext signing key",
+      path: ["MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64"],
+    });
+  }
+  if (value.MCP_PUBLIC_ENABLED && !value.MCP_RUNTIME_ENABLED) {
+    context.addIssue({
+      code: "custom",
+      message: "must be true before public MCP exposure can be enabled",
+      path: ["MCP_RUNTIME_ENABLED"],
+    });
+  }
+  if (
+    value.NODE_ENV === "production" &&
+    value.MCP_OAUTH_ISSUER !== undefined &&
+    value.MCP_OAUTH_JWKS_URI !== undefined &&
+    (new URL(value.MCP_OAUTH_ISSUER).protocol !== "https:" ||
+      new URL(value.MCP_OAUTH_JWKS_URI).protocol !== "https:")
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "OAuth issuer and JWKS URLs must use https in production",
+      path: ["MCP_OAUTH_ISSUER"],
+    });
+  }
+  validateCertificateAndPrivateKeyPair(
+    value.MCP_INTERNAL_API_CLIENT_CERT_PEM_BASE64,
+    value.MCP_INTERNAL_API_CLIENT_KEY_PEM_BASE64,
+    context,
+    "MCP_INTERNAL_API_CLIENT_KEY_PEM_BASE64",
+  );
+}
+
 export const McpEnvironmentSchema = CommonServiceEnvironmentSchema.extend({
   PORT: PortSchema.default(4100),
   REDIS_URL: UrlSchema,
+  ...McpRuntimeEnvironmentFields,
   MCP_ALLOWED_HOSTS: z.string().default("localhost,127.0.0.1,mcp"),
   MCP_PUBLIC_ENABLED: BooleanStringSchema.default(false),
   MCP_RESOURCE: OptionalMcpResourceSchema,
   MCP_TRUSTED_PROXY_CIDRS: TrustedProxyListSchema,
 }).superRefine((value, context) => {
   validateProductionRedisTransport(value, context);
+  validateMcpRuntimeEnvironment(value, context);
   if (value.MCP_PUBLIC_ENABLED && !value.MCP_RESOURCE) {
     context.addIssue({
       code: "custom",

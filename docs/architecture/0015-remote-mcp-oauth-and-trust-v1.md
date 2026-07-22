@@ -284,7 +284,9 @@ header，公网 listener 主动删除所有同名 header。API 必须先验证 m
 签名、issuer、audience、时间窗和单次 jti，再进入领域边界。
 
 `token_jti_digest` 由独立的 Access Token jti digest key 生成后传入 assertion；
-不得复用 ActorContext 签名 key，以免任一密钥轮换改变另一条信任链的标识。
+该 key 仅在 API OAuth 签发/持久化端与 MCP 验证端共享，二者分别生成与重算同一
+digest。它不得复用 ActorContext 签名或 replay digest key，以免任一密钥轮换改变
+另一条信任链的标识。
 
 Redis 的单次 jti 消费失败时 fail closed；Redis 不是 Grant 或权限事实来源。
 
@@ -298,9 +300,11 @@ Redis 的单次 jti 消费失败时 fail closed；Redis 不是 Grant 或权限�
 - 配置、Compose、Terraform/SG/Secrets；
 - 保持公网 MCP 关闭。
 
-当前 walking-skeleton server 还会在 `MCP_PUBLIC_ENABLED=true` 时拒绝启动；只有
-live OAuth verifier、双层 limiter、ActorContext 委托和真实工具全部装配后，后续
-切片才可移除这一临时硬门。配置字段或 schema 存在不等于公网运行时已经可用。
+当前 server 已把 live OAuth verifier、双层 Redis limiter、ActorContext 委托和
+首个真实工具装配为一个由 `MCP_RUNTIME_ENABLED` 控制的私有运行切片；
+`MCP_PUBLIC_ENABLED` 只控制 ALB/CloudFront 暴露，不能代替运行时保护。Phase B
+五工具、OAuth 签发闭环和下方 Public gate 的全部证据完成前，部署配置仍必须保持
+公网 MCP 关闭。配置字段或 schema 存在不等于公网运行时已经可用。
 
 ### Phase B：五工具纵向切片
 

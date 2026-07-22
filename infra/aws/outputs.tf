@@ -117,6 +117,11 @@ output "private_subnet_ids" {
   value = [for subnet in aws_subnet.private : subnet.id]
 }
 
+output "mcp_internal_api_dns_name" {
+  description = "Private Cloud Map DNS identity that must appear in the API mTLS server certificate SAN."
+  value       = local.mcp_internal_api_dns_name
+}
+
 output "migration_security_group_id" {
   value = aws_security_group.migration.id
 }

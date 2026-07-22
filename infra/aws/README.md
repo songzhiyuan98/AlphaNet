@@ -9,8 +9,9 @@ and replica counts all scale in place.
 The design keeps the product boundary intact: AlphaNet is an Agent-first
 investment research social network. Web, REST, Worker, and the currently
 non-public Remote MCP scaffold use the same application and data model. MCP is
-deployed privately but `mcp_public_enabled` stays false until that interface is
-ready to be a supported product entry point: Remote MCP OAuth, real
+deployed privately. `mcp_runtime_enabled` can exercise the authenticated VPC
+path while `mcp_public_enabled` stays false until that interface is ready to be
+a supported product entry point: Remote MCP OAuth, real
 REST-equivalent tools, and client interoperability gates must all ship first.
 The current placeholder is not a usable public product entrance.
 
@@ -23,11 +24,11 @@ CloudFront + CloudFront-scoped WAF
    | HTTPS (dedicated origin DNS + certificate)
 public ALB (CloudFront prefix list + origin verification header)
    |--------------------|--------------------|
-private Web ECS     private API ECS      private MCP ECS
-                           |                    |
-                     Aurora PostgreSQL 17 + pgvector
-                           |
-                     private Worker ECS
+private Web ECS     private API ECS <==== private MCP ECS
+                         |       private mTLS :4443
+                   Aurora PostgreSQL 17 + pgvector
+                         |
+                   private Worker ECS
 
 API / MCP ---------- ElastiCache Valkey (TLS, AUTH, cluster mode disabled)
 ```
@@ -41,7 +42,8 @@ API / MCP ---------- ElastiCache Valkey (TLS, AUTH, cluster mode disabled)
   Dynamic requests use AWS's managed `AllViewerExceptHostHeader` policy, so
   TLS SNI and HTTP `Host` match the dedicated ALB-origin certificate. A viewer
   request function removes viewer-supplied forwarded host/protocol headers
-  before CloudFront and ALB add trusted transport metadata.
+  and the private ActorContext assertion before CloudFront and ALB add trusted
+  transport metadata.
 - ALB is public because CloudFront needs a stable origin, but its security group
   accepts HTTPS only from AWS's managed CloudFront origin-facing prefix list.
   CloudFront reaches a dedicated `alb_origin_domain_name` using a valid
@@ -55,6 +57,12 @@ API / MCP ---------- ElastiCache Valkey (TLS, AUTH, cluster mode disabled)
   Web catch-all to mask the boundary. Public MCP additionally requires a fixed
   custom `domain_name`; Terraform rejects using its generated CloudFront
   hostname as the immutable OAuth Resource audience.
+- When `mcp_runtime_enabled=true`, only the MCP task security group can reach
+  API TCP 4443. The API presents a certificate for its exact Cloud Map DNS
+  name, requires a client certificate issued by the private MCP CA, pins the
+  current/previous client certificate fingerprints, and then verifies the
+  short-lived request-bound ActorContext assertion. MCP receives no database
+  credential and cannot reach PostgreSQL.
 - The same five immutable ECR repositories serve staging and production. A
   release is promoted by digest; it is never copied into an environment-specific
   repository or rebuilt between environments. Untagged upload artifacts expire
@@ -279,6 +287,7 @@ key in shell history, tfvars, `.env`, or a plan:
   "$(./scripts/terraform.sh output -raw database_cluster_endpoint)" \
   "$(./scripts/terraform.sh output -raw valkey_primary_endpoint)" \
   "$(./scripts/terraform.sh output -raw valkey_auth_secret_arn)" \
+  "$(./scripts/terraform.sh output -raw mcp_internal_api_dns_name)" \
   us-west-2
 ```
 
@@ -294,7 +303,18 @@ The resulting Secret JSON contains:
 - independent migration/runtime database passwords;
 - Better Auth, SSR signing, Agent API pepper, PendingAction encryption, and
   Community cursor keys;
+- a private Remote MCP CA, server/client identities, pinned client fingerprint,
+  shared short-lived ActorContext signing key, and independent replay/JTI
+  digest keys;
 - Resend and optional Google OAuth credentials.
+
+The helper builds the initial Remote MCP PKI entirely in process and writes
+only the leaf identities and trust bundles to Secrets Manager; the CA signing
+key is never persisted. The API server certificate contains the exact Cloud Map
+DNS output as its SAN. A coordinated rotation replaces CA, both leaf
+identities, fingerprint allowlist, and task revisions before the 397-day leaf
+expiry. ActorContext key rotation is independent and uses the bounded previous
+key ring/cutoff fields.
 
 The RDS regional CA bundle is baked into the migrate and Node images. PostgreSQL
 jobs use `PGSSLMODE=verify-full` plus the bundled CA; the URL itself must retain
@@ -439,8 +459,8 @@ relies on service readiness, public reads, and exact digest verification.
 - Task security groups do not use unrestricted all-protocol egress. They allow
   DNS only to the VPC resolver, HTTPS for AWS/ECR and approved external APIs,
   and explicit security-group-to-security-group ports for Web-to-API,
-  PostgreSQL, and Valkey. DB/cache security groups need no outbound rule because
-  security groups are stateful.
+  PostgreSQL, Valkey, and the MCP-to-API mTLS port. DB/cache security groups need
+  no outbound rule because security groups are stateful.
 - WAF request sampling is disabled. CloudFront standard/access logging is not
   enabled because auth verification, reset, and OAuth URLs can carry one-time
   query values. If edge logging is added later, redact query strings, cookies,
@@ -449,17 +469,23 @@ relies on service readiness, public reads, and exact digest verification.
   not Agent quota enforcement. Credential and IP policy remains in Redis-backed
   application limits so multiple Agents behind one NAT are not accidentally
   blocked.
-- The CloudFront viewer-request function removes caller-supplied
-  `X-Forwarded-For`; CloudFront then appends the actual viewer IP and the ALB
-  preserves that sanitized value. AlphaNet trusts only the two ALB
-  public-subnet CIDRs. A malformed forwarded chain from a trusted peer fails
-  closed instead of collapsing callers into the shared ALB rate-limit bucket.
+- The CloudFront viewer-request function removes caller-supplied forwarding
+  metadata and `X-AlphaNet-Mcp-Actor-Context`, then overwrites
+  `X-AlphaNet-Viewer-IP` from `event.viewer.ip`. MCP accepts that dedicated IP
+  only when the direct socket peer is one of the two trusted ALB public-subnet
+  CIDRs; direct or duplicate-header spoofing is ignored or rejected. This keeps
+  pre-auth rate limits keyed to the viewer instead of a shared CloudFront node.
 - CloudFront does not forward the viewer `Host` to the TLS origin and removes
   viewer-controlled `Forwarded`/`X-Forwarded-Host`/protocol metadata. The app's
   public auth URL and trusted origin are explicit environment values, not
   inferred from those headers.
 - `SSR_INTERNAL_REQUEST_SECRET` is shared only by Web/API through Secrets
   Manager. `PENDING_ACTION_ENCRYPTION_KEY` is shared only by API/Worker.
+- The MCP/API ActorContext signing key is shared only by those two services.
+  API alone receives the replay digest key and mTLS server key; MCP alone
+  receives the mTLS client key. The independent access-token JTI digest key is
+  shared by the API OAuth issuer and MCP verifier so both bind the same token
+  identifier. MCP never receives `DATABASE_URL`.
 - Secrets Manager contains three secret containers: RDS manages the Aurora
   administrator secret, CloudFormation creates the Valkey AUTH secret, and the
   seed helper writes one multi-key application JSON secret. Application values

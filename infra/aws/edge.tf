@@ -241,8 +241,10 @@ resource "aws_wafv2_web_acl" "edge" {
 
 # AllViewerExceptHostHeader is required so TLS SNI and the HTTP Host presented
 # to the ALB match the dedicated origin certificate. Strip viewer-supplied
-# forwarding-host/proto metadata before the managed policy forwards headers;
-# CloudFront/ALB then generate the trusted transport metadata themselves.
+# forwarding-host/proto metadata and the private MCP ActorContext assertion
+# before the managed policy forwards headers; CloudFront/ALB then generate the
+# trusted transport metadata themselves. The private assertion is accepted only
+# on the separate mTLS listener and must never cross the public edge.
 resource "aws_cloudfront_function" "sanitize_forwarding_headers" {
   name    = "${local.name}-sanitize-forwarding-headers"
   runtime = "cloudfront-js-2.0"
@@ -256,6 +258,9 @@ resource "aws_cloudfront_function" "sanitize_forwarding_headers" {
       delete request.headers['x-forwarded-host'];
       delete request.headers['x-forwarded-port'];
       delete request.headers['x-forwarded-proto'];
+      delete request.headers['x-alphanet-mcp-actor-context'];
+      delete request.headers['x-alphanet-viewer-ip'];
+      request.headers['x-alphanet-viewer-ip'] = { value: event.viewer.ip };
       return request;
     }
   JAVASCRIPT

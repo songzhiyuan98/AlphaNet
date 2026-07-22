@@ -1,5 +1,6 @@
 export * from "./email.js";
 export * from "./mcp-actor-context.js";
+export * from "./mcp-actor-key-ring.js";
 export * from "./mcp-actor-replay.js";
 export * from "./oidc-jwt.js";
 export * from "./rate-limit.js";

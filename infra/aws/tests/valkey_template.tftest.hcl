@@ -99,17 +99,81 @@ override_resource {
   }
 }
 
+override_resource {
+  target          = aws_security_group.service["api"]
+  override_during = plan
+  values = {
+    id = "sg-00000000000000001"
+  }
+}
+
+override_resource {
+  target          = aws_security_group.service["mcp"]
+  override_during = plan
+  values = {
+    id = "sg-00000000000000002"
+  }
+}
+
+override_resource {
+  target          = aws_secretsmanager_secret.application
+  override_during = plan
+  values = {
+    arn = "arn:aws:secretsmanager:us-west-2:123456789012:secret:alphanet-staging-application"
+  }
+}
+
+override_data {
+  target = data.aws_ecr_image.service["web"]
+  values = {
+    image_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+}
+
+override_data {
+  target = data.aws_ecr_image.service["api"]
+  values = {
+    image_digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  }
+}
+
+override_data {
+  target = data.aws_ecr_image.service["mcp"]
+  values = {
+    image_digest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  }
+}
+
+override_data {
+  target = data.aws_ecr_image.service["worker"]
+  values = {
+    image_digest = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  }
+}
+
+override_data {
+  target = data.aws_ecr_image.service["migrate"]
+  values = {
+    image_digest = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  }
+}
+
 run "single_node_valkey_template" {
   command = plan
 
   variables {
     environment                     = "staging"
     app_version                     = "0123456789abcdef0123456789abcdef01234567"
+    domain_name                     = "staging.alphanet.example"
+    cloudfront_certificate_arn      = "arn:aws:acm:us-east-1:123456789012:certificate/00000000-0000-0000-0000-000000000001"
     alb_origin_domain_name          = "origin-staging.alphanet.example"
     alb_origin_certificate_arn      = "arn:aws:acm:us-west-2:123456789012:certificate/00000000-0000-0000-0000-000000000000"
     auth_email_from                 = "AlphaNet <no-reply@alphanet.example>"
     github_oidc_provider_arn        = "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
     github_oidc_subjects            = ["repo:songzhiyuan98@123667992/AlphaNet@1306225890:ref:refs/heads/main"]
+    mcp_runtime_enabled             = true
+    mcp_oauth_issuer                = "https://auth.alphanet.example/"
+    mcp_oauth_jwks_uri              = "https://auth.alphanet.example/.well-known/jwks.json"
     valkey_multi_az                 = false
     database_deletion_protection    = false
     database_skip_final_snapshot    = true
@@ -198,9 +262,67 @@ run "single_node_valkey_template" {
       length(aws_ecs_service.app["web"].load_balancer) == 1 &&
       length(aws_ecs_service.app["api"].load_balancer) == 1 &&
       length(aws_ecs_service.app["mcp"].load_balancer) == 0 &&
+      !contains(keys(aws_vpc_security_group_ingress_rule.service_from_alb), "mcp") &&
+      !contains(keys(aws_vpc_security_group_egress_rule.alb_to_service), "mcp") &&
       !contains(keys(aws_cloudwatch_metric_alarm.alb_unhealthy_targets), "mcp")
     )
-    error_message = "Private-by-default MCP must remain off the ALB and its target-health alarms until mcp_public_enabled is explicitly true."
+    error_message = "Private-by-default MCP must remain off the ALB, its security-group path, and its target-health alarms until mcp_public_enabled is explicitly true."
+  }
+
+  assert {
+    condition = (
+      length(aws_vpc_security_group_ingress_rule.api_internal_from_mcp) == 1 &&
+      length(aws_vpc_security_group_egress_rule.mcp_to_api_internal) == 1 &&
+      aws_vpc_security_group_ingress_rule.api_internal_from_mcp[0].from_port == 4443 &&
+      aws_vpc_security_group_ingress_rule.api_internal_from_mcp[0].referenced_security_group_id == aws_security_group.service["mcp"].id &&
+      aws_vpc_security_group_egress_rule.mcp_to_api_internal[0].referenced_security_group_id == aws_security_group.service["api"].id
+    )
+    error_message = "The private Remote MCP runtime must expose only the dedicated MCP-to-API mTLS security-group path."
+  }
+
+  assert {
+    condition = (
+      contains(
+        [for item in local.api_environment : "${item.name}=${item.value}"],
+        "MCP_INTERNAL_API_ENABLED=true",
+      ) &&
+      contains(
+        [for item in local.mcp_environment : "${item.name}=${item.value}"],
+        "MCP_RUNTIME_ENABLED=true",
+      ) &&
+      contains(
+        [for item in local.mcp_environment : "${item.name}=${item.value}"],
+        "MCP_PUBLIC_ENABLED=false",
+      ) &&
+      local.mcp_internal_api_port == 4443
+    )
+    error_message = "Private runtime enablement must open the API mTLS listener and MCP runtime without enabling the public MCP route."
+  }
+
+  assert {
+    condition = (
+      !contains(
+        [for item in local.task_secrets.mcp : item.name],
+        "DATABASE_URL",
+      ) &&
+      contains(
+        [for item in local.task_secrets.mcp : item.name],
+        "MCP_INTERNAL_API_CLIENT_KEY_PEM_BASE64",
+      ) &&
+      contains(
+        [for item in local.task_secrets.api : item.name],
+        "MCP_INTERNAL_API_SERVER_KEY_PEM_BASE64",
+      ) &&
+      contains(
+        [for item in local.task_secrets.api : item.name],
+        "MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64",
+      ) &&
+      contains(
+        [for item in local.task_secrets.mcp : item.name],
+        "MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64",
+      )
+    )
+    error_message = "MCP must receive only its client-side trust material and no database credential; API must receive the server key; issuer and verifier must share only the independent token-JTI digest key."
   }
 
   assert {
@@ -212,6 +334,15 @@ run "single_node_valkey_template" {
       "/.well-known/oauth-protected-resource/mcp"
     )
     error_message = "The MCP listener boundary must reserve the standard protected-resource metadata path before public exposure is enabled."
+  }
+
+  assert {
+    condition = (
+      strcontains(aws_cloudfront_function.sanitize_forwarding_headers.code, "x-alphanet-viewer-ip") &&
+      strcontains(aws_cloudfront_function.sanitize_forwarding_headers.code, "event.viewer.ip") &&
+      strcontains(aws_cloudfront_function.sanitize_forwarding_headers.code, "x-alphanet-mcp-actor-context")
+    )
+    error_message = "CloudFront must overwrite the dedicated viewer-IP header and remove the private ActorContext header before forwarding."
   }
 }
 
@@ -227,6 +358,8 @@ run "reject_public_mcp_without_fixed_domain" {
     github_oidc_provider_arn        = "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
     github_oidc_subjects            = ["repo:songzhiyuan98@123667992/AlphaNet@1306225890:ref:refs/heads/main"]
     mcp_public_enabled              = true
+    mcp_oauth_issuer                = "https://auth.alphanet.example/"
+    mcp_oauth_jwks_uri              = "https://auth.alphanet.example/.well-known/jwks.json"
     valkey_multi_az                 = false
     database_deletion_protection    = false
     database_skip_final_snapshot    = true
@@ -286,5 +419,8 @@ run "reject_public_mcp_without_fixed_domain" {
     }
   }
 
-  expect_failures = [aws_lb_listener_rule.mcp]
+  expect_failures = [
+    aws_ecs_task_definition.service["mcp"],
+    aws_lb_listener_rule.mcp,
+  ]
 }

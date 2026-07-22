@@ -34,7 +34,7 @@ export interface McpAppOptions {
   host: string;
   logger: Logger;
   authorizationMiddleware?: RequestHandler;
-  publicEnabled?: boolean;
+  runtimeEnabled?: boolean;
   protectionTimeoutMilliseconds?: number;
   requestRateLimiter?: McpRequestRateLimiter;
   resolveClientIp?: (request: Request) => string;
@@ -400,7 +400,7 @@ export function createMcpApp(options: McpAppOptions): McpApp {
       (result, index) =>
         result.status === "rejected" && dependencies[index]?.critical !== false,
     );
-    if (options.publicEnabled === true && !runtimeProtectionAvailable) {
+    if (options.runtimeEnabled === true && !runtimeProtectionAvailable) {
       failedDependencies.push("mcp-runtime-protection");
     }
     if (shuttingDown) {
@@ -411,7 +411,7 @@ export function createMcpApp(options: McpAppOptions): McpApp {
       .status(
         criticalDependencyFailed ||
           shuttingDown ||
-          (options.publicEnabled === true && !runtimeProtectionAvailable)
+          (options.runtimeEnabled === true && !runtimeProtectionAvailable)
           ? 503
           : 200,
       )
@@ -496,9 +496,9 @@ export function createMcpApp(options: McpAppOptions): McpApp {
       });
       return;
     }
-    if (options.publicEnabled !== true) {
-      sendJsonRpcError(response, 503, -32000, "MCP public access is disabled.", {
-        code: "MCP_PUBLIC_DISABLED",
+    if (options.runtimeEnabled !== true) {
+      sendJsonRpcError(response, 503, -32000, "MCP runtime is disabled.", {
+        code: "MCP_RUNTIME_DISABLED",
       });
       return;
     }

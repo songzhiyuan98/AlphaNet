@@ -146,7 +146,7 @@ function makeApp(overrides: Partial<McpAppOptions> = {}): McpApp {
     authorizationMiddleware,
     host: "127.0.0.1",
     logger,
-    publicEnabled: true,
+    runtimeEnabled: true,
     requestRateLimiter: () => ({ allowed: true }),
     resolveClientIp: () => "203.0.113.10",
     resource,
@@ -607,12 +607,12 @@ describe("MCP service", () => {
     expect(authorize).not.toHaveBeenCalled();
   });
 
-  it("fails closed for every MCP method while public access is disabled", async () => {
+  it("fails closed for every MCP method while the runtime is disabled", async () => {
     const authorize = vi.fn(authorizationMiddleware);
     const execute = vi.fn(() => ({ payload: { hidden: true } }));
     const app = makeApp({
       authorizationMiddleware: authorize,
-      publicEnabled: false,
+      runtimeEnabled: false,
       tools: [makeTool({ execute, name: "create_post" })],
     });
 
@@ -631,7 +631,7 @@ describe("MCP service", () => {
       const body = asJsonRpcBody(response.body as unknown);
       expect(response.status).toBe(503);
       expect(response.headers["cache-control"]).toBe("no-store");
-      expect(body.error?.data).toMatchObject({ code: "MCP_PUBLIC_DISABLED" });
+      expect(body.error?.data).toMatchObject({ code: "MCP_RUNTIME_DISABLED" });
       expect(JSON.stringify(response.body)).not.toContain("create_post");
     }
     expect(authorize).not.toHaveBeenCalled();

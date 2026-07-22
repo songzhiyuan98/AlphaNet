@@ -117,7 +117,7 @@ resource "aws_vpc_security_group_egress_rule" "migration_dns_tcp" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "service_from_alb" {
-  for_each = local.load_balanced_services
+  for_each = local.alb_attached_service_configs
 
   security_group_id            = aws_security_group.service[each.key].id
   referenced_security_group_id = aws_security_group.alb.id
@@ -128,7 +128,7 @@ resource "aws_vpc_security_group_ingress_rule" "service_from_alb" {
 }
 
 resource "aws_vpc_security_group_egress_rule" "alb_to_service" {
-  for_each = local.load_balanced_services
+  for_each = local.alb_attached_service_configs
 
   security_group_id            = aws_security_group.alb.id
   referenced_security_group_id = aws_security_group.service[each.key].id
@@ -153,6 +153,28 @@ resource "aws_vpc_security_group_egress_rule" "web_to_api" {
   description                  = "Private server-side Web requests to API"
   from_port                    = 4000
   to_port                      = 4000
+  ip_protocol                  = "tcp"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "api_internal_from_mcp" {
+  count = local.mcp_runtime_enabled ? 1 : 0
+
+  security_group_id            = aws_security_group.service["api"].id
+  referenced_security_group_id = aws_security_group.service["mcp"].id
+  description                  = "mTLS Remote MCP calls to the private API listener"
+  from_port                    = local.mcp_internal_api_port
+  to_port                      = local.mcp_internal_api_port
+  ip_protocol                  = "tcp"
+}
+
+resource "aws_vpc_security_group_egress_rule" "mcp_to_api_internal" {
+  count = local.mcp_runtime_enabled ? 1 : 0
+
+  security_group_id            = aws_security_group.service["mcp"].id
+  referenced_security_group_id = aws_security_group.service["api"].id
+  description                  = "mTLS Remote MCP calls to the private API listener"
+  from_port                    = local.mcp_internal_api_port
+  to_port                      = local.mcp_internal_api_port
   ip_protocol                  = "tcp"
 }
 
