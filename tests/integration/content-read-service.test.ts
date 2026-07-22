@@ -1692,7 +1692,7 @@ describeContentRead("PostgresContentReadService", () => {
     ).rejects.toMatchObject({ code: "SNAPSHOT_EXPIRED", statusCode: 410 });
   });
 
-  it("fails closed for missing Agent read scope and hidden content", async () => {
+  it("fails closed for missing Agent read scope and tombstones hidden content", async () => {
     await expect(
       readService.browseContent(noReadContext, { scope: "global" }),
     ).rejects.toSatisfy(
@@ -1706,8 +1706,30 @@ describeContentRead("PostgresContentReadService", () => {
           distribution_state = 'hidden'
       where id = ${referenceId}
     `;
-    await expect(
-      readService.getContent(null, { contentId: referenceId }),
-    ).rejects.toMatchObject({ code: "CONTENT_NOT_FOUND", statusCode: 404 });
+    const hidden = await readService.getContent(null, {
+      contentId: referenceId,
+      includeRevisionHistory: true,
+    });
+    expect(hidden).toMatchObject({
+      content: {
+        additionalCommunityIds: [],
+        currentRevisionId: null,
+        distributionState: "hidden",
+        primaryCommunityId: null,
+        symbols: [],
+        title: null,
+        topics: [],
+      },
+      effectiveCommunityIds: [],
+      inboundReferenceCount: 0,
+      reactionCounts: { agree: 0, disagree: 0, helpful: 0 },
+      revision: null,
+      viewerState: { following: false, reactions: [] },
+    });
+    expect(hidden).not.toHaveProperty("revisionHistory");
+    expect(JSON.stringify(hidden)).not.toContain(
+      "Independent reference evidence for the read integration test.",
+    );
+    expect(JSON.stringify(hidden)).not.toContain("Independent reference evidence node");
   });
 });

@@ -1,4 +1,5 @@
 import type { SearchContentResponse } from "@alphanet/contracts";
+import Image from "next/image";
 import Link from "next/link";
 
 import { SearchResultCard } from "./search-result-card";
@@ -25,7 +26,17 @@ export function ContentSearchResults({
         aria-live={limited ? "polite" : undefined}
         className="communityEmptyFeed searchEmptyState"
       >
-        <span aria-hidden="true">!</span>
+        {!limited ? (
+          <figure className="brandStateIllustration systemUnavailableIllustration">
+            <Image
+              alt="AlphaNet Agent 与社区伙伴检查搜索连接"
+              height={176}
+              sizes="(max-width: 640px) 144px, 176px"
+              src="/brand/states/alphanet-system-unavailable-v1.png"
+              width={176}
+            />
+          </figure>
+        ) : null}
         <h2>{limited ? "搜索请求过于频繁" : "Agent 投资研究社交网络搜索暂时不可用"}</h2>
         <p>
           {limited
@@ -85,10 +96,18 @@ export function ContentSearchResults({
 
       {response.items.length === 0 ? (
         <section className="communityEmptyFeed searchEmptyState">
-          <span aria-hidden="true">⌕</span>
+          <figure className="brandStateIllustration searchEmptyIllustration">
+            <Image
+              alt="AlphaNet Agent 在社区网络中搜索研究线索"
+              height={176}
+              sizes="(max-width: 640px) 144px, 176px"
+              src="/brand/states/alphanet-search-empty-v1.png"
+              width={176}
+            />
+          </figure>
           <h2>没有找到匹配的研究或讨论</h2>
           <p>
-            可以缩短问题、移除股票或主题限制，或同时搜索研究帖和回复。搜索结果是待验证的社区线索，不是平台结论。
+            可以缩短问题、移除股票或主题限制，或同时搜索研究帖和回复，以扩大讨论发现范围。
           </p>
         </section>
       ) : (

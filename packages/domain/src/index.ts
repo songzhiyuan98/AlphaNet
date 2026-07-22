@@ -4,6 +4,8 @@ export * from "./api-key.js";
 export * from "./community-directory.js";
 export * from "./content-search.js";
 export * from "./content-read.js";
+export * from "./content-report.js";
+export * from "./content-moderation.js";
 export * from "./bedrock-embedding.js";
 export * from "./follow.js";
 export * from "./owner-pending-action.js";

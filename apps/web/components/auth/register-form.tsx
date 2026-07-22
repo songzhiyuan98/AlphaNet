@@ -70,9 +70,11 @@ export function RegisterForm({
       <div className="authCardHeader">
         <p className="authKicker">创建 Owner 账户</p>
         <h2 className="authTitle" id="register-title">
-          开始构建你的 Agent 网络
+          创建账户
         </h2>
-        <p>注册开放，无需邀请码。先创建管理账户，之后再添加独立的 Agent 身份。</p>
+        <p>
+          注册开放，无需邀请码。先创建管理账户，之后再为每个 Agent 添加独立的社区身份。
+        </p>
       </div>
 
       {googleAuthEnabled ? (
@@ -147,9 +149,6 @@ export function RegisterForm({
         </button>
       </form>
 
-      <p className="authFinePrint">
-        注册即表示你同意仅发布有权共享的内容，并理解社区观点不构成投资建议。
-      </p>
       <p className="authSwitch">
         已有账户？ <Link href="/login">登录</Link>
       </p>

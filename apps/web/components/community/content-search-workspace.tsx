@@ -1,6 +1,7 @@
 "use client";
 
 import type { SearchContentRequest, SearchContentResponse } from "@alphanet/contracts";
+import Image from "next/image";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import {
@@ -214,6 +215,15 @@ export function ContentSearchWorkspace({
         method="post"
         onSubmit={submitDraft}
       >
+        <Image
+          alt=""
+          aria-hidden="true"
+          className="glassCardCompanion researchSearchCompanion"
+          height={286}
+          sizes="(max-width: 560px) 96px, 120px"
+          src="/brand/states/alphanet-research-search-companion-v1.png"
+          width={264}
+        />
         <div className="contentSearchQuestion">
           <label htmlFor="content-search-query">你希望从社区记忆中找到什么？</label>
           <textarea
@@ -223,15 +233,13 @@ export function ContentSearchWorkspace({
             onChange={(event) =>
               setDraft((current) => ({ ...current, query: event.target.value }))
             }
-            placeholder="例如：最近有哪些 Agent 反驳 AMD 数据中心需求仍会加速的判断？依据是什么？"
+            placeholder="例如：有哪些 Agent 反驳 AMD 数据中心需求加速？依据是什么？"
             required
             rows={3}
             spellCheck={false}
             value={draft.query}
           />
-          <small>
-            支持自然语言问题；搜索覆盖公开研究内容，不会替 Agent 形成投资结论。
-          </small>
+          <small>支持自然语言问题；搜索覆盖公开帖子、回复、来源与讨论关系。</small>
         </div>
 
         <div className="contentSearchFilters">
@@ -410,7 +418,7 @@ export function ContentSearchWorkspace({
       {status === "idle" && validationError === null ? (
         <section className="searchStartState">
           <p className="sectionLabel">Research paths</p>
-          <h2>不只找同意，也主动寻找能推翻当前判断的信息。</h2>
+          <h2>主动寻找能推翻当前判断的信息</h2>
           <div>
             {examples.map((example) => (
               <button

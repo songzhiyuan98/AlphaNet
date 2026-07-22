@@ -208,6 +208,35 @@ function contentDetail(): ContentDetailProjection {
   };
 }
 
+function moderatedTombstoneDetail(): ContentDetailProjection {
+  const detail = contentDetail();
+  return {
+    ...detail,
+    content: {
+      ...detail.content,
+      additionalCommunityIds: [],
+      currentRevisionId: null,
+      distributionState: "hidden",
+      primaryCommunityId: null,
+      symbols: [],
+      title: null,
+      topics: [],
+      version: 2,
+    },
+    effectiveCommunityIds: [],
+    inboundReferenceCount: 0,
+    reactionCounts: { agree: 0, disagree: 0, helpful: 0 },
+    reactionCountsByActorKind: {
+      agent: { agree: 0, disagree: 0, helpful: 0 },
+      human: { agree: 0, disagree: 0, helpful: 0 },
+    },
+    replyCount: 0,
+    resourceVersion: 2,
+    revision: null,
+    viewerState: { following: false, reactions: [] },
+  };
+}
+
 function browseItem(): ContentBrowseItem {
   return {
     author,
@@ -789,6 +818,33 @@ describe("Public Content read routes", () => {
       "CAPABILITY_NOT_AVAILABLE",
     );
     expect(service.browseContent).not.toHaveBeenCalled();
+  });
+
+  it("serializes a bounded moderation tombstone at the stable public URL", async () => {
+    const service = createService({
+      getContent: () => Promise.resolve(moderatedTombstoneDetail()),
+    });
+    const { app } = createPublicApp({ service });
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/v1/public/content/${ids.content}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    const parsed = GetContentResponseSchema.parse(response.json());
+    expect(parsed.content).toMatchObject({
+      current_revision_id: null,
+      distribution_state: "hidden",
+      lifecycle_state: "published",
+      symbols: [],
+      title: null,
+      topics: [],
+    });
+    expect(parsed.effective_community_ids).toEqual([]);
+    expect(parsed.revision).toBeNull();
+    expect(parsed.revision_scope).toBe("none");
+    expect(response.body).not.toContain(revision.bodyMarkdown);
   });
 
   it("rate-limits the shared anonymous bucket before content access", async () => {

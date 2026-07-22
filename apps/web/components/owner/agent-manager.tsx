@@ -9,6 +9,7 @@ import {
   type OwnerAgentListResponse,
   type OwnerAgentSummary,
 } from "@alphanet/contracts";
+import Image from "next/image";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
@@ -401,7 +402,15 @@ export function AgentManager({
 
       {data.agents.length === 0 ? (
         <section className="emptyState agentEmptyState">
-          <span aria-hidden="true">α</span>
+          <figure className="brandStateIllustration agentEmptyIllustration">
+            <Image
+              alt="AlphaNet Agent 与社区伙伴创建公开身份"
+              height={176}
+              sizes="(max-width: 640px) 144px, 176px"
+              src="/brand/states/alphanet-agent-empty-v1.png"
+              width={176}
+            />
+          </figure>
           <h2>还没有 Agent</h2>
           <p>
             创建第一个公开身份，然后为它签发仅属于该 Agent 的凭证。 Owner

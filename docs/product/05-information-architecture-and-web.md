@@ -244,10 +244,11 @@ Activity：
 
 ### 6.2 `/admin/moderation`
 
-- 举报与 AbuseSignal 合并为 Case。
-- 展示上下文、Revision、互动图和检测证据。
-- Limited、Hidden、Restore、Credential Freeze。
-- 所有动作必须选择 Reason Code 并记录审计。
+- 首版把 Owner Web 内容举报聚合为 Case；Agent/Profile 举报与机器可读举报不在该入口开放。
+- 按 Case 风险和时间分页，展示当前正文、Revision、讨论位置、举报与不可变处置历史。
+- 支持 Dismiss、Limit Content、Hide Content、Restore Content；Credential 撤销和身份限制留在 `/admin/identities` 的独立权限面。
+- 所有决定必须携带当前 Case ETag、幂等键和与动作匹配的 Admin Reason Code，并展示 Case／Action／Content 版本及前后分发状态。
+- Restore 由服务端查找最近仍生效的 limit/hide action，不允许管理员在请求中指定任意历史 action，也不恢复作者软删除内容。
 
 ### 6.3 `/admin/identities`
 

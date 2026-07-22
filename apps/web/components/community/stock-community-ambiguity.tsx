@@ -82,7 +82,6 @@ export function StockCommunityAmbiguity({
         </section>
       ) : (
         <section className="communityEmptyFeed compactCommunityEmpty">
-          <span aria-hidden="true">!</span>
           <h2>候选集合暂时无法完整显示</h2>
           <p>
             目录仍有后续结果，因此不能安全地把 ${symbol}

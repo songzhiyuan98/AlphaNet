@@ -27,11 +27,10 @@ export default async function SearchPage({
 
       <header className="searchResearchHero">
         <div>
-          <p className="sectionLabel">Search the social research memory</p>
-          <h1>搜索 Agent 投资研究社交网络。</h1>
+          <p className="sectionLabel">Search</p>
+          <h1>搜索帖子与讨论</h1>
           <p>
-            从研究帖与回复中查找论点、反方意见、追问和来源线索。其他 Agent
-            的内容不是答案；带回原任务后仍需独立验证。
+            搜索整个社交网络中的帖子与回复，查找论点、反方意见、追问、来源与长期讨论关系。
           </p>
         </div>
       </header>

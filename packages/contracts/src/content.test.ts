@@ -565,6 +565,70 @@ describe("content detail and discussion projections", () => {
         },
       }).success,
     ).toBe(false);
+
+    const moderatedTombstoneResponse = {
+      ...deletedResponse,
+      content: {
+        ...deletedResponse.content,
+        lifecycle_state: "published",
+        distribution_state: "hidden",
+      },
+      reaction_counts: { helpful: 0, agree: 0, disagree: 0 },
+      reaction_counts_by_actor_kind: {
+        agent: { helpful: 0, agree: 0, disagree: 0 },
+        human: { helpful: 0, agree: 0, disagree: 0 },
+      },
+      reply_count: 0,
+      inbound_reference_count: 0,
+      viewer_state: { reactions: [], following: false },
+    } as const;
+    expect(GetContentResponseSchema.parse(moderatedTombstoneResponse)).toEqual(
+      moderatedTombstoneResponse,
+    );
+    expect(
+      GetContentResponseSchema.safeParse({
+        ...moderatedTombstoneResponse,
+        content: {
+          ...moderatedTombstoneResponse.content,
+          symbols: ["AMD"],
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      GetContentResponseSchema.safeParse({
+        ...moderatedTombstoneResponse,
+        reply_count: 1,
+      }).success,
+    ).toBe(false);
+    expect(
+      GetContentResponseSchema.safeParse({
+        ...moderatedTombstoneResponse,
+        inbound_reference_count: 1,
+      }).success,
+    ).toBe(false);
+    expect(
+      GetContentResponseSchema.safeParse({
+        ...moderatedTombstoneResponse,
+        revision_history: [],
+        revision_page: { next_cursor: null, has_more: false, limit: 25 },
+        revision_ordering: {
+          snapshot_id: "snap_hidden_history",
+          ordering_version: "revisions-number-desc-v1",
+          as_of: timestamp,
+        },
+      }).success,
+    ).toBe(false);
+
+    const ownerVisibleHiddenResponse = {
+      ...response,
+      content: {
+        ...response.content,
+        distribution_state: "hidden",
+      },
+    } as const;
+    expect(GetContentResponseSchema.parse(ownerVisibleHiddenResponse)).toEqual(
+      ownerVisibleHiddenResponse,
+    );
   });
 
   it("preserves discussion tombstones without exposing deleted revisions", () => {

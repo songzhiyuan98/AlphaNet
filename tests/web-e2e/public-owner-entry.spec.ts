@@ -139,7 +139,7 @@ test("the protected Owner workspace compiles and fails closed without a session"
   expect(response?.status()).toBe(200);
   await expect(page).toHaveURL(/\/(?:home|login)(?:[?/]|$)/u);
   await expect(
-    page.getByRole("heading", { name: /控制面暂时不可用|欢迎回来/u }),
+    page.getByRole("heading", { name: /控制面暂时不可用|登录 AlphaNet/u }),
   ).toBeVisible();
 });
 
@@ -150,7 +150,9 @@ test("the public investment-research social-network directory renders contract-v
 
   expect(response?.status()).toBe(200);
   await expect(page.getByRole("heading", { name: "Market Structure Lab" })).toBeVisible();
-  await expect(page.getByText(/发布调研、相互追问、反驳并补充来源/u)).toBeVisible();
+  await expect(
+    page.getByText(/Agent 以公开身份发帖、追问、反驳并补充来源/u),
+  ).toBeVisible();
   await expect(page.getByRole("link", { exact: true, name: "社区" })).toBeVisible();
 
   await page.getByRole("link", { name: "下一页社区" }).click();
@@ -216,7 +218,7 @@ test("public Content Search keeps the research question in a credential-free POS
   expect(page.url()).not.toContain(encodeURIComponent(normalizedQuestion));
   await expect(page.getByRole("heading", { name: postTitle })).toBeVisible();
   await expect(page.getByText("本页 1 项匹配")).toBeVisible();
-  await expect(page.getByText("待独立验证的来源")).toBeVisible();
+  await expect(page.getByText("帖子附带来源")).toBeVisible();
 });
 
 test("an expired directory cursor recovers through a first-page retry", async ({
@@ -269,9 +271,7 @@ test("the latest social-network feed renders the strict global Content query", a
   const response = await page.goto("/latest");
 
   expect(response?.status()).toBe(200);
-  await expect(
-    page.getByRole("heading", { name: "Agent 投资研究社交网络的最新动态。" }),
-  ).toBeVisible();
+  await expect(page.getByRole("heading", { name: "最新帖子与讨论" })).toBeVisible();
   await expect(
     page.getByRole("heading", {
       name: "E2EFIX 虚构公司利润率假设（仅用于 E2E 测试）",
@@ -336,7 +336,7 @@ test("a public research post preserves sources, social discussion, and discussio
     page.getByText("社交信号只描述互动，不等于事实核验、结论正确或投资建议。", {
       exact: true,
     }),
-  ).toBeVisible();
+  ).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "追问、反驳与补充" })).toBeVisible();
   await expect(page.getByText(/E2E 反方夹具/u)).toBeVisible();
 
@@ -416,18 +416,14 @@ test("an Owner can reach open registration and receives client-side validation",
 }) => {
   await page.goto("/");
 
-  await expect(
-    page.getByRole("heading", { name: /Investment research becomes social/u }),
-  ).toBeVisible();
-  await expect(page.getByText(/Agent 投资研究社交网络 · Agent-first/u)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Welcome to AlphaNet" })).toBeVisible();
+  await expect(page.getByText("Agent 投资研究社交网络", { exact: true })).toBeVisible();
   await expect(page.getByText("Available now · 当前 Agent 接入入口")).toBeVisible();
   await expect(page.getByText("Planned · 后续开放")).toBeVisible();
   await expect(page.getByText("Planned · 后续工作流脚手架")).toBeVisible();
-  await page.getByRole("link", { name: /开放注册 · Create an account/ }).click();
+  await page.getByRole("link", { name: "开放注册" }).click();
 
-  await expect(
-    page.getByRole("heading", { name: "开始构建你的 Agent 网络" }),
-  ).toBeVisible();
+  await expect(page.getByRole("heading", { name: "创建账户" })).toBeVisible();
   await page.getByLabel("显示名称").fill("AlphaNet E2E");
   await page.getByLabel("邮箱").fill("owner@example.test");
   await page.locator('input[name="password"]').fill("A-secure-password-2026!");
@@ -444,7 +440,7 @@ test("the public Owner entry stays usable at a mobile viewport", async ({ page }
   await page.setViewportSize({ height: 844, width: 390 });
   await page.goto("/login");
 
-  await expect(page.getByRole("heading", { name: "欢迎回来" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "登录 AlphaNet" })).toBeVisible();
   await expect(page.getByLabel("邮箱")).toBeVisible();
   await expect(page.locator('input[name="password"]')).toBeVisible();
   await expect(page.getByRole("button", { name: "登录" })).toBeVisible();

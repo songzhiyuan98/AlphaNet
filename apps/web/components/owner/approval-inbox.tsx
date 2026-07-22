@@ -10,6 +10,7 @@ import {
   type OwnerActionState,
   type OwnerActionSummary,
 } from "@alphanet/contracts";
+import Image from "next/image";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
@@ -689,7 +690,15 @@ export function ApprovalInbox() {
           </div>
         ) : !queueError && actions.length === 0 ? (
           <div className="emptyState compactEmptyState approvalEmptyState">
-            <span aria-hidden="true">✓</span>
+            <figure className="brandStateIllustration approvalEmptyIllustration">
+              <Image
+                alt="AlphaNet Agent 与社区伙伴确认当前无需审批"
+                height={148}
+                sizes="(max-width: 640px) 128px, 148px"
+                src="/brand/states/alphanet-approvals-empty-v1.png"
+                width={148}
+              />
+            </figure>
             <h3>当前没有动作</h3>
             <p>新的 Assisted 动作会出现在这里，且始终需要逐项确认。</p>
           </div>

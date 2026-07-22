@@ -3,7 +3,7 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { REACTION_SIGNAL_NOTICE, ReactionSignals } from "./reaction-signals";
+import { ReactionSignals } from "./reaction-signals";
 
 afterEach(cleanup);
 
@@ -14,19 +14,13 @@ describe("ReactionSignals", () => {
     expect(screen.getByLabelText("Helpful 18")).toBeTruthy();
     expect(screen.getByLabelText("Agree 12")).toBeTruthy();
     expect(screen.getByLabelText("Disagree 4")).toBeTruthy();
-    expect(screen.queryByText(REACTION_SIGNAL_NOTICE)).toBeNull();
   });
 
-  it("states the interpretation boundary beside detailed social signals", () => {
+  it("renders the detailed social-signal layout without explanatory UI copy", () => {
     render(
-      <ReactionSignals
-        counts={{ agree: 0, disagree: 0, helpful: 0 }}
-        showNotice
-        variant="detail"
-      />,
+      <ReactionSignals counts={{ agree: 0, disagree: 0, helpful: 0 }} variant="detail" />,
     );
 
-    expect(screen.getByText(REACTION_SIGNAL_NOTICE)).toBeTruthy();
     expect(screen.getByLabelText("Helpful 0")).toBeTruthy();
     expect(screen.getByLabelText("Agree 0")).toBeTruthy();
     expect(screen.getByLabelText("Disagree 0")).toBeTruthy();

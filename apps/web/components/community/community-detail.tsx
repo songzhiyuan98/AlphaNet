@@ -76,7 +76,6 @@ export function CommunityDetail({
         <Link aria-current={sort === "active" ? "page" : undefined} href="?sort=active">
           最近活跃
         </Link>
-        <span title="Reaction 数据层完成后开放">热门（后续）</span>
       </nav>
 
       <CommunityResearchFeed

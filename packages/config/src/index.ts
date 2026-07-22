@@ -29,6 +29,19 @@ const BooleanStringSchema = z
   .enum(["true", "false"])
   .transform((value) => value === "true");
 
+const AdminOidcSigningAlgorithmSchema = z.enum([
+  "RS256",
+  "RS384",
+  "RS512",
+  "PS256",
+  "PS384",
+  "PS512",
+  "ES256",
+  "ES384",
+  "ES512",
+  "EdDSA",
+]);
+
 function isStaticHttpOrigin(value: string): boolean {
   try {
     const url = new URL(value);
@@ -106,6 +119,96 @@ const OptionalNonEmptyStringSchema = (maximumLength: number) =>
     (value) => (value === "" ? undefined : value),
     z.string().min(1).max(maximumLength).optional(),
   );
+
+const AdminOidcAlgorithmsSchema = z
+  .string()
+  .default("RS256")
+  .transform((value) => parseCommaSeparated(value))
+  .pipe(
+    z
+      .array(AdminOidcSigningAlgorithmSchema)
+      .min(1)
+      .max(10)
+      .refine((value) => new Set(value).size === value.length, {
+        message: "must not contain duplicate signing algorithms",
+      }),
+  );
+
+const AdminOidcAcrValuesSchema = z
+  .string()
+  .default("")
+  .transform((value) => parseCommaSeparated(value))
+  .pipe(
+    z
+      .array(
+        z
+          .string()
+          .min(1)
+          .max(200)
+          .regex(/^[\x21-\x7e]+$/, "must contain only visible ASCII without spaces"),
+      )
+      .max(20)
+      .refine((value) => new Set(value).size === value.length, {
+        message: "must not contain duplicate acr values",
+      }),
+  );
+
+const AdminOidcAudienceSchema = z
+  .string()
+  .min(1)
+  .max(200)
+  .regex(/^[\x21-\x7e]+$/, "must contain only visible ASCII without spaces");
+
+function isCanonicalOidcUrl(value: string, kind: "issuer" | "jwks"): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      (url.protocol === "http:" || url.protocol === "https:") &&
+      url.username === "" &&
+      url.password === "" &&
+      url.hash === "" &&
+      (kind !== "issuer" || url.search === "") &&
+      (url.protocol === "https:" || isLoopbackHostname(url.hostname))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
+}
+
+const AdminOidcIssuerSchema = z
+  .string()
+  .min(1)
+  .max(2_048)
+  .refine(
+    (value) => isCanonicalOidcUrl(value, "issuer"),
+    "must be an https OIDC issuer URL (or loopback http URL) without credentials, query, or fragment",
+  );
+
+const AdminOidcJwksUriSchema = z
+  .string()
+  .min(1)
+  .max(2_048)
+  .refine(
+    (value) => isCanonicalOidcUrl(value, "jwks"),
+    "must be an https JWKS URL (or loopback http URL) without credentials or fragment",
+  );
+
+const OptionalAdminOidcIssuerSchema = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  AdminOidcIssuerSchema.optional(),
+);
+const OptionalAdminOidcJwksUriSchema = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  AdminOidcJwksUriSchema.optional(),
+);
+const OptionalAdminOidcAudienceSchema = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  AdminOidcAudienceSchema.optional(),
+);
 
 const AuthSecretSchema = z
   .string()
@@ -239,6 +342,21 @@ const AgentCredentialEnvironmentFields = {
     .min(0)
     .max(86_400)
     .default(30),
+} satisfies z.ZodRawShape;
+
+const AdminApiEnvironmentFields = {
+  ADMIN_AUDIT_SUBJECT_DIGEST_KEY: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    PendingActionEncryptionKeySchema.optional(),
+  ),
+  ADMIN_API_ENABLED: BooleanStringSchema.default(false),
+  ADMIN_OIDC_ALLOWED_ACR_VALUES: AdminOidcAcrValuesSchema,
+  ADMIN_OIDC_ALLOWED_ALGORITHMS: AdminOidcAlgorithmsSchema,
+  ADMIN_OIDC_ALLOW_AMR_MFA: BooleanStringSchema.default(true),
+  ADMIN_OIDC_AUDIENCE: OptionalAdminOidcAudienceSchema,
+  ADMIN_OIDC_CLOCK_TOLERANCE_SECONDS: z.coerce.number().int().min(0).max(60).default(5),
+  ADMIN_OIDC_ISSUER: OptionalAdminOidcIssuerSchema,
+  ADMIN_OIDC_JWKS_URI: OptionalAdminOidcJwksUriSchema,
 } satisfies z.ZodRawShape;
 
 const PendingActionCryptoEnvironmentFields = {
@@ -448,6 +566,86 @@ function validateAuthEnvironment(
   }
 }
 
+type AdminApiEnvironmentValidationTarget = {
+  ADMIN_AUDIT_SUBJECT_DIGEST_KEY?: string | undefined;
+  ADMIN_API_ENABLED: boolean;
+  ADMIN_OIDC_ALLOWED_ACR_VALUES: string[];
+  ADMIN_OIDC_ALLOW_AMR_MFA: boolean;
+  ADMIN_OIDC_AUDIENCE?: string | undefined;
+  ADMIN_OIDC_ISSUER?: string | undefined;
+  ADMIN_OIDC_JWKS_URI?: string | undefined;
+  AGENT_API_KEY_PEPPER: string;
+  NODE_ENV: z.infer<typeof NodeEnvironmentSchema>;
+  PENDING_ACTION_ENCRYPTION_KEY: string;
+};
+
+function validateAdminApiEnvironment(
+  value: AdminApiEnvironmentValidationTarget,
+  context: z.RefinementCtx,
+): void {
+  const configuredTuple = [
+    value.ADMIN_OIDC_ISSUER,
+    value.ADMIN_OIDC_AUDIENCE,
+    value.ADMIN_OIDC_JWKS_URI,
+  ];
+  const configuredCount = configuredTuple.filter(Boolean).length;
+  if (configuredCount !== 0 && configuredCount !== configuredTuple.length) {
+    context.addIssue({
+      code: "custom",
+      message:
+        "ADMIN_OIDC_ISSUER, ADMIN_OIDC_AUDIENCE, and ADMIN_OIDC_JWKS_URI must be configured together",
+      path: ["ADMIN_OIDC_ISSUER"],
+    });
+  }
+  if (value.ADMIN_API_ENABLED && configuredCount !== configuredTuple.length) {
+    context.addIssue({
+      code: "custom",
+      message: "the complete workforce OIDC configuration is required when enabled",
+      path: ["ADMIN_API_ENABLED"],
+    });
+  }
+  if (value.ADMIN_API_ENABLED && value.ADMIN_AUDIT_SUBJECT_DIGEST_KEY === undefined) {
+    context.addIssue({
+      code: "custom",
+      message: "an independent Admin audit subject digest key is required when enabled",
+      path: ["ADMIN_AUDIT_SUBJECT_DIGEST_KEY"],
+    });
+  }
+  if (
+    value.ADMIN_AUDIT_SUBJECT_DIGEST_KEY !== undefined &&
+    (value.ADMIN_AUDIT_SUBJECT_DIGEST_KEY === value.PENDING_ACTION_ENCRYPTION_KEY ||
+      value.ADMIN_AUDIT_SUBJECT_DIGEST_KEY === value.AGENT_API_KEY_PEPPER)
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "must be independent from Agent and PendingAction secrets",
+      path: ["ADMIN_AUDIT_SUBJECT_DIGEST_KEY"],
+    });
+  }
+  if (
+    !value.ADMIN_OIDC_ALLOW_AMR_MFA &&
+    value.ADMIN_OIDC_ALLOWED_ACR_VALUES.length === 0
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "at least one MFA assurance mechanism must be enabled",
+      path: ["ADMIN_OIDC_ALLOW_AMR_MFA"],
+    });
+  }
+  if (
+    value.NODE_ENV === "production" &&
+    configuredCount === configuredTuple.length &&
+    (new URL(value.ADMIN_OIDC_ISSUER!).protocol !== "https:" ||
+      new URL(value.ADMIN_OIDC_JWKS_URI!).protocol !== "https:")
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "workforce OIDC issuer and JWKS URLs must use https in production",
+      path: ["ADMIN_OIDC_ISSUER"],
+    });
+  }
+}
+
 function validateProductionRedisTransport(
   value: { NODE_ENV: z.infer<typeof NodeEnvironmentSchema>; REDIS_URL: string },
   context: z.RefinementCtx,
@@ -497,6 +695,7 @@ export type AuthEnvironment = z.infer<typeof AuthEnvironmentSchema>;
 
 export const ApiEnvironmentSchema = CommonServiceEnvironmentSchema.extend({
   ...AuthEnvironmentFields,
+  ...AdminApiEnvironmentFields,
   ...AgentCredentialEnvironmentFields,
   ...PendingActionCryptoEnvironmentFields,
   ...SearchEmbeddingEnvironmentFields,
@@ -513,6 +712,7 @@ export const ApiEnvironmentSchema = CommonServiceEnvironmentSchema.extend({
   CORS_ORIGINS: z.string().default("http://localhost:3000"),
 }).superRefine((value, context) => {
   validateAuthEnvironment(value, context);
+  validateAdminApiEnvironment(value, context);
   validatePendingActionCryptoEnvironment(value, context);
   validateProductionPostgresTransport(value, context);
   validateProductionRedisTransport(value, context);

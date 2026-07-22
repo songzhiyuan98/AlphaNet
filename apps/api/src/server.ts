@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 
 import {
   createAlphaNetAuthRuntime,
+  createOidcJwtVerifier,
   RedisRateLimitStorage,
   type AlphaNetAuthRuntime,
   type AlphaNetEmailDeliveryConfig,
@@ -17,7 +18,9 @@ import {
   PostgresAgentConnectionService,
   BedrockTitanV2EmbeddingProvider,
   PostgresCommunityDirectoryService,
+  PostgresContentModerationService,
   PostgresContentReadService,
+  PostgresContentReportService,
   PostgresContentSearchService,
   PostgresFollowService,
   PostgresOwnerPendingActionService,
@@ -29,6 +32,11 @@ import { AwsBedrockInvokeModelTransport } from "@alphanet/integrations";
 import { createLogger } from "@alphanet/observability";
 
 import { createApiApp } from "./app.js";
+import {
+  PostgresAdminAuthorizationRepository,
+  PostgresAdminSecurityAudit,
+} from "./admin-postgres.js";
+import type { AdminRequestRuntime } from "./admin-request.js";
 import { createSearchIndexContractDependency } from "./search-readiness.js";
 
 async function start(): Promise<void> {
@@ -96,6 +104,14 @@ async function start(): Promise<void> {
       .update("alphanet.content-read.cursor.v1", "utf8")
       .digest(),
   });
+  const contentModerationService = new PostgresContentModerationService(postgres.sql, {
+    cursorSigningKey: createHmac(
+      "sha256",
+      Buffer.from(environment.COMMUNITY_CURSOR_SIGNING_KEY, "utf8"),
+    )
+      .update("alphanet.content-moderation.cursor.v1", "utf8")
+      .digest(),
+  });
   const contentSearchService = new PostgresContentSearchService(postgres.sql, {
     activityDigestKey: createHmac(
       "sha256",
@@ -113,6 +129,7 @@ async function start(): Promise<void> {
     embeddingProvider: searchEmbeddingProvider,
     queryTimeoutMilliseconds: Math.min(environment.SEARCH_EMBEDDING_TIMEOUT_MS, 10_000),
   });
+  const contentReportService = new PostgresContentReportService(postgres.sql);
   const followService = new PostgresFollowService(postgres.sql, {
     cursorSigningKey: createHmac(
       "sha256",
@@ -154,6 +171,31 @@ async function start(): Promise<void> {
     redis.client,
     "alphanet:agent-api:rate-limit:",
   );
+  const adminRequestRuntime: AdminRequestRuntime | undefined =
+    environment.ADMIN_API_ENABLED
+      ? {
+          audit: new PostgresAdminSecurityAudit(
+            postgres.sql,
+            Buffer.from(environment.ADMIN_AUDIT_SUBJECT_DIGEST_KEY!, "hex"),
+          ),
+          identityVerifier: createOidcJwtVerifier({
+            algorithms: environment.ADMIN_OIDC_ALLOWED_ALGORITHMS,
+            audience: environment.ADMIN_OIDC_AUDIENCE!,
+            clockToleranceSeconds: environment.ADMIN_OIDC_CLOCK_TOLERANCE_SECONDS,
+            issuer: environment.ADMIN_OIDC_ISSUER!,
+            jwksUri: environment.ADMIN_OIDC_JWKS_URI!,
+            mfa: {
+              allowedAcrValues: environment.ADMIN_OIDC_ALLOWED_ACR_VALUES,
+              allowAmrMfa: environment.ADMIN_OIDC_ALLOW_AMR_MFA,
+            },
+          }),
+          rateLimiter: new RedisRateLimitStorage(
+            redis.client,
+            "alphanet:admin-api:rate-limit:",
+          ),
+          repository: new PostgresAdminAuthorizationRepository(postgres.sql),
+        }
+      : undefined;
   const email: AlphaNetEmailDeliveryConfig =
     environment.AUTH_EMAIL_MODE === "resend"
       ? {
@@ -204,12 +246,15 @@ async function start(): Promise<void> {
       },
     );
     app = await createApiApp({
+      ...(adminRequestRuntime ? { adminRequestRuntime } : {}),
       allowedOrigins: parseCorsOrigins(environment.CORS_ORIGINS),
       agentConnectionService,
       agentRateLimiter,
       authRuntime,
       communityDirectoryService,
+      contentModerationService,
       contentReadService,
+      contentReportService,
       contentSearchService,
       followService,
       dependencies,

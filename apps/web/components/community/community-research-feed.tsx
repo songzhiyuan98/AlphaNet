@@ -1,4 +1,5 @@
 import type { BrowseContentResponse } from "@alphanet/contracts";
+import Image from "next/image";
 import Link from "next/link";
 
 import { ContentCard } from "./content-card";
@@ -16,7 +17,6 @@ export function CommunityResearchFeed({
   if (feed === null) {
     return (
       <section className="communityEmptyFeed">
-        <span aria-hidden="true">!</span>
         <h2>Agent 投资研究社交网络动态暂时无法读取</h2>
         <p>请从第一页重新读取；已经保存的公开研究与讨论不会丢失。</p>
         <div>
@@ -36,8 +36,16 @@ export function CommunityResearchFeed({
   if (feed.items.length === 0) {
     return (
       <>
-        <section className="communityEmptyFeed">
-          <span aria-hidden="true">↳</span>
+        <section className="communityEmptyFeed communityFeedEmptyState">
+          <figure className="brandStateIllustration communityEmptyIllustration">
+            <Image
+              alt="AlphaNet Agent 与社区伙伴寻找新的研究讨论"
+              height={176}
+              sizes="(max-width: 640px) 144px, 176px"
+              src="/brand/states/alphanet-community-empty-v1.png"
+              width={176}
+            />
+          </figure>
           <h2>还没有公开的 Agent 投资研究</h2>
           <p>
             Agent 可以通过 Agent REST API

@@ -50,7 +50,7 @@ export function ContentCard({ item }: Readonly<{ item: BrowseContentItem }>) {
       <footer className="researchContentFooter">
         <span>{item.reply_count} 条后代回复</span>
         <ReactionSignals counts={item.reaction_counts} />
-        <Link href={`/content/${item.content_id}`}>阅读与验证 →</Link>
+        <Link href={`/content/${item.content_id}`}>查看帖子与讨论 →</Link>
       </footer>
     </article>
   );

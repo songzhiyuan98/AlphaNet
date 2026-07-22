@@ -25,6 +25,7 @@ const baseEnvironment = {
   OUTBOX_REPLAY_FROM: "2026-07-20T00:00:00.000Z",
   REDIS_URL: "redis://localhost:6379",
 };
+const adminAuditSubjectDigestKey = "1".repeat(64);
 
 describe("environment parsing", () => {
   it("coerces bounded numeric values and applies safe defaults", () => {
@@ -117,6 +118,15 @@ describe("environment parsing", () => {
   it("loads bounded Agent credential defaults", () => {
     const result = loadApiEnvironment(baseEnvironment);
 
+    expect(result.ADMIN_API_ENABLED).toBe(false);
+    expect(result.ADMIN_AUDIT_SUBJECT_DIGEST_KEY).toBeUndefined();
+    expect(result.ADMIN_OIDC_ISSUER).toBeUndefined();
+    expect(result.ADMIN_OIDC_AUDIENCE).toBeUndefined();
+    expect(result.ADMIN_OIDC_JWKS_URI).toBeUndefined();
+    expect(result.ADMIN_OIDC_ALLOWED_ALGORITHMS).toEqual(["RS256"]);
+    expect(result.ADMIN_OIDC_ALLOWED_ACR_VALUES).toEqual([]);
+    expect(result.ADMIN_OIDC_ALLOW_AMR_MFA).toBe(true);
+    expect(result.ADMIN_OIDC_CLOCK_TOLERANCE_SECONDS).toBe(5);
     expect(result.AGENT_API_AUDIENCE).toBe("urn:alphanet:api:v1");
     expect(result.AGENT_API_KEY_PEPPER_VERSION).toBe(1);
     expect(result.AGENT_API_KEY_PREVIOUS_PEPPERS).toEqual({});
@@ -137,6 +147,119 @@ describe("environment parsing", () => {
     expect(result.SEARCH_EMBEDDING_MODEL_ID).toBe("amazon.titan-embed-text-v2:0");
     expect(result.SEARCH_EMBEDDING_DIMENSIONS).toBe(512);
     expect(result.SEARCH_EMBEDDING_TIMEOUT_MS).toBe(5_000);
+  });
+
+  it("enables the Admin API only with an atomic strong workforce OIDC configuration", () => {
+    const result = loadApiEnvironment({
+      ...baseEnvironment,
+      ADMIN_AUDIT_SUBJECT_DIGEST_KEY: adminAuditSubjectDigestKey,
+      ADMIN_API_ENABLED: "true",
+      ADMIN_OIDC_ALLOWED_ACR_VALUES:
+        "urn:alphanet:assurance:mfa,urn:alphanet:assurance:phishing-resistant",
+      ADMIN_OIDC_ALLOWED_ALGORITHMS: "RS256,ES256",
+      ADMIN_OIDC_ALLOW_AMR_MFA: "false",
+      ADMIN_OIDC_AUDIENCE: "urn:alphanet:admin-api",
+      ADMIN_OIDC_CLOCK_TOLERANCE_SECONDS: "10",
+      ADMIN_OIDC_ISSUER: "https://login.alphanet.example/workforce",
+      ADMIN_OIDC_JWKS_URI:
+        "https://login.alphanet.example/workforce/.well-known/jwks.json",
+    });
+
+    expect(result.ADMIN_API_ENABLED).toBe(true);
+    expect(result.ADMIN_OIDC_ALLOWED_ALGORITHMS).toEqual(["RS256", "ES256"]);
+    expect(result.ADMIN_OIDC_ALLOWED_ACR_VALUES).toEqual([
+      "urn:alphanet:assurance:mfa",
+      "urn:alphanet:assurance:phishing-resistant",
+    ]);
+    expect(result.ADMIN_OIDC_ALLOW_AMR_MFA).toBe(false);
+    expect(result.ADMIN_OIDC_CLOCK_TOLERANCE_SECONDS).toBe(10);
+  });
+
+  it("rejects an enabled, partial, weak, or symmetric Admin OIDC configuration", () => {
+    expect(() =>
+      loadApiEnvironment({
+        ...baseEnvironment,
+        ADMIN_API_ENABLED: "true",
+      }),
+    ).toThrow(EnvironmentValidationError);
+
+    expect(() =>
+      loadApiEnvironment({
+        ...baseEnvironment,
+        ADMIN_API_ENABLED: "true",
+        ADMIN_OIDC_AUDIENCE: "urn:alphanet:admin-api",
+        ADMIN_OIDC_ISSUER: "https://login.alphanet.example/workforce",
+        ADMIN_OIDC_JWKS_URI: "https://login.alphanet.example/jwks.json",
+      }),
+    ).toThrow(EnvironmentValidationError);
+
+    expect(() =>
+      loadApiEnvironment({
+        ...baseEnvironment,
+        ADMIN_AUDIT_SUBJECT_DIGEST_KEY:
+          "8f7d9c1e0b2a4d6f91c3e5a7b9d1f20436587a9cbed0f123456789abcdef0123",
+        ADMIN_API_ENABLED: "true",
+        ADMIN_OIDC_AUDIENCE: "urn:alphanet:admin-api",
+        ADMIN_OIDC_ISSUER: "https://login.alphanet.example/workforce",
+        ADMIN_OIDC_JWKS_URI: "https://login.alphanet.example/jwks.json",
+      }),
+    ).toThrow(EnvironmentValidationError);
+
+    expect(() =>
+      loadApiEnvironment({
+        ...baseEnvironment,
+        ADMIN_AUDIT_SUBJECT_DIGEST_KEY: adminAuditSubjectDigestKey,
+        ADMIN_OIDC_ISSUER: "https://login.alphanet.example/workforce",
+      }),
+    ).toThrow(EnvironmentValidationError);
+
+    expect(() =>
+      loadApiEnvironment({
+        ...baseEnvironment,
+        ADMIN_AUDIT_SUBJECT_DIGEST_KEY: adminAuditSubjectDigestKey,
+        ADMIN_API_ENABLED: "true",
+        ADMIN_OIDC_ALLOWED_ACR_VALUES: "",
+        ADMIN_OIDC_ALLOW_AMR_MFA: "false",
+        ADMIN_OIDC_AUDIENCE: "urn:alphanet:admin-api",
+        ADMIN_OIDC_ISSUER: "https://login.alphanet.example/workforce",
+        ADMIN_OIDC_JWKS_URI: "https://login.alphanet.example/jwks.json",
+      }),
+    ).toThrow(EnvironmentValidationError);
+
+    expect(() =>
+      loadApiEnvironment({
+        ...baseEnvironment,
+        ADMIN_AUDIT_SUBJECT_DIGEST_KEY: adminAuditSubjectDigestKey,
+        ADMIN_API_ENABLED: "true",
+        ADMIN_OIDC_ALLOWED_ALGORITHMS: "HS256",
+        ADMIN_OIDC_AUDIENCE: "urn:alphanet:admin-api",
+        ADMIN_OIDC_ISSUER: "https://login.alphanet.example/workforce",
+        ADMIN_OIDC_JWKS_URI: "https://login.alphanet.example/jwks.json",
+      }),
+    ).toThrow(EnvironmentValidationError);
+  });
+
+  it("allows only loopback cleartext OIDC in local development", () => {
+    const local = loadApiEnvironment({
+      ...baseEnvironment,
+      ADMIN_AUDIT_SUBJECT_DIGEST_KEY: adminAuditSubjectDigestKey,
+      ADMIN_API_ENABLED: "true",
+      ADMIN_OIDC_AUDIENCE: "urn:alphanet:admin-api",
+      ADMIN_OIDC_ISSUER: "http://127.0.0.1:5556/workforce",
+      ADMIN_OIDC_JWKS_URI: "http://127.0.0.1:5556/jwks.json",
+    });
+    expect(local.ADMIN_OIDC_ISSUER).toBe("http://127.0.0.1:5556/workforce");
+
+    expect(() =>
+      loadApiEnvironment({
+        ...baseEnvironment,
+        ADMIN_AUDIT_SUBJECT_DIGEST_KEY: adminAuditSubjectDigestKey,
+        ADMIN_API_ENABLED: "true",
+        ADMIN_OIDC_AUDIENCE: "urn:alphanet:admin-api",
+        ADMIN_OIDC_ISSUER: "http://idp.internal/workforce",
+        ADMIN_OIDC_JWKS_URI: "http://idp.internal/jwks.json",
+      }),
+    ).toThrow(EnvironmentValidationError);
   });
 
   it("loads bounded Bedrock Search configuration and rejects unsupported dimensions", () => {
