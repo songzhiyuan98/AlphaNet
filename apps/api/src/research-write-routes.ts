@@ -9,9 +9,11 @@ import {
   UpdateContentWriteResultSchema,
   type CreatePostRequest,
   type CreatePostWriteResult,
+  type DeleteContentRequest,
   type DeleteContentWriteResult,
   type ReplyToContentRequest,
   type ReplyToContentWriteResult,
+  type UpdateContentRequest,
   type UpdateContentWriteResult,
   type V1ErrorDetail,
 } from "@alphanet/contracts";
@@ -36,6 +38,14 @@ export interface ResearchWriteRouteOptions {
   rateLimiter?: AgentRequestRateLimiter | undefined;
   resolveClientIp?: ((request: FastifyRequest) => string) | undefined;
   service: ResearchWriteService;
+}
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
+function canonicalResearchContentId(value: string): string {
+  const normalized = value.normalize("NFC");
+  return UUID_PATTERN.test(normalized) ? normalized.toLowerCase() : normalized;
 }
 
 function validationFailed(request: FastifyRequest, reply: FastifyReply): FastifyReply {
@@ -212,9 +222,10 @@ function serializeUpdateContent(
   expectedVersion: number,
 ): UpdateContentWriteResult | null {
   if (outcome.operation !== "update_content") return null;
+  const canonicalContentId = canonicalResearchContentId(expectedContentId);
   if (
     (outcome.result !== null &&
-      (outcome.result.contentId !== expectedContentId ||
+      (outcome.result.contentId !== canonicalContentId ||
         outcome.result.resourceVersion !== expectedVersion + 1)) ||
     (outcome.pendingAction !== null &&
       (outcome.pendingAction.operation !== "update_content" ||
@@ -251,10 +262,11 @@ function serializeDeleteContent(
   expectedVersion: number,
 ): DeleteContentWriteResult | null {
   if (outcome.operation !== "delete_content") return null;
+  const canonicalContentId = canonicalResearchContentId(expectedContentId);
   if (
     (outcome.result !== null &&
       (!("lifecycleState" in outcome.result) ||
-        outcome.result.contentId !== expectedContentId ||
+        outcome.result.contentId !== canonicalContentId ||
         outcome.result.resourceVersion !== expectedVersion + 1)) ||
     (outcome.pendingAction !== null &&
       (outcome.pendingAction.operation !== "delete_content" ||
@@ -435,6 +447,108 @@ export async function handleAgentReplyToContent(
   }
 }
 
+export async function handleAgentUpdateContent(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  service: Pick<ResearchWriteService, "updateContent">,
+  context: Parameters<ResearchWriteService["updateContent"]>[0],
+  input: UpdateContentRequest,
+  channel: "mcp" | "rest",
+  actionLocationPrefix = "/v1/actions",
+): Promise<unknown> {
+  const patch = input.patch;
+  try {
+    const outcome = await service.updateContent(
+      context,
+      {
+        contentId: input.content_id,
+        expectedVersion: input.expected_version,
+        idempotencyKey: input.idempotency_key,
+        patch: {
+          ...(patch.title === undefined ? {} : { title: patch.title }),
+          ...(patch.body_markdown === undefined
+            ? {}
+            : { bodyMarkdown: patch.body_markdown }),
+          ...(patch.source_links === undefined
+            ? {}
+            : { sourceLinks: patch.source_links }),
+          ...(patch.references === undefined
+            ? {}
+            : {
+                references: patch.references.map((reference) => ({
+                  targetContentId: reference.target_content_id,
+                  relationType: reference.relation_type,
+                })),
+              }),
+          ...(patch.additional_community_ids === undefined
+            ? {}
+            : { additionalCommunityIds: patch.additional_community_ids }),
+          ...(patch.symbols === undefined ? {} : { symbols: patch.symbols }),
+          ...(patch.topics === undefined ? {} : { topics: patch.topics }),
+        },
+        ...(input.edit_summary === undefined ? {} : { editSummary: input.edit_summary }),
+      },
+      { channel, requestId: request.id },
+    );
+    const response = serializeUpdateContent(
+      request,
+      outcome,
+      input.content_id,
+      input.expected_version,
+    );
+    if (!response) {
+      request.log.error(
+        { operation: outcome.operation, status: outcome.status },
+        "Update-content result violated its Agent response contract",
+      );
+      return sendWriteError(request, reply, new Error("projection invalid"));
+    }
+    return sendOutcome(reply, outcome, response, actionLocationPrefix);
+  } catch (error) {
+    return sendWriteError(request, reply, error);
+  }
+}
+
+export async function handleAgentDeleteContent(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  service: Pick<ResearchWriteService, "deleteContent">,
+  context: Parameters<ResearchWriteService["deleteContent"]>[0],
+  input: DeleteContentRequest,
+  channel: "mcp" | "rest",
+  actionLocationPrefix = "/v1/actions",
+): Promise<unknown> {
+  try {
+    const outcome = await service.deleteContent(
+      context,
+      {
+        contentId: input.content_id,
+        expectedVersion: input.expected_version,
+        mode: input.mode,
+        ...(input.reason === undefined ? {} : { reason: input.reason }),
+        idempotencyKey: input.idempotency_key,
+      },
+      { channel, requestId: request.id },
+    );
+    const response = serializeDeleteContent(
+      request,
+      outcome,
+      input.content_id,
+      input.expected_version,
+    );
+    if (!response) {
+      request.log.error(
+        { operation: outcome.operation, status: outcome.status },
+        "Delete-content result violated its Agent response contract",
+      );
+      return sendWriteError(request, reply, new Error("projection invalid"));
+    }
+    return sendOutcome(reply, outcome, response, actionLocationPrefix);
+  } catch (error) {
+    return sendWriteError(request, reply, error);
+  }
+}
+
 function statusForOutcomeError(code: ResearchWriteErrorCode | undefined): number {
   switch (code) {
     case "ACTION_CANCELLED":
@@ -583,60 +697,14 @@ export function registerResearchWriteRoutes(
         idempotency_key: key,
       });
       if (!body.success) return validationFailed(request, reply);
-
-      const patch = body.data.patch;
-      try {
-        const outcome = await options.service.updateContent(
-          authorization.context,
-          {
-            contentId: body.data.content_id,
-            expectedVersion: body.data.expected_version,
-            idempotencyKey: body.data.idempotency_key,
-            patch: {
-              ...(patch.title === undefined ? {} : { title: patch.title }),
-              ...(patch.body_markdown === undefined
-                ? {}
-                : { bodyMarkdown: patch.body_markdown }),
-              ...(patch.source_links === undefined
-                ? {}
-                : { sourceLinks: patch.source_links }),
-              ...(patch.references === undefined
-                ? {}
-                : {
-                    references: patch.references.map((reference) => ({
-                      targetContentId: reference.target_content_id,
-                      relationType: reference.relation_type,
-                    })),
-                  }),
-              ...(patch.additional_community_ids === undefined
-                ? {}
-                : { additionalCommunityIds: patch.additional_community_ids }),
-              ...(patch.symbols === undefined ? {} : { symbols: patch.symbols }),
-              ...(patch.topics === undefined ? {} : { topics: patch.topics }),
-            },
-            ...(body.data.edit_summary === undefined
-              ? {}
-              : { editSummary: body.data.edit_summary }),
-          },
-          { channel: "rest", requestId: request.id },
-        );
-        const response = serializeUpdateContent(
-          request,
-          outcome,
-          body.data.content_id,
-          body.data.expected_version,
-        );
-        if (!response) {
-          request.log.error(
-            { operation: outcome.operation, status: outcome.status },
-            "Update-content result violated its public response contract",
-          );
-          return sendWriteError(request, reply, new Error("projection invalid"));
-        }
-        return sendOutcome(reply, outcome, response);
-      } catch (error) {
-        return sendWriteError(request, reply, error);
-      }
+      return handleAgentUpdateContent(
+        request,
+        reply,
+        options.service,
+        authorization.context,
+        body.data,
+        "rest",
+      );
     },
   );
 
@@ -665,36 +733,14 @@ export function registerResearchWriteRoutes(
         idempotency_key: key,
       });
       if (!body.success) return validationFailed(request, reply);
-
-      try {
-        const outcome = await options.service.deleteContent(
-          authorization.context,
-          {
-            contentId: body.data.content_id,
-            expectedVersion: body.data.expected_version,
-            mode: body.data.mode,
-            ...(body.data.reason === undefined ? {} : { reason: body.data.reason }),
-            idempotencyKey: body.data.idempotency_key,
-          },
-          { channel: "rest", requestId: request.id },
-        );
-        const response = serializeDeleteContent(
-          request,
-          outcome,
-          body.data.content_id,
-          body.data.expected_version,
-        );
-        if (!response) {
-          request.log.error(
-            { operation: outcome.operation, status: outcome.status },
-            "Delete-content result violated its public response contract",
-          );
-          return sendWriteError(request, reply, new Error("projection invalid"));
-        }
-        return sendOutcome(reply, outcome, response);
-      } catch (error) {
-        return sendWriteError(request, reply, error);
-      }
+      return handleAgentDeleteContent(
+        request,
+        reply,
+        options.service,
+        authorization.context,
+        body.data,
+        "rest",
+      );
     },
   );
 }

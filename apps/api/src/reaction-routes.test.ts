@@ -301,6 +301,36 @@ describe("Reaction Agent route", () => {
     ]);
   });
 
+  it("accepts an uppercase UUID target when the domain returns its canonical lowercase ID", async () => {
+    const uppercaseContentId = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA";
+    const canonicalContentId = uppercaseContentId.toLowerCase();
+    const outcome = succeededOutcome();
+    outcome.result = { ...outcome.result!, contentId: canonicalContentId };
+    const { app, setReaction } = createApp({
+      setReaction: () => Promise.resolve(outcome),
+    });
+    const response = await app.inject({
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "idempotency-key": "reaction-uppercase-content-id-v1",
+      },
+      method: "PUT",
+      payload: { active: true },
+      url: `/v1/content/${uppercaseContentId}/reactions/helpful`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(SetReactionWriteResultSchema.parse(response.json())).toMatchObject({
+      result: { content_id: canonicalContentId },
+      status: "succeeded",
+    });
+    expect(setReaction).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ contentId: uppercaseContentId }),
+      expect.objectContaining({ channel: "rest" }),
+    );
+  });
+
   it("requires exactly one header key and rejects path/body authority forgery", async () => {
     const { app, setReaction } = createApp();
     const baseRequest = {

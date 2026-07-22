@@ -626,6 +626,66 @@ describe("Research write Agent routes", () => {
     expect(deleteContent.mock.calls[0]?.[2].requestId).toBeTypeOf("string");
   });
 
+  it("accepts uppercase UUID paths when update and delete results use canonical lowercase IDs", async () => {
+    const uppercaseContentId = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA";
+    const canonicalContentId = uppercaseContentId.toLowerCase();
+    const canonicalUpdate = updateOutcome();
+    canonicalUpdate.result = {
+      ...canonicalUpdate.result!,
+      contentId: canonicalContentId,
+    };
+    const canonicalDelete = deleteOutcome();
+    canonicalDelete.result = {
+      ...canonicalDelete.result!,
+      contentId: canonicalContentId,
+    };
+    const { app, deleteContent, updateContent } = createApp({
+      context: context({ tier: "autonomous" }),
+      deleteContent: () => Promise.resolve(canonicalDelete),
+      updateContent: () => Promise.resolve(canonicalUpdate),
+    });
+
+    const updateResponse = await app.inject({
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "idempotency-key": "update-uppercase-content-v2",
+        "if-match": '"2"',
+      },
+      method: "PATCH",
+      payload: { patch: { symbols: ["AMD"] } },
+      url: `/v1/content/${uppercaseContentId}`,
+    });
+    const deleteResponse = await app.inject({
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "idempotency-key": "delete-uppercase-content-v2",
+        "if-match": '"2"',
+      },
+      method: "DELETE",
+      payload: { mode: "soft" },
+      url: `/v1/content/${uppercaseContentId}`,
+    });
+
+    expect(updateResponse.statusCode).toBe(200);
+    expect(UpdateContentWriteResultSchema.parse(updateResponse.json())).toMatchObject({
+      result: { content_id: canonicalContentId, resource_version: 3 },
+    });
+    expect(deleteResponse.statusCode).toBe(200);
+    expect(DeleteContentWriteResultSchema.parse(deleteResponse.json())).toMatchObject({
+      result: { content_id: canonicalContentId, resource_version: 3 },
+    });
+    expect(updateContent).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ contentId: uppercaseContentId }),
+      expect.objectContaining({ channel: "rest" }),
+    );
+    expect(deleteContent).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ contentId: uppercaseContentId }),
+      expect.objectContaining({ channel: "rest" }),
+    );
+  });
+
   it("returns 202 and the optimistic version for a delete awaiting approval", async () => {
     const { app, deleteContent } = createApp({
       deleteContent: () => Promise.resolve(pendingOutcome("delete_content")),

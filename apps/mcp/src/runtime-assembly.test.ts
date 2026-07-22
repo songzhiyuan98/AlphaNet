@@ -78,6 +78,11 @@ describe("Remote MCP runtime assembly", () => {
       "get_action_status",
       "create_post",
       "reply_to_content",
+      "update_content",
+      "delete_content",
+      "set_reaction",
+      "set_follow",
+      "list_follows",
     ]);
   });
 
@@ -105,6 +110,8 @@ describe("Remote MCP runtime assembly", () => {
           "notifications:read",
           "actions:read",
           "content:write",
+          "reaction:write",
+          "follow:write",
         ],
         token: "verified-phase-b-token",
       };
@@ -149,6 +156,11 @@ describe("Remote MCP runtime assembly", () => {
         "get_action_status",
         "create_post",
         "reply_to_content",
+        "update_content",
+        "delete_content",
+        "set_reaction",
+        "set_follow",
+        "list_follows",
       ]);
       expect(JSON.stringify(body)).not.toContain("get_platform_status");
       expect(Buffer.byteLength(JSON.stringify(body), "utf8")).toBeLessThanOrEqual(

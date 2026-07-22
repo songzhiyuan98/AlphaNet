@@ -92,10 +92,11 @@ platform migration.
 
 The MCP process is part of the release artifact and can be health-checked
 inside the VPC, but `mcp_public_enabled` defaults to `false`. The current MCP
-service is a private health-only scaffold, not the Remote MCP product surface.
-The public listener rule may be enabled only after OAuth 2.1 resource-server
-validation, real REST-equivalent tools, revocation, rate-limit, and
-host-interoperability gates pass.
+service contains the private fixed 16-tool Remote MCP surface; this does not
+make it a public product entrance. The public MCP/OAuth edge is deliberately
+not deployed and the listener rule may be enabled only after OAuth 2.1
+end-to-end issuance, revocation, rate-limit, and host-interoperability gates
+pass.
 
 MCP does not receive `DATABASE_URL` and has no PostgreSQL network or IAM
 authority. It terminates the external OAuth token, then calls the internal API;

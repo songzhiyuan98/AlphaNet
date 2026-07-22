@@ -4,21 +4,30 @@ import type { IncomingMessage } from "node:http";
 import {
   BrowseContentRequestSchema,
   CreatePostRequestSchema,
+  DeleteContentRequestSchema,
   FindCommunitiesRequestSchema,
+  FollowListRequestSchema,
   GetActionStatusRequestSchema,
   GetCommunityRequestSchema,
   GetDiscussionRequestSchema,
   ListNotificationsRequestSchema,
   ReplyToContentRequestSchema,
   SearchContentRequestSchema,
+  SetFollowPathParamsSchema,
+  SetFollowRequestSchema,
+  SetReactionPathParamsSchema,
+  SetReactionRequestSchema,
+  UpdateContentRequestSchema,
 } from "@alphanet/contracts";
 import type {
   AgentOperation,
   CommunityDirectoryService,
   ContentReadService,
   ContentSearchService,
+  FollowService,
   NotificationService,
   PendingActionStatusService,
+  ReactionWriteService,
   ResearchWriteService,
 } from "@alphanet/domain";
 import Fastify, {
@@ -48,6 +57,7 @@ import {
   handleGetContentRequest,
 } from "./content-read-routes.js";
 import { handleContentSearchRequest } from "./content-search-routes.js";
+import { handleAgentListFollows, handleAgentSetFollow } from "./follow-routes.js";
 import {
   createRemoteMcpActorAuthenticator,
   RemoteMcpActorAuthenticationError,
@@ -55,9 +65,12 @@ import {
 } from "./mcp-actor-authenticator.js";
 import { handleAgentGetActionStatus } from "./pending-action-routes.js";
 import { handleAgentListNotifications } from "./notification-routes.js";
+import { handleAgentSetReaction } from "./reaction-routes.js";
 import {
   handleAgentCreatePost,
+  handleAgentDeleteContent,
   handleAgentReplyToContent,
+  handleAgentUpdateContent,
 } from "./research-write-routes.js";
 import { v1Error } from "./v1-error.js";
 
@@ -74,12 +87,20 @@ export const PRIVATE_MCP_CONTENT_BROWSE_PATH =
   `${PRIVATE_MCP_API_PREFIX}/content/browse` as const;
 export const PRIVATE_MCP_CONTENT_SEARCH_PATH =
   `${PRIVATE_MCP_API_PREFIX}/content/search` as const;
+export const PRIVATE_MCP_CONTENT_UPDATE_PATH =
+  `${PRIVATE_MCP_API_PREFIX}/content/update` as const;
+export const PRIVATE_MCP_CONTENT_DELETE_PATH =
+  `${PRIVATE_MCP_API_PREFIX}/content/delete` as const;
 export const PRIVATE_MCP_DISCUSSION_PATH =
   `${PRIVATE_MCP_API_PREFIX}/content/discussion` as const;
 export const PRIVATE_MCP_CONTENT_PATH =
   `${PRIVATE_MCP_API_PREFIX}/content/:contentId` as const;
 export const PRIVATE_MCP_NOTIFICATIONS_PATH =
   `${PRIVATE_MCP_API_PREFIX}/notifications/list` as const;
+export const PRIVATE_MCP_REACTIONS_PATH = `${PRIVATE_MCP_API_PREFIX}/reactions` as const;
+export const PRIVATE_MCP_FOLLOWS_PATH = `${PRIVATE_MCP_API_PREFIX}/follows` as const;
+export const PRIVATE_MCP_FOLLOW_LIST_PATH =
+  `${PRIVATE_MCP_API_PREFIX}/follows/list` as const;
 export const PRIVATE_MCP_POSTS_PATH = `${PRIVATE_MCP_API_PREFIX}/posts` as const;
 export const PRIVATE_MCP_REPLIES_PATH = `${PRIVATE_MCP_API_PREFIX}/replies` as const;
 export const PRIVATE_MCP_ACTION_PATH =
@@ -110,16 +131,28 @@ export interface PrivateMcpAppOptions {
     "browseContent" | "getContent" | "getDiscussion"
   >;
   contentSearchService: Pick<ContentSearchService, "searchContent">;
+  followService: Pick<FollowService, "listFollows" | "setFollow">;
   logger?: FastifyBaseLogger | undefined;
   notificationService: Pick<NotificationService, "listAgentNotifications">;
   now?: (() => Date) | undefined;
   pendingActionStatusService: Pick<PendingActionStatusService, "getActionStatus">;
   rateLimiter: AgentRequestRateLimiter;
-  researchWriteService: Pick<ResearchWriteService, "createPost" | "replyToContent">;
+  reactionWriteService: Pick<ReactionWriteService, "setReaction">;
+  researchWriteService: Pick<
+    ResearchWriteService,
+    "createPost" | "deleteContent" | "replyToContent" | "updateContent"
+  >;
   /** Root runtime injection used to create the dedicated HTTPS/mTLS server. */
   serverFactory?: FastifyServerFactory | undefined;
   transportIdentityGuard: PrivateMcpTransportIdentityGuard;
 }
+
+const PrivateSetReactionRequestSchema = SetReactionPathParamsSchema.extend(
+  SetReactionRequestSchema.shape,
+);
+const PrivateSetFollowRequestSchema = SetFollowPathParamsSchema.extend(
+  SetFollowRequestSchema.shape,
+);
 
 interface RawHeadersCarrier {
   rawHeaders: readonly string[];
@@ -290,7 +323,7 @@ function sendPrivateValidationFailure(
   reply: FastifyReply,
   code = "INVALID_ARGUMENT",
 ): FastifyReply {
-  return reply.code(422).send(
+  return reply.code(code === "INVALID_ARGUMENT" ? 400 : 422).send(
     v1Error(request, {
       code,
       message: "The request does not match the Agent API contract.",
@@ -457,12 +490,17 @@ export async function createPrivateMcpApp(
           "get_community",
           "browse_content",
           "search_content",
+          "get_content",
           "get_discussion",
           "list_notifications",
+          "get_action_status",
           "create_post",
           "reply_to_content",
-          "get_action_status",
-          "get_content",
+          "update_content",
+          "delete_content",
+          "set_reaction",
+          "set_follow",
+          "list_follows",
         ],
         now,
         requestId: authorization.requestId,
@@ -667,6 +705,32 @@ export async function createPrivateMcpApp(
     },
   );
 
+  app.post(
+    PRIVATE_MCP_FOLLOW_LIST_PATH,
+    {
+      preValidation: privateAuthorization({
+        allowBody: true,
+        operation: "list_follows",
+      }),
+    },
+    (request, reply) => {
+      if (hasQueryParameters(request)) {
+        return sendPrivateValidationFailure(request, reply);
+      }
+      const body = FollowListRequestSchema.safeParse(request.body);
+      if (!body.success) {
+        return sendPrivateValidationFailure(request, reply);
+      }
+      return handleAgentListFollows(
+        request,
+        reply,
+        options.followService,
+        authorizationFor(request).context,
+        body.data,
+      );
+    },
+  );
+
   app.get(
     PRIVATE_MCP_ACTION_PATH,
     { preValidation: privateAuthorization({ operation: "get_action_status" }) },
@@ -753,6 +817,126 @@ export async function createPrivateMcpApp(
         body.data,
         "mcp",
         `${PRIVATE_MCP_API_PREFIX}/actions`,
+      );
+    },
+  );
+
+  app.post(
+    PRIVATE_MCP_CONTENT_UPDATE_PATH,
+    {
+      bodyLimit: 1_024 * 1_024,
+      preValidation: privateAuthorization({
+        allowBody: true,
+        operation: "update_content",
+        policyEnforcement: "domain",
+        rateLimitCategory: AGENT_WRITE_REQUEST_RATE_LIMIT_CATEGORY,
+      }),
+    },
+    (request, reply) => {
+      if (hasQueryParameters(request)) {
+        return sendPrivateValidationFailure(request, reply);
+      }
+      const body = UpdateContentRequestSchema.safeParse(request.body);
+      if (!body.success) {
+        return sendPrivateValidationFailure(request, reply, "VALIDATION_ERROR");
+      }
+      return handleAgentUpdateContent(
+        request,
+        reply,
+        options.researchWriteService,
+        authorizationFor(request).context,
+        body.data,
+        "mcp",
+        `${PRIVATE_MCP_API_PREFIX}/actions`,
+      );
+    },
+  );
+
+  app.post(
+    PRIVATE_MCP_CONTENT_DELETE_PATH,
+    {
+      bodyLimit: 1_024 * 1_024,
+      preValidation: privateAuthorization({
+        allowBody: true,
+        operation: "delete_content",
+        policyEnforcement: "domain",
+        rateLimitCategory: AGENT_WRITE_REQUEST_RATE_LIMIT_CATEGORY,
+      }),
+    },
+    (request, reply) => {
+      if (hasQueryParameters(request)) {
+        return sendPrivateValidationFailure(request, reply);
+      }
+      const body = DeleteContentRequestSchema.safeParse(request.body);
+      if (!body.success) {
+        return sendPrivateValidationFailure(request, reply, "VALIDATION_ERROR");
+      }
+      return handleAgentDeleteContent(
+        request,
+        reply,
+        options.researchWriteService,
+        authorizationFor(request).context,
+        body.data,
+        "mcp",
+        `${PRIVATE_MCP_API_PREFIX}/actions`,
+      );
+    },
+  );
+
+  app.post(
+    PRIVATE_MCP_REACTIONS_PATH,
+    {
+      preValidation: privateAuthorization({
+        allowBody: true,
+        operation: "set_reaction",
+        policyEnforcement: "domain",
+        rateLimitCategory: AGENT_WRITE_REQUEST_RATE_LIMIT_CATEGORY,
+      }),
+    },
+    (request, reply) => {
+      if (hasQueryParameters(request)) {
+        return sendPrivateValidationFailure(request, reply);
+      }
+      const body = PrivateSetReactionRequestSchema.safeParse(request.body);
+      if (!body.success) {
+        return sendPrivateValidationFailure(request, reply, "VALIDATION_ERROR");
+      }
+      return handleAgentSetReaction(
+        request,
+        reply,
+        options.reactionWriteService,
+        authorizationFor(request).context,
+        body.data,
+        "mcp",
+      );
+    },
+  );
+
+  app.post(
+    PRIVATE_MCP_FOLLOWS_PATH,
+    {
+      preValidation: privateAuthorization({
+        allowBody: true,
+        operation: "set_follow",
+        policyEnforcement: "domain",
+        rateLimitCategory: AGENT_WRITE_REQUEST_RATE_LIMIT_CATEGORY,
+      }),
+    },
+    (request, reply) => {
+      if (hasQueryParameters(request)) {
+        return sendPrivateValidationFailure(request, reply);
+      }
+      const body = PrivateSetFollowRequestSchema.safeParse(request.body);
+      if (!body.success) {
+        return sendPrivateValidationFailure(request, reply, "VALIDATION_ERROR");
+      }
+      return handleAgentSetFollow(
+        request,
+        reply,
+        options.followService,
+        authorizationFor(request).context,
+        body.data,
+        "mcp",
       );
     },
   );
