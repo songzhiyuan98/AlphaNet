@@ -112,6 +112,8 @@ const actorCurrentKeyBase64 = independentKeyBase64(1);
 const actorPreviousKeyBase64 = independentKeyBase64(2);
 const actorReplayDigestKeyBase64 = independentKeyBase64(3);
 const accessTokenJtiDigestKeyBase64 = independentKeyBase64(4);
+const oauthAuthorizationBindingKeyBase64 = independentKeyBase64(5);
+const oauthContinuationKeyBase64 = independentKeyBase64(6);
 
 function validActorAssertionEnvironment() {
   return {
@@ -279,9 +281,119 @@ describe("environment parsing", () => {
     expect(result.SEARCH_EMBEDDING_DIMENSIONS).toBe(512);
     expect(result.SEARCH_EMBEDDING_TIMEOUT_MS).toBe(5_000);
     expect(result.MCP_INTERNAL_API_ENABLED).toBe(false);
+    expect(result.MCP_OAUTH_OWNER_CONSENT_ENABLED).toBe(false);
+    expect(result.MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64).toBeUndefined();
+    expect(result.MCP_OAUTH_CONTINUATION_KEY_BASE64).toBeUndefined();
+    expect(result.MCP_OAUTH_RESOURCE).toBeUndefined();
     expect(result.MCP_INTERNAL_API_PORT).toBe(4_443);
     expect(result.MCP_ACTOR_ASSERTION_CURRENT_KEY_BASE64).toBeUndefined();
     expect(result.MCP_ACTOR_ASSERTION_PREVIOUS_KEYS).toEqual({});
+  });
+
+  it("loads the Remote MCP Owner consent configuration as one independent tuple", () => {
+    const result = loadApiEnvironment({
+      ...baseEnvironment,
+      MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64: oauthAuthorizationBindingKeyBase64,
+      MCP_OAUTH_CONTINUATION_KEY_BASE64: oauthContinuationKeyBase64,
+      MCP_OAUTH_OWNER_CONSENT_ENABLED: "true",
+      MCP_OAUTH_RESOURCE: "http://127.0.0.1:4100/mcp",
+    });
+
+    expect(result.MCP_OAUTH_OWNER_CONSENT_ENABLED).toBe(true);
+    expect(result.MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64).toEqual(
+      Buffer.from(oauthAuthorizationBindingKeyBase64, "base64"),
+    );
+    expect(result.MCP_OAUTH_CONTINUATION_KEY_BASE64).toEqual(
+      Buffer.from(oauthContinuationKeyBase64, "base64"),
+    );
+    expect(result.MCP_OAUTH_RESOURCE).toBe("http://127.0.0.1:4100/mcp");
+  });
+
+  it("rejects partial, reused, or non-canonical Remote MCP Owner consent configuration", () => {
+    expect(() =>
+      loadApiEnvironment({
+        ...baseEnvironment,
+        MCP_OAUTH_OWNER_CONSENT_ENABLED: "true",
+      }),
+    ).toThrow(EnvironmentValidationError);
+
+    expect(() =>
+      loadApiEnvironment({
+        ...baseEnvironment,
+        MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64: oauthAuthorizationBindingKeyBase64,
+      }),
+    ).toThrow(EnvironmentValidationError);
+
+    expect(() =>
+      loadApiEnvironment({
+        ...baseEnvironment,
+        MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64: oauthAuthorizationBindingKeyBase64,
+        MCP_OAUTH_CONTINUATION_KEY_BASE64: oauthAuthorizationBindingKeyBase64,
+        MCP_OAUTH_RESOURCE: "http://127.0.0.1:4100/mcp",
+      }),
+    ).toThrow(EnvironmentValidationError);
+
+    expect(() =>
+      loadApiEnvironment({
+        ...baseEnvironment,
+        MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64: oauthAuthorizationBindingKeyBase64,
+        MCP_OAUTH_CONTINUATION_KEY_BASE64: oauthContinuationKeyBase64,
+        MCP_OAUTH_RESOURCE: "http://127.0.0.1:4100/not-mcp",
+      }),
+    ).toThrow(EnvironmentValidationError);
+  });
+
+  it("rejects a Remote MCP OAuth resource above 500 UTF-8 bytes", () => {
+    const oversizedHostname = `${Array.from({ length: 9 }, () => "a".repeat(60)).join(".")}.example`;
+    const oversizedResource = `https://${oversizedHostname}/mcp`;
+
+    expect(Buffer.byteLength(oversizedResource, "utf8")).toBeGreaterThan(500);
+    expect(() =>
+      loadApiEnvironment({
+        ...baseEnvironment,
+        MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64: oauthAuthorizationBindingKeyBase64,
+        MCP_OAUTH_CONTINUATION_KEY_BASE64: oauthContinuationKeyBase64,
+        MCP_OAUTH_OWNER_CONSENT_ENABLED: "true",
+        MCP_OAUTH_RESOURCE: oversizedResource,
+      }),
+    ).toThrow(EnvironmentValidationError);
+  });
+
+  it("requires HTTPS for the Remote MCP OAuth resource in production", () => {
+    let failure: unknown;
+    try {
+      loadApiEnvironment({
+        ...baseEnvironment,
+        API_TRUSTED_PROXY_CIDRS: "10.0.0.0/8",
+        AUTH_EMAIL_FROM: "AlphaNet <auth@alphanet.example>",
+        AUTH_EMAIL_MODE: "resend",
+        AUTH_SECURE_COOKIES: "true",
+        AUTH_TRUSTED_ORIGINS: "https://app.alphanet.example",
+        BETTER_AUTH_SECRET: "ProductionSecret-With-Many-Distinct-Characters-2026!",
+        BETTER_AUTH_URL: "https://app.alphanet.example",
+        CORS_ORIGINS: "https://app.alphanet.example",
+        DATABASE_URL:
+          "postgres://alphanet:secret@db.alphanet.example:5432/alphanet?sslmode=verify-full",
+        MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64: oauthAuthorizationBindingKeyBase64,
+        MCP_OAUTH_CONTINUATION_KEY_BASE64: oauthContinuationKeyBase64,
+        MCP_OAUTH_OWNER_CONSENT_ENABLED: "true",
+        MCP_OAUTH_RESOURCE: "http://127.0.0.1:4100/mcp",
+        NODE_ENV: "production",
+        REDIS_URL: "rediss://cache.alphanet.example:6379",
+        RESEND_API_KEY: "re_production_test_key",
+        SSR_INTERNAL_REQUEST_SECRET:
+          "ProductionSsrSecret-With-Many-Distinct-Characters-2026!",
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(EnvironmentValidationError);
+    expect(
+      (failure as EnvironmentValidationError).issues.some((issue) =>
+        issue.startsWith("MCP_OAUTH_RESOURCE:"),
+      ),
+    ).toBe(true);
   });
 
   it("enables the Admin API only with an atomic strong workforce OIDC configuration", () => {

@@ -1,6 +1,6 @@
 import type { NextConfig } from "next";
 
-const securityHeaders = [
+const globalSecurityHeaders = [
   {
     key: "Content-Security-Policy",
     value: "base-uri 'self'; frame-ancestors 'none'; object-src 'none'",
@@ -23,13 +23,26 @@ const securityHeaders = [
   },
 ] as const;
 
+const oauthConsentSecurityHeaders = [
+  {
+    key: "Referrer-Policy",
+    value: "no-referrer",
+  },
+] as const;
+
 const nextConfig: NextConfig = {
   allowedDevOrigins: ["127.0.0.1"],
   headers() {
     return Promise.resolve([
       {
-        headers: [...securityHeaders],
+        headers: [...globalSecurityHeaders],
         source: "/:path*",
+      },
+      // Matching header rules are applied in order. Keep this route last so its
+      // stricter policy replaces the global Referrer-Policy for consent URLs.
+      {
+        headers: [...oauthConsentSecurityHeaders],
+        source: "/oauth/consent",
       },
     ]);
   },

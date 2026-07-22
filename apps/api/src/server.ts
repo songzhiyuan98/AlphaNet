@@ -5,6 +5,7 @@ import {
   createAlphaNetAuthRuntime,
   createMcpActorAssertionKeyRing,
   createOidcJwtVerifier,
+  createRemoteMcpOAuthConsentService,
   RedisMcpActorAssertionReplayStore,
   RedisRateLimitStorage,
   type AlphaNetAuthRuntime,
@@ -265,6 +266,24 @@ async function start(): Promise<void> {
         },
       },
     );
+    const remoteMcpOAuthConsent = environment.MCP_OAUTH_OWNER_CONSENT_ENABLED
+      ? (() => {
+          const authorizationBindingKey =
+            environment.MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64;
+          const continuationKey = environment.MCP_OAUTH_CONTINUATION_KEY_BASE64;
+          const resource = environment.MCP_OAUTH_RESOURCE;
+          if (!authorizationBindingKey || !continuationKey || !resource) {
+            throw new Error("Remote MCP Owner consent configuration is incomplete");
+          }
+          return {
+            resource,
+            service: createRemoteMcpOAuthConsentService(authRuntime.pool, {
+              authorizationBindingKey,
+              continuationKey,
+            }),
+          };
+        })()
+      : undefined;
     app = await createApiApp({
       ...(adminRequestRuntime ? { adminRequestRuntime } : {}),
       allowedOrigins: parseCorsOrigins(environment.CORS_ORIGINS),
@@ -285,6 +304,7 @@ async function start(): Promise<void> {
       ownerPendingActionService,
       pendingActionStatusService,
       reactionWriteService,
+      ...(remoteMcpOAuthConsent ? { remoteMcpOAuthConsent } : {}),
       researchWriteService,
       trustedProxyCidrs: environment.API_TRUSTED_PROXY_CIDRS,
       version: environment.APP_VERSION,

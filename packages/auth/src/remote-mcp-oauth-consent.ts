@@ -1,4 +1,11 @@
-import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHmac,
+  randomBytes,
+  randomUUID,
+  timingSafeEqual,
+} from "node:crypto";
 
 import {
   AgentScopeSchema,
@@ -15,13 +22,19 @@ import {
   type RemoteMcpOAuthScope,
 } from "./remote-mcp-oauth-guard.js";
 
-const CONTINUATION_DOMAIN = "alphanet:remote-mcp-oauth:consent-continuation:v1\0";
+const CONTINUATION_AEAD_DOMAIN =
+  "alphanet:remote-mcp-oauth:consent-continuation-aead:v2\0";
+const CONTINUATION_ENCRYPTION_KEY_DOMAIN =
+  "alphanet:remote-mcp-oauth:consent-continuation-encryption-key:v2\0";
 const CONTINUATION_SCOPE_DOMAIN =
   "alphanet:remote-mcp-oauth:consent-continuation-scope:v1\0";
-const CONTINUATION_VERSION = 1;
-const CONTINUATION_PAYLOAD_BYTES = 113;
-const CONTINUATION_MAC_BYTES = 32;
-const CONTINUATION_HANDLE_BYTES = CONTINUATION_PAYLOAD_BYTES + CONTINUATION_MAC_BYTES;
+const CONTINUATION_VERSION = 2;
+const CONTINUATION_PLAINTEXT_BYTES = 112;
+const CONTINUATION_NONCE_BYTES = 12;
+const CONTINUATION_AUTH_TAG_BYTES = 16;
+const CONTINUATION_HEADER_BYTES = 1 + CONTINUATION_NONCE_BYTES;
+const CONTINUATION_HANDLE_BYTES =
+  CONTINUATION_HEADER_BYTES + CONTINUATION_PLAINTEXT_BYTES + CONTINUATION_AUTH_TAG_BYTES;
 const MAX_CONTINUATION_TTL_SECONDS = 5 * 60;
 const DEFAULT_CONTINUATION_TTL_SECONDS = 2 * 60;
 const MAX_GRANT_TTL_SECONDS = 30 * 24 * 60 * 60;
@@ -116,6 +129,12 @@ export interface RemoteMcpOAuthConsentRequestView {
 export interface RemoteMcpOAuthPreparedGrant {
   authorizationRequestId: string;
   continuationHandle: string;
+  /** Exact credential policy ceiling frozen when this Grant was prepared. */
+  credentialPolicyCeiling: {
+    defaultsVersion: string;
+    schemaVersion: number;
+    tier: AgentPermissionTier;
+  };
   credentialId: string;
   expiresAt: Date;
   grantId: string;
@@ -125,6 +144,12 @@ export interface RemoteMcpOAuthPreparedGrant {
 
 export interface RemoteMcpOAuthResolvedContinuation {
   authorizationRequestId: string;
+  /** Exact credential policy ceiling frozen when this Grant was prepared. */
+  credentialPolicyCeiling: {
+    defaultsVersion: string;
+    schemaVersion: number;
+    tier: AgentPermissionTier;
+  };
   grantId: string;
 }
 
@@ -203,6 +228,9 @@ interface ExistingGrantRow extends QueryResultRow {
   expires_at: Date;
   grant_id: string;
   offline_access: boolean;
+  policy_ceiling: AgentPermissionTier;
+  policy_ceiling_defaults_version: string;
+  policy_ceiling_schema_version: number;
   scopes: string[];
 }
 
@@ -228,6 +256,9 @@ interface ContinuationAuthorityRow extends QueryResultRow {
   client_skip_consent: boolean | null;
   client_token_endpoint_auth_method: string | null;
   credential_expires_at: Date;
+  credential_policy_ceiling: AgentPermissionTier;
+  credential_policy_ceiling_defaults_version: string;
+  credential_policy_ceiling_schema_version: number;
   owner_id: string;
   owner_session_id: string;
   redirect_uri: string;
@@ -342,6 +373,19 @@ function scopeDigest(scopes: readonly string[], key: Uint8Array): Buffer {
     .digest();
 }
 
+function continuationEncryptionKey(key: Uint8Array): Buffer {
+  return createHmac("sha256", key)
+    .update(CONTINUATION_ENCRYPTION_KEY_DOMAIN, "utf8")
+    .digest();
+}
+
+function continuationAad(): Buffer {
+  return Buffer.concat([
+    Buffer.from(CONTINUATION_AEAD_DOMAIN, "utf8"),
+    Buffer.from([CONTINUATION_VERSION]),
+  ]);
+}
+
 function uuidToBytes(value: string): Buffer {
   return Buffer.from(value.replaceAll("-", ""), "hex");
 }
@@ -362,6 +406,7 @@ function isDatabaseError(value: unknown): value is { code: string } {
 
 export class PostgresRemoteMcpOAuthConsentService implements RemoteMcpOAuthConsentService {
   readonly #authorizationBindingKey: Buffer;
+  readonly #continuationEncryptionKey: Buffer;
   readonly #continuationKey: Buffer;
   readonly #continuationTtlSeconds: number;
   readonly #grantTtlSeconds: number;
@@ -389,6 +434,7 @@ export class PostgresRemoteMcpOAuthConsentService implements RemoteMcpOAuthConse
         "Remote MCP OAuth authorization binding and continuation keys must be independent",
       );
     }
+    this.#continuationEncryptionKey = continuationEncryptionKey(this.#continuationKey);
     this.#continuationTtlSeconds = boundedInteger(
       options.continuationTtlSeconds ?? DEFAULT_CONTINUATION_TTL_SECONDS,
       MAX_CONTINUATION_TTL_SECONDS,
@@ -568,7 +614,11 @@ export class PostgresRemoteMcpOAuthConsentService implements RemoteMcpOAuthConse
                $9::jsonb,
                statement_timestamp() + ($10::integer * interval '1 second')
              )
-             returning id, expires_at
+             returning id,
+                       expires_at,
+                       policy_ceiling,
+                       policy_ceiling_defaults_version,
+                       policy_ceiling_schema_version
            ), inserted_grant as (
              insert into platform.oauth_grants (
                id,
@@ -597,12 +647,17 @@ export class PostgresRemoteMcpOAuthConsentService implements RemoteMcpOAuthConse
                from inserted_credential
              returning id, credential_id, scopes, offline_access, expires_at
            )
-           select id as grant_id,
-                  credential_id,
-                  scopes,
-                  offline_access,
-                  expires_at
-             from inserted_grant`,
+           select inserted_grant.id as grant_id,
+                  inserted_grant.credential_id,
+                  inserted_grant.scopes,
+                  inserted_grant.offline_access,
+                  inserted_grant.expires_at,
+                  inserted_credential.policy_ceiling,
+                  inserted_credential.policy_ceiling_defaults_version,
+                  inserted_credential.policy_ceiling_schema_version
+             from inserted_grant
+             inner join inserted_credential
+               on inserted_credential.id = inserted_grant.credential_id`,
           [
             credentialId,
             owner.owner_id,
@@ -680,6 +735,11 @@ export class PostgresRemoteMcpOAuthConsentService implements RemoteMcpOAuthConse
                 oauth_grant.offline_access as grant_offline_access,
                 oauth_grant.expires_at as grant_expires_at,
                 credential.expires_at as credential_expires_at,
+                credential.policy_ceiling as credential_policy_ceiling,
+                credential.policy_ceiling_defaults_version
+                  as credential_policy_ceiling_defaults_version,
+                credential.policy_ceiling_schema_version
+                  as credential_policy_ceiling_schema_version,
                 oauth_client.disabled as client_disabled,
                 oauth_client.skip_consent as client_skip_consent,
                 oauth_client.require_pkce as client_require_pkce,
@@ -813,6 +873,11 @@ export class PostgresRemoteMcpOAuthConsentService implements RemoteMcpOAuthConse
 
       return {
         authorizationRequestId: continuation.requestId,
+        credentialPolicyCeiling: {
+          defaultsVersion: row.credential_policy_ceiling_defaults_version,
+          schemaVersion: row.credential_policy_ceiling_schema_version,
+          tier: row.credential_policy_ceiling,
+        },
         grantId: continuation.grantId,
       };
     });
@@ -971,7 +1036,10 @@ export class PostgresRemoteMcpOAuthConsentService implements RemoteMcpOAuthConse
               oauth_grant.credential_id,
               oauth_grant.scopes,
               oauth_grant.offline_access,
-              oauth_grant.expires_at
+              oauth_grant.expires_at,
+              credential.policy_ceiling,
+              credential.policy_ceiling_defaults_version,
+              credential.policy_ceiling_schema_version
          from platform.oauth_grants as oauth_grant
          inner join platform.credentials as credential
            on credential.id = oauth_grant.credential_id
@@ -1029,6 +1097,11 @@ export class PostgresRemoteMcpOAuthConsentService implements RemoteMcpOAuthConse
         envelope.requestedScopes,
         request.expires_at,
       ),
+      credentialPolicyCeiling: {
+        defaultsVersion: grant.policy_ceiling_defaults_version,
+        schemaVersion: grant.policy_ceiling_schema_version,
+        tier: grant.policy_ceiling,
+      },
       credentialId: grant.credential_id,
       expiresAt: grant.expires_at,
       grantId: grant.grant_id,
@@ -1054,22 +1127,29 @@ export class PostgresRemoteMcpOAuthConsentService implements RemoteMcpOAuthConse
     );
     if (expiresAtSeconds <= issuedAtSeconds) fail("REQUEST_EXPIRED");
 
-    const payload = Buffer.alloc(CONTINUATION_PAYLOAD_BYTES);
-    payload[0] = CONTINUATION_VERSION;
-    payload.writeUInt32BE(issuedAtSeconds, 1);
-    payload.writeUInt32BE(expiresAtSeconds, 5);
-    randomBytes(16).copy(payload, 9);
-    uuidToBytes(requestId).copy(payload, 25);
-    uuidToBytes(sessionId).copy(payload, 41);
-    uuidToBytes(grantId).copy(payload, 57);
-    scopeDigest(scopes, this.#continuationKey).copy(payload, 73);
-    randomBytes(8).copy(payload, 105);
+    const plaintext = Buffer.alloc(CONTINUATION_PLAINTEXT_BYTES);
+    plaintext.writeUInt32BE(issuedAtSeconds, 0);
+    plaintext.writeUInt32BE(expiresAtSeconds, 4);
+    randomBytes(16).copy(plaintext, 8);
+    uuidToBytes(requestId).copy(plaintext, 24);
+    uuidToBytes(sessionId).copy(plaintext, 40);
+    uuidToBytes(grantId).copy(plaintext, 56);
+    scopeDigest(scopes, this.#continuationKey).copy(plaintext, 72);
+    randomBytes(8).copy(plaintext, 104);
 
-    const mac = createHmac("sha256", this.#continuationKey)
-      .update(CONTINUATION_DOMAIN, "utf8")
-      .update(payload)
-      .digest();
-    return Buffer.concat([payload, mac]).toString("base64url");
+    const nonce = randomBytes(CONTINUATION_NONCE_BYTES);
+    const cipher = createCipheriv("aes-256-gcm", this.#continuationEncryptionKey, nonce);
+    cipher.setAAD(continuationAad(), {
+      plaintextLength: CONTINUATION_PLAINTEXT_BYTES,
+    });
+    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    const authTag = cipher.getAuthTag();
+    return Buffer.concat([
+      Buffer.from([CONTINUATION_VERSION]),
+      nonce,
+      ciphertext,
+      authTag,
+    ]).toString("base64url");
   }
 
   #decodeContinuation(handle: string): DecodedContinuation {
@@ -1087,17 +1167,37 @@ export class PostgresRemoteMcpOAuthConsentService implements RemoteMcpOAuthConse
     ) {
       fail("CONTINUATION_INVALID");
     }
-    const payload = encoded.subarray(0, CONTINUATION_PAYLOAD_BYTES);
-    const suppliedMac = encoded.subarray(CONTINUATION_PAYLOAD_BYTES);
-    const expectedMac = createHmac("sha256", this.#continuationKey)
-      .update(CONTINUATION_DOMAIN, "utf8")
-      .update(payload)
-      .digest();
-    if (!timingSafeEqual(suppliedMac, expectedMac)) fail("CONTINUATION_INVALID");
-    if (payload[0] !== CONTINUATION_VERSION) fail("CONTINUATION_INVALID");
+    if (encoded[0] !== CONTINUATION_VERSION) fail("CONTINUATION_INVALID");
+    const nonce = encoded.subarray(1, CONTINUATION_HEADER_BYTES);
+    const ciphertext = encoded.subarray(
+      CONTINUATION_HEADER_BYTES,
+      CONTINUATION_HEADER_BYTES + CONTINUATION_PLAINTEXT_BYTES,
+    );
+    const suppliedAuthTag = encoded.subarray(
+      CONTINUATION_HEADER_BYTES + CONTINUATION_PLAINTEXT_BYTES,
+    );
+    const plaintext = (() => {
+      try {
+        const decipher = createDecipheriv(
+          "aes-256-gcm",
+          this.#continuationEncryptionKey,
+          nonce,
+        );
+        decipher.setAAD(continuationAad(), {
+          plaintextLength: CONTINUATION_PLAINTEXT_BYTES,
+        });
+        decipher.setAuthTag(suppliedAuthTag);
+        return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+      } catch {
+        fail("CONTINUATION_INVALID");
+      }
+    })();
+    if (plaintext.byteLength !== CONTINUATION_PLAINTEXT_BYTES) {
+      fail("CONTINUATION_INVALID");
+    }
 
-    const issuedAtSeconds = payload.readUInt32BE(1);
-    const expiresAtSeconds = payload.readUInt32BE(5);
+    const issuedAtSeconds = plaintext.readUInt32BE(0);
+    const expiresAtSeconds = plaintext.readUInt32BE(4);
     const now = this.#now();
     if (!Number.isFinite(now.valueOf())) throw new Error("Invalid consent clock");
     const nowSeconds = Math.floor(now.valueOf() / 1_000);
@@ -1112,11 +1212,11 @@ export class PostgresRemoteMcpOAuthConsentService implements RemoteMcpOAuthConse
 
     return {
       expiresAtSeconds,
-      grantId: uuidFromBytes(payload.subarray(57, 73)),
+      grantId: uuidFromBytes(plaintext.subarray(56, 72)),
       issuedAtSeconds,
-      requestId: uuidFromBytes(payload.subarray(25, 41)),
-      scopeDigest: Buffer.from(payload.subarray(73, 105)),
-      sessionId: uuidFromBytes(payload.subarray(41, 57)),
+      requestId: uuidFromBytes(plaintext.subarray(24, 40)),
+      scopeDigest: Buffer.from(plaintext.subarray(72, 104)),
+      sessionId: uuidFromBytes(plaintext.subarray(40, 56)),
     };
   }
 

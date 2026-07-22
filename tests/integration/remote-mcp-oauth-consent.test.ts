@@ -353,6 +353,7 @@ describeRemoteMcpOAuthConsent("Remote MCP OAuth Owner/Agent consent integration"
       }),
     ).resolves.toEqual({
       authorizationRequestId: prepared.authorizationRequestId,
+      credentialPolicyCeiling: prepared.credentialPolicyCeiling,
       grantId: prepared.grantId,
     });
     await expect(
@@ -363,6 +364,7 @@ describeRemoteMcpOAuthConsent("Remote MCP OAuth Owner/Agent consent integration"
       }),
     ).resolves.toEqual({
       authorizationRequestId: prepared.authorizationRequestId,
+      credentialPolicyCeiling: prepared.credentialPolicyCeiling,
       grantId: prepared.grantId,
     });
 
@@ -391,6 +393,7 @@ describeRemoteMcpOAuthConsent("Remote MCP OAuth Owner/Agent consent integration"
       }),
     ).resolves.toEqual({
       authorizationRequestId: prepared.authorizationRequestId,
+      credentialPolicyCeiling: prepared.credentialPolicyCeiling,
       grantId: prepared.grantId,
     });
 

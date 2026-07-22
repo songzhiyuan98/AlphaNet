@@ -5,6 +5,7 @@ import helmet from "@fastify/helmet";
 import type {
   AlphaNetAuthRuntime,
   OwnerSession,
+  RemoteMcpOAuthConsentService,
   RedisRateLimitStorage,
 } from "@alphanet/auth";
 import {
@@ -54,6 +55,7 @@ import {
   registerPublicContentSearchRoutes,
 } from "./content-search-routes.js";
 import { registerOwnerActionRoutes } from "./owner-action-routes.js";
+import { registerOwnerRemoteMcpOAuthConsentRoutes } from "./owner-oauth-consent-routes.js";
 import { registerOwnerAgentPolicyRoutes } from "./owner-policy-routes.js";
 import { registerOwnerReportRoutes } from "./owner-report-routes.js";
 import { registerPendingActionRoutes } from "./pending-action-routes.js";
@@ -87,6 +89,13 @@ export interface ApiAppOptions {
   ownerPendingActionService?: OwnerPendingActionService;
   pendingActionStatusService?: PendingActionStatusService;
   reactionWriteService?: ReactionWriteService;
+  remoteMcpOAuthConsent?: {
+    resource: string;
+    service: Pick<
+      RemoteMcpOAuthConsentService,
+      "loadConsentRequest" | "resolveContinuationHandle" | "selectAgentAndPrepareGrant"
+    >;
+  };
   researchWriteService?: ResearchWriteService;
   trustedProxyCidrs?: readonly string[];
   version: string;
@@ -332,6 +341,7 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
       options.ownerPendingActionService ||
       options.pendingActionStatusService ||
       options.reactionWriteService ||
+      options.remoteMcpOAuthConsent ||
       options.researchWriteService) &&
     !options.agentRateLimiter
   ) {
@@ -767,6 +777,17 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
         ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
         resolveClientIp,
         service: options.notificationService,
+      });
+    }
+
+    if (options.remoteMcpOAuthConsent) {
+      registerOwnerRemoteMcpOAuthConsentRoutes(app, {
+        allowedOrigins: options.allowedOrigins,
+        authRuntime,
+        ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
+        resolveClientIp,
+        resource: options.remoteMcpOAuthConsent.resource,
+        service: options.remoteMcpOAuthConsent.service,
       });
     }
   }

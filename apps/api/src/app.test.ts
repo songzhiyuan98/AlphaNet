@@ -1,7 +1,11 @@
 import { inspect } from "node:util";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AlphaNetAuthRuntime, OwnerSession } from "@alphanet/auth";
+import type {
+  AlphaNetAuthRuntime,
+  OwnerSession,
+  RemoteMcpOAuthConsentService,
+} from "@alphanet/auth";
 import { V1ErrorResponseSchema } from "@alphanet/contracts";
 import type {
   ContentModerationService,
@@ -168,6 +172,23 @@ function createContentSearchService(): ContentSearchService & {
   return {
     checkReady: vi.fn(() => Promise.resolve()),
     searchContent: vi.fn(() => Promise.reject(new Error("unexpected Content Search"))),
+  };
+}
+
+function createRemoteMcpOAuthConsentService(): Pick<
+  RemoteMcpOAuthConsentService,
+  "loadConsentRequest" | "resolveContinuationHandle" | "selectAgentAndPrepareGrant"
+> {
+  return {
+    loadConsentRequest: vi.fn(() =>
+      Promise.reject(new Error("unexpected consent inspection")),
+    ),
+    resolveContinuationHandle: vi.fn(() =>
+      Promise.reject(new Error("unexpected continuation resolution")),
+    ),
+    selectAgentAndPrepareGrant: vi.fn(() =>
+      Promise.reject(new Error("unexpected Agent selection")),
+    ),
   };
 }
 
@@ -521,6 +542,100 @@ describe("API service", () => {
     );
     expect(auth.getOwnerSession).toHaveBeenCalledOnce();
     expect(service.approveAction).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { includeAuth: false, includeConsent: true },
+    { includeAuth: true, includeConsent: false },
+  ])(
+    "keeps dark-launched Owner OAuth consent routes closed without both dependencies: %o",
+    async ({ includeAuth, includeConsent }) => {
+      const auth = createAuthRuntime();
+      const service = createRemoteMcpOAuthConsentService();
+      const app = await createApiApp({
+        allowedOrigins: ["https://app.alphanet.test"],
+        ...(includeAuth ? { authRuntime: auth.runtime } : {}),
+        environment: "test",
+        ...(includeConsent
+          ? {
+              remoteMcpOAuthConsent: {
+                resource: "https://mcp.alphanet.test/mcp",
+                service,
+              },
+            }
+          : {}),
+        version: "test-version",
+      });
+      apps.push(app);
+
+      const response = await app.inject({
+        headers: {
+          "content-type": "application/json",
+          origin: "https://app.alphanet.test",
+          "sec-fetch-site": "same-origin",
+        },
+        method: "POST",
+        payload: {},
+        url: "/v1/owner/remote-mcp/oauth/consent/inspect",
+      });
+
+      expect(response.statusCode).toBe(404);
+      expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
+        "ROUTE_NOT_FOUND",
+      );
+      expect(auth.getOwnerSession).not.toHaveBeenCalled();
+      expect(service.loadConsentRequest).not.toHaveBeenCalled();
+    },
+  );
+
+  it("registers dark-launched Owner OAuth consent only when its authenticated runtime is assembled", async () => {
+    const auth = createAuthRuntime({
+      ownerSession: {
+        owner: {
+          email: "owner@alphanet.test",
+          emailVerified: true,
+          id: "10000000-0000-4000-8000-000000000001",
+          name: "Research Owner",
+          status: "active",
+        },
+        session: {
+          createdAt: new Date("2026-07-21T12:00:00.000Z"),
+          expiresAt: new Date("2026-07-28T12:00:00.000Z"),
+          id: "20000000-0000-4000-8000-000000000002",
+        },
+      },
+    });
+    const service = createRemoteMcpOAuthConsentService();
+    const app = await createApiApp({
+      allowedOrigins: ["https://app.alphanet.test"],
+      authRuntime: auth.runtime,
+      environment: "test",
+      remoteMcpOAuthConsent: {
+        resource: "https://mcp.alphanet.test/mcp",
+        service,
+      },
+      version: "test-version",
+    });
+    apps.push(app);
+
+    const response = await app.inject({
+      headers: {
+        "content-type": "application/json",
+        cookie: "alphanet.session=opaque",
+        origin: "https://app.alphanet.test",
+        "sec-fetch-site": "same-origin",
+      },
+      method: "POST",
+      payload: {},
+      url: "/v1/owner/remote-mcp/oauth/consent/inspect",
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
+      "INVALID_ARGUMENT",
+    );
+    expect(auth.getOwnerSession).toHaveBeenCalledOnce();
+    expect(service.loadConsentRequest).not.toHaveBeenCalled();
   });
 
   it("returns a stable error envelope and request id", async () => {

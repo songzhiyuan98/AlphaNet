@@ -61,6 +61,9 @@ class ConsentDatabaseHarness {
     expiresAt: Date;
     grantId: string;
     offlineAccess: boolean;
+    policyCeiling: "assisted" | "autonomous" | "custom" | "read_only";
+    policyCeilingDefaultsVersion: string;
+    policyCeilingSchemaVersion: number;
     scopes: string[];
     status: "active" | "pending";
   } | null = null;
@@ -70,6 +73,10 @@ class ConsentDatabaseHarness {
   requestSessionId: string | null = null;
   requestStatus: "consumed" | "denied" | "expired" | "pending" | "selected" = "pending";
   selectedAgentAvailable = true;
+  selectedPolicyDefaultsVersion = "agent-permission-defaults-v1";
+  selectedPolicyRules: Record<string, unknown> = {};
+  selectedPolicySchemaVersion = 1;
+  selectedPolicyTier: "assisted" | "autonomous" | "custom" | "read_only" = "assisted";
   sessionAvailable = true;
   throwOnInsert: (Error & { code: string }) | null = null;
 
@@ -156,13 +163,13 @@ class ConsentDatabaseHarness {
         return result([
           {
             actor_id: actorId,
-            defaults_version: "agent-permission-defaults-v1",
             display_name: "Research Agent",
             handle: "research-agent",
             id: agentId,
-            policy_rules: {},
-            policy_schema_version: 1,
-            policy_tier: "assisted",
+            defaults_version: this.selectedPolicyDefaultsVersion,
+            policy_rules: this.selectedPolicyRules,
+            policy_schema_version: this.selectedPolicySchemaVersion,
+            policy_tier: this.selectedPolicyTier,
             policy_version: "4",
           },
         ]) as QueryResult<Row>;
@@ -187,6 +194,9 @@ class ConsentDatabaseHarness {
           expiresAt: new Date(now.valueOf() + 30 * 24 * 60 * 60_000),
           grantId: values[10] as string,
           offlineAccess: values[14] as boolean,
+          policyCeiling: values[5] as "assisted",
+          policyCeilingDefaultsVersion: values[6] as string,
+          policyCeilingSchemaVersion: values[7] as number,
           scopes: [...(values[3] as string[])],
           status: "pending",
         };
@@ -196,6 +206,9 @@ class ConsentDatabaseHarness {
             expires_at: this.grant.expiresAt,
             grant_id: this.grant.grantId,
             offline_access: this.grant.offlineAccess,
+            policy_ceiling: this.grant.policyCeiling,
+            policy_ceiling_defaults_version: this.grant.policyCeilingDefaultsVersion,
+            policy_ceiling_schema_version: this.grant.policyCeilingSchemaVersion,
             scopes: this.grant.scopes,
           },
         ]) as QueryResult<Row>;
@@ -212,6 +225,10 @@ class ConsentDatabaseHarness {
                   expires_at: this.grant.expiresAt,
                   grant_id: this.grant.grantId,
                   offline_access: this.grant.offlineAccess,
+                  policy_ceiling: this.grant.policyCeiling,
+                  policy_ceiling_defaults_version:
+                    this.grant.policyCeilingDefaultsVersion,
+                  policy_ceiling_schema_version: this.grant.policyCeilingSchemaVersion,
                   scopes: this.grant.scopes,
                 },
               ]
@@ -240,6 +257,11 @@ class ConsentDatabaseHarness {
                   client_skip_consent: false,
                   client_token_endpoint_auth_method: this.clientTokenEndpointAuthMethod,
                   credential_expires_at: this.grant.expiresAt,
+                  credential_policy_ceiling: this.grant.policyCeiling,
+                  credential_policy_ceiling_defaults_version:
+                    this.grant.policyCeilingDefaultsVersion,
+                  credential_policy_ceiling_schema_version:
+                    this.grant.policyCeilingSchemaVersion,
                   grant_expires_at: this.grant.expiresAt,
                   grant_id: this.grant.grantId,
                   grant_offline_access: this.grant.offlineAccess,
@@ -373,6 +395,11 @@ describe("PostgresRemoteMcpOAuthConsentService", () => {
     expect(prepared).toEqual(
       expect.objectContaining({
         authorizationRequestId: requestId,
+        credentialPolicyCeiling: {
+          defaultsVersion: "agent-permission-defaults-v1",
+          schemaVersion: 1,
+          tier: "assisted",
+        },
         idempotent: false,
         scopes: ["research:read"],
       }),
@@ -381,6 +408,11 @@ describe("PostgresRemoteMcpOAuthConsentService", () => {
     expect(prepared.credentialId).toMatch(UUID_PATTERN_FOR_TEST);
     expect(prepared.continuationHandle).toMatch(/^[A-Za-z0-9_-]+$/u);
     expect(prepared.continuationHandle).not.toContain(requestId);
+    const decodedContinuation = Buffer.from(prepared.continuationHandle, "base64url");
+    expect(decodedContinuation.toString("base64url")).toBe(prepared.continuationHandle);
+    expect(decodedContinuation.includes(uuidBytes(requestId))).toBe(false);
+    expect(decodedContinuation.includes(uuidBytes(sessionId))).toBe(false);
+    expect(decodedContinuation.includes(uuidBytes(prepared.grantId))).toBe(false);
 
     const ownerLockIndex = database.queries.findIndex((query) =>
       query.text.includes("from auth.sessions as owner_session"),
@@ -417,6 +449,10 @@ describe("PostgresRemoteMcpOAuthConsentService", () => {
     const insertCount = database.queries.filter((query) =>
       query.text.startsWith("with inserted_credential as"),
     ).length;
+    database.selectedPolicyDefaultsVersion = "agent-permission-defaults-v2";
+    database.selectedPolicySchemaVersion = 2;
+    database.selectedPolicyTier = "custom";
+    database.selectedPolicyRules = { sensitive: "must-not-be-projected" };
 
     const second = await consentService.selectAgentAndPrepareGrant({
       ...authorization,
@@ -425,6 +461,11 @@ describe("PostgresRemoteMcpOAuthConsentService", () => {
 
     expect(second).toEqual(
       expect.objectContaining({
+        credentialPolicyCeiling: {
+          defaultsVersion: "agent-permission-defaults-v1",
+          schemaVersion: 1,
+          tier: "assisted",
+        },
         credentialId: first.credentialId,
         grantId: first.grantId,
         idempotent: true,
@@ -435,6 +476,24 @@ describe("PostgresRemoteMcpOAuthConsentService", () => {
         query.text.startsWith("with inserted_credential as"),
       ),
     ).toHaveLength(insertCount);
+    expect(second.credentialPolicyCeiling).not.toHaveProperty("rules");
+  });
+
+  it("projects custom credential ceiling metadata without exposing frozen rules", async () => {
+    const database = new ConsentDatabaseHarness();
+    database.selectedPolicyTier = "custom";
+    database.selectedPolicyRules = {
+      operations: { "research.publish": { mode: "allow" } },
+    };
+
+    const prepared = await prepare(database);
+
+    expect(prepared.credentialPolicyCeiling).toEqual({
+      defaultsVersion: "agent-permission-defaults-v1",
+      schemaVersion: 1,
+      tier: "custom",
+    });
+    expect(prepared.credentialPolicyCeiling).not.toHaveProperty("rules");
   });
 
   it("rejects a different Agent, terminal request, expiry, and unavailable session", async () => {
@@ -560,6 +619,11 @@ describe("PostgresRemoteMcpOAuthConsentService", () => {
       }),
     ).resolves.toEqual({
       authorizationRequestId: requestId,
+      credentialPolicyCeiling: {
+        defaultsVersion: "agent-permission-defaults-v1",
+        schemaVersion: 1,
+        tier: "assisted",
+      },
       grantId: prepared.grantId,
     });
     expect(database.requestStatus).toBe("selected");
@@ -585,6 +649,11 @@ describe("PostgresRemoteMcpOAuthConsentService", () => {
       }),
     ).resolves.toEqual({
       authorizationRequestId: requestId,
+      credentialPolicyCeiling: {
+        defaultsVersion: "agent-permission-defaults-v1",
+        schemaVersion: 1,
+        tier: "assisted",
+      },
       grantId: prepared.grantId,
     });
 
@@ -596,6 +665,11 @@ describe("PostgresRemoteMcpOAuthConsentService", () => {
       }),
     ).resolves.toEqual({
       authorizationRequestId: requestId,
+      credentialPolicyCeiling: {
+        defaultsVersion: "agent-permission-defaults-v1",
+        schemaVersion: 1,
+        tier: "assisted",
+      },
       grantId: prepared.grantId,
     });
     expect(database.requestStatus).toBe("consumed");
@@ -705,3 +779,7 @@ describe("PostgresRemoteMcpOAuthConsentService", () => {
 
 const UUID_PATTERN_FOR_TEST =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+
+function uuidBytes(value: string): Buffer {
+  return Buffer.from(value.replaceAll("-", ""), "hex");
+}
