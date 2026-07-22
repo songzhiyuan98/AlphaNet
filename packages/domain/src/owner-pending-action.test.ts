@@ -71,6 +71,7 @@ function createTestSql(responder: QueryResponder): {
 const ownerId = "10000000-0000-4000-8000-000000000001";
 const otherOwnerId = "10000000-0000-4000-8000-000000000002";
 const agentId = "20000000-0000-4000-8000-000000000001";
+const actorId = "20000000-0000-4000-8000-000000000002";
 const credentialId = "30000000-0000-4000-8000-000000000001";
 const actionId = "40000000-0000-4000-8000-000000000001";
 const idempotencyId = "50000000-0000-4000-8000-000000000001";
@@ -180,6 +181,7 @@ function detailRow(overrides: Readonly<Record<string, unknown>> = {}) {
   );
   return {
     ...summaryRow(),
+    actor_id: actorId,
     owner_id: ownerId,
     credential_id: credentialId,
     idempotency_record_id: idempotencyId,
@@ -787,6 +789,7 @@ describe("PostgresOwnerPendingActionService decisions", () => {
       call.text.includes("insert into system.outbox_events"),
     );
     expect(outbox?.values).toContain("action.approved");
+    expect(outbox?.values).toContainEqual(expect.objectContaining({ actor_id: actorId }));
     expect(JSON.stringify(outbox?.values)).not.toContain("UGC_SECRET_MARKER");
     const idempotency = harness.calls.find((call) =>
       call.text.includes("update platform.idempotency_records as idempotency"),
@@ -913,6 +916,22 @@ describe("PostgresOwnerPendingActionService decisions", () => {
       retryAfterMs: null,
     });
     expect(envelope?.error).not.toHaveProperty("retry_after_ms");
+    const resolved = harness.calls.find((call) =>
+      call.text.includes("insert into system.outbox_events"),
+    );
+    expect(resolved?.values).toContain("action.resolved");
+    expect(resolved?.values).not.toContain("action.rejected");
+    expect(resolved?.values).toContainEqual({
+      action_id: actionId,
+      actor_id: actorId,
+      agent_id: agentId,
+      decision_reason_code: "needs_revision",
+      error_code: "ACTION_REJECTED",
+      operation: "create_post",
+      owner_id: ownerId,
+      reason_code: "needs_revision",
+      state: "rejected",
+    });
   });
 
   it.each(["executing", "failed", "expired"] as const)(

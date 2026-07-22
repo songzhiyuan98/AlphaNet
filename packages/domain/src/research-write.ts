@@ -474,6 +474,8 @@ interface ParentRow {
   root_distribution_state: string;
   root_id: string;
   root_lifecycle_state: string;
+  root_symbol_ids: string[];
+  root_topic_ids: string[];
 }
 
 interface ReplyTarget {
@@ -482,9 +484,16 @@ interface ReplyTarget {
   parentAuthorActorId: string;
   parentContentId: string;
   rootContentId: string;
+  rootSymbolIds: string[];
+  rootTopicIds: string[];
 }
 
 interface ClassificationRow {
+  id: string;
+  value: string;
+}
+
+interface CurrentClassificationRow {
   id: string;
   value: string;
 }
@@ -569,7 +578,9 @@ interface PreparedContentUpdate {
   currentSources: NormalizedResearchSourceLink[];
   currentTitle: string | null;
   currentReferences: NormalizedResearchContentReference[];
+  currentSymbolIds: string[];
   currentVersion: number;
+  currentTopicIds: string[];
   kind: "post" | "reply";
   newlyAddedCommunityIds: string[];
   primaryCommunityId: string | null;
@@ -587,6 +598,12 @@ interface PersistedContentUpdate {
   outboxId: string;
   result: UpdateContentResearchResult;
   rootContentId: string;
+}
+
+interface NotificationClassificationRow {
+  community_ids: string[];
+  symbol_ids: string[];
+  topic_ids: string[];
 }
 
 interface DeleteTargetRow {
@@ -4628,7 +4645,17 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         root.id as root_id,
         root.lifecycle_state as root_lifecycle_state,
         root.distribution_state as root_distribution_state,
-        root.primary_community_id
+        root.primary_community_id,
+        coalesce((
+          select array_agg(classification.symbol_id::text order by classification.position)
+          from platform.content_symbols as classification
+          where classification.content_id = root.id
+        ), array[]::text[]) as root_symbol_ids,
+        coalesce((
+          select array_agg(classification.topic_id::text order by classification.position)
+          from platform.content_topics as classification
+          where classification.content_id = root.id
+        ), array[]::text[]) as root_topic_ids
       from platform.content_items as parent
       join platform.content_items as root on root.id = parent.root_id
       where parent.id = ${parentContentId}
@@ -4670,6 +4697,8 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       parentAuthorActorId: row.parent_author_actor_id,
       parentContentId,
       rootContentId: row.root_id,
+      rootSymbolIds: row.root_symbol_ids,
+      rootTopicIds: row.root_topic_ids,
     };
   }
 
@@ -4751,15 +4780,15 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       where additional.content_id = ${row.kind === "post" ? row.root_id : command.contentId}
       order by additional.position
     `;
-    const symbolRows = await transaction<{ value: string }[]>`
-      select symbol.ticker::text as value
+    const symbolRows = await transaction<CurrentClassificationRow[]>`
+      select content_symbol.symbol_id::text as id, symbol.ticker::text as value
       from platform.content_symbols as content_symbol
       join platform.symbols as symbol on symbol.id = content_symbol.symbol_id
       where content_symbol.content_id = ${command.contentId}
       order by content_symbol.position
     `;
-    const topicRows = await transaction<{ value: string }[]>`
-      select topic.slug::text as value
+    const topicRows = await transaction<CurrentClassificationRow[]>`
+      select content_topic.topic_id::text as id, topic.slug::text as value
       from platform.content_topics as content_topic
       join platform.topics as topic on topic.id = content_topic.topic_id
       where content_topic.content_id = ${command.contentId}
@@ -4939,7 +4968,9 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       currentRevisionId: row.current_revision_id,
       currentRevisionNumber: row.current_revision_number,
       currentSources,
+      currentSymbolIds: symbolRows.map((symbol) => symbol.id),
       currentTitle: row.title,
+      currentTopicIds: topicRows.map((topic) => topic.id),
       currentVersion: row.version,
       kind: row.kind,
       newlyAddedCommunityIds: additionalCommunityIds.filter(
@@ -5240,6 +5271,10 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       );
     }
 
+    const notificationClassifications = await this.#notificationClassifications(
+      transaction,
+      input.prepared.contentId,
+    );
     const { id: outboxId } = await appendOutboxEvent(transaction, {
       aggregateId: input.prepared.contentId,
       aggregateType: "content",
@@ -5248,11 +5283,26 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       occurredAt: input.now,
       payload: {
         actor_id: input.actorId,
+        affected_symbol_ids: [
+          ...new Set([
+            ...input.prepared.currentSymbolIds,
+            ...notificationClassifications.symbol_ids,
+          ]),
+        ].sort(),
+        affected_topic_ids: [
+          ...new Set([
+            ...input.prepared.currentTopicIds,
+            ...notificationClassifications.topic_ids,
+          ]),
+        ].sort(),
         changed_groups: input.prepared.changedGroups,
+        community_ids: notificationClassifications.community_ids,
         content_id: input.prepared.contentId,
         resource_version: newVersion,
         revision_id: revisionId,
         root_content_id: input.prepared.rootContentId,
+        symbol_ids: notificationClassifications.symbol_ids,
+        topic_ids: notificationClassifications.topic_ids,
       },
     });
     return {
@@ -5265,6 +5315,57 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       },
       rootContentId: input.prepared.rootContentId,
     };
+  }
+
+  async #notificationClassifications(
+    transaction: TransactionSql,
+    contentId: string,
+  ): Promise<NotificationClassificationRow> {
+    const rows = await transaction<NotificationClassificationRow[]>`
+      select
+        coalesce((
+          select array_agg(distinct placement.community_id::text order by placement.community_id::text)
+          from (
+            select root.primary_community_id as community_id
+            union
+            select additional.community_id
+            from platform.content_additional_communities as additional
+            where additional.content_id = root.id
+          ) as placement
+          where placement.community_id is not null
+        ), array[]::text[]) as community_ids,
+        coalesce((
+          select array_agg(distinct classification.symbol_id::text order by classification.symbol_id::text)
+          from platform.content_symbols as classification
+          where classification.content_id in (content.id, root.id)
+        ), array[]::text[]) as symbol_ids,
+        coalesce((
+          select array_agg(distinct classification.topic_id::text order by classification.topic_id::text)
+          from platform.content_topics as classification
+          where classification.content_id in (content.id, root.id)
+        ), array[]::text[]) as topic_ids
+      from platform.content_items as content
+      join platform.content_items as root on root.id = content.root_id
+      where content.id = ${contentId}
+      limit 1
+      for share of content, root
+    `;
+    const row = rows[0];
+    if (
+      !row ||
+      !Array.isArray(row.community_ids) ||
+      !Array.isArray(row.symbol_ids) ||
+      !Array.isArray(row.topic_ids) ||
+      row.community_ids.length > 5 ||
+      row.symbol_ids.length > 20 ||
+      row.topic_ids.length > 10 ||
+      [...row.community_ids, ...row.symbol_ids, ...row.topic_ids].some(
+        (id) => typeof id !== "string" || !UUID_PATTERN.test(id),
+      )
+    ) {
+      throw new Error("The notification classification projection is invalid.");
+    }
+    return row;
   }
 
   async #resolveWriteFacts(
@@ -5778,6 +5879,16 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     const communityIds = isPost
       ? [postCommand.primaryCommunityId, ...postCommand.additionalCommunityIds]
       : input.replyTarget!.communityIds;
+    const notificationSymbolIds = isPost
+      ? input.facts.symbolIds
+      : [
+          ...new Set([...input.replyTarget!.rootSymbolIds, ...input.facts.symbolIds]),
+        ].sort();
+    const notificationTopicIds = isPost
+      ? input.facts.topicIds
+      : [
+          ...new Set([...input.replyTarget!.rootTopicIds, ...input.facts.topicIds]),
+        ].sort();
     const { id: outboxId } = await appendOutboxEvent(transaction, {
       aggregateId: contentId,
       aggregateType: "content",
@@ -5792,8 +5903,8 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         parent_content_id: parentId,
         revision_id: revisionId,
         root_content_id: rootId,
-        symbol_ids: input.facts.symbolIds,
-        topic_ids: input.facts.topicIds,
+        symbol_ids: notificationSymbolIds,
+        topic_ids: notificationTopicIds,
       },
     });
 

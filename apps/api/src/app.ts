@@ -22,6 +22,7 @@ import type {
   ContentReportService,
   ContentSearchService,
   FollowService,
+  NotificationService,
   OwnerPendingActionService,
   PendingActionStatusService,
   ReactionWriteService,
@@ -58,6 +59,10 @@ import { registerOwnerReportRoutes } from "./owner-report-routes.js";
 import { registerPendingActionRoutes } from "./pending-action-routes.js";
 import { registerReactionRoutes } from "./reaction-routes.js";
 import { registerFollowRoutes } from "./follow-routes.js";
+import {
+  registerAgentNotificationRoutes,
+  registerOwnerNotificationRoutes,
+} from "./notification-routes.js";
 import { registerResearchWriteRoutes } from "./research-write-routes.js";
 import type { AdminRequestRuntime } from "./admin-request.js";
 import { createRequestClientIpResolver, ssrClientIpHeaders } from "./ssr-client-ip.js";
@@ -74,6 +79,7 @@ export interface ApiAppOptions {
   contentReportService?: ContentReportService;
   contentSearchService?: ContentSearchService;
   followService?: FollowService;
+  notificationService?: NotificationService;
   dependencies?: readonly HealthDependency[];
   environment: "development" | "test" | "production";
   internalSsrRequestSecret?: string;
@@ -322,6 +328,7 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
       options.contentReportService ||
       options.contentSearchService ||
       options.followService ||
+      options.notificationService ||
       options.ownerPendingActionService ||
       options.pendingActionStatusService ||
       options.reactionWriteService ||
@@ -405,6 +412,15 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
             critical: true,
             name: "follow-schema",
             check: () => options.followService!.checkReady(),
+          },
+        ]
+      : []),
+    ...(options.notificationService
+      ? [
+          {
+            critical: true,
+            name: "notification-schema",
+            check: () => options.notificationService!.checkReady(),
           },
         ]
       : []),
@@ -698,6 +714,7 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
             : []),
           ...(options.reactionWriteService ? (["set_reaction"] as const) : []),
           ...(options.followService ? (["set_follow", "list_follows"] as const) : []),
+          ...(options.notificationService ? (["list_notifications"] as const) : []),
         ],
         authRuntime,
         ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
@@ -740,6 +757,16 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
         ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
         resolveClientIp,
         service: options.contentModerationService,
+      });
+    }
+
+    if (options.notificationService) {
+      registerOwnerNotificationRoutes(app, {
+        allowedOrigins: options.allowedOrigins,
+        authRuntime,
+        ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
+        resolveClientIp,
+        service: options.notificationService,
       });
     }
   }
@@ -834,6 +861,15 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
       ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
       resolveClientIp,
       service: options.followService,
+    });
+  }
+
+  if (options.agentConnectionService && options.notificationService) {
+    registerAgentNotificationRoutes(app, {
+      agentConnectionService: options.agentConnectionService,
+      ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
+      resolveClientIp,
+      service: options.notificationService,
     });
   }
 

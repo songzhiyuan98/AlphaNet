@@ -9,7 +9,9 @@ import {
 } from "@alphanet/database";
 import {
   BedrockTitanV2EmbeddingProvider,
+  NOTIFICATION_OUTBOX_EVENT_TYPES,
   PostgresPendingActionExecutionRepository,
+  PostgresNotificationProjector,
   PostgresResearchWriteService,
   SearchIndexer,
 } from "@alphanet/domain";
@@ -17,6 +19,7 @@ import { AwsBedrockInvokeModelTransport } from "@alphanet/integrations";
 import { createLogger } from "@alphanet/observability";
 
 import { ContentSearchSnapshotMaintenance } from "./content-search-snapshot-maintenance.js";
+import { NotificationRetentionMaintenance } from "./notification-retention-maintenance.js";
 import { PendingActionWorker } from "./pending-action-worker.js";
 import {
   runSupervisedWorkerLoops,
@@ -54,6 +57,17 @@ async function start(): Promise<void> {
       postgres.sql,
       environment.OUTBOX_CONSUMER_NAME,
     );
+    const notificationConsumerName = `${environment.OUTBOX_CONSUMER_NAME}.notifications:v1`;
+    if (notificationConsumerName.length > 120) {
+      throw new RangeError(
+        "The versioned Notification Outbox consumer name exceeds 120 characters.",
+      );
+    }
+    const notificationOutboxRepository = new PostgresOutboxRepository(
+      postgres.sql,
+      notificationConsumerName,
+    );
+    const notificationProjector = new PostgresNotificationProjector(postgres.sql);
     const searchIndexer = searchEmbeddingProvider
       ? new SearchIndexer(postgres.sql, searchEmbeddingProvider, {
           embeddingModel: `${environment.SEARCH_EMBEDDING_MODEL_ID}:${environment.SEARCH_EMBEDDING_DIMENSIONS}`,
@@ -83,6 +97,27 @@ async function start(): Promise<void> {
       replayFrom: environment.OUTBOX_REPLAY_FROM,
       repository: outboxRepository,
     });
+    const notificationHandlers = new Map<string, OutboxHandler>();
+    const projectNotification: OutboxHandler = async (event) => {
+      const result = await notificationProjector.project(event);
+      return {
+        accepted: result.accepted,
+        projected: result.projected,
+        source_event_id: result.sourceEventId,
+      };
+    };
+    for (const eventType of NOTIFICATION_OUTBOX_EVENT_TYPES) {
+      notificationHandlers.set(eventType, projectNotification);
+    }
+    const notificationOutboxWorker = new OutboxWorker({
+      batchSize: environment.WORKER_BATCH_SIZE,
+      beforeClaim: () => postgres.check(),
+      handlers: notificationHandlers,
+      leaseOwner,
+      logger,
+      replayFrom: environment.OUTBOX_REPLAY_FROM,
+      repository: notificationOutboxRepository,
+    });
     const pendingActionKeys: Record<number, Uint8Array> = Object.fromEntries([
       ...Object.entries(environment.PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS).map(
         ([version, key]) => [Number(version), Buffer.from(key, "hex")] as const,
@@ -108,6 +143,7 @@ async function start(): Promise<void> {
     );
     await researchWriter.checkReady();
     await pendingActionRepository.checkReady();
+    await notificationProjector.checkReady();
     if (searchIndexer) {
       await searchIndexer.checkReady();
       await searchIndexer.backfillMissingRevisions();
@@ -119,6 +155,10 @@ async function start(): Promise<void> {
       repository: pendingActionRepository,
     });
     const contentSearchSnapshotMaintenance = new ContentSearchSnapshotMaintenance({
+      logger,
+      sql: postgres.sql,
+    });
+    const notificationRetentionMaintenance = new NotificationRetentionMaintenance({
       logger,
       sql: postgres.sql,
     });
@@ -186,6 +226,16 @@ async function start(): Promise<void> {
     };
 
     const loops: SupervisedWorkerLoop[] = [{ name: "core", runOnce: runCoreOnce }];
+    loops.push({
+      name: "notifications",
+      runOnce: async () => {
+        const [projected, purged] = await Promise.all([
+          notificationOutboxWorker.runOnce(),
+          notificationRetentionMaintenance.runIfDue(),
+        ]);
+        return projected + purged;
+      },
+    });
     if (searchIndexer) {
       const indexer = searchIndexer;
       loops.push({

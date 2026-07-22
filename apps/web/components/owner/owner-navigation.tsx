@@ -15,7 +15,7 @@ export function OwnerNavigation({
   active,
   status,
 }: {
-  active: "agents" | "approvals" | "credentials" | "home";
+  active: "agents" | "approvals" | "credentials" | "home" | "notifications";
   status: OwnerStatus;
 }) {
   return (
@@ -45,6 +45,12 @@ export function OwnerNavigation({
           href="/settings/approvals"
         >
           审批
+        </Link>
+        <Link
+          aria-current={active === "notifications" ? "page" : undefined}
+          href="/notifications"
+        >
+          通知
         </Link>
         <Link
           aria-current={active === "credentials" ? "page" : undefined}

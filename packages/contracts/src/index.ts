@@ -7,6 +7,7 @@ export * from "./follow.ts";
 export * from "./health.ts";
 export * from "./http.ts";
 export * from "./moderation.ts";
+export * from "./notification.ts";
 export * from "./owner.ts";
 export * from "./owner-action.ts";
 export * from "./owner-policy.ts";

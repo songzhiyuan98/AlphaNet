@@ -57,6 +57,8 @@ const currentRevisionId = "00000000-0000-4000-8000-000000000205";
 const symbolId = "00000000-0000-4000-8000-000000000301";
 const topicId = "00000000-0000-4000-8000-000000000302";
 const mentionedActorId = "00000000-0000-4000-8000-000000000303";
+const previousSymbolId = "00000000-0000-4000-8000-000000000304";
+const previousTopicId = "00000000-0000-4000-8000-000000000305";
 const outboxEventId = "00000000-0000-4000-8000-000000000401";
 const now = new Date("2026-07-20T12:00:00.000Z");
 
@@ -163,6 +165,8 @@ interface HarnessOptions {
         }
       >
     | undefined;
+  currentSymbols?: { id: string; value: string }[] | undefined;
+  currentTopics?: { id: string; value: string }[] | undefined;
   deleteTarget?:
     | false
     | {
@@ -189,6 +193,8 @@ interface HarnessOptions {
     | undefined;
   maxPostsPerHour?: number | undefined;
   missingCommunityIds?: readonly string[] | undefined;
+  notificationSymbolIds?: string[] | undefined;
+  notificationTopicIds?: string[] | undefined;
   outboxNextSequence?: string | undefined;
   ownerPostCount?: number | undefined;
   ownerPostCounts?: number[] | undefined;
@@ -440,13 +446,13 @@ class SqlHarness {
       text.includes("from platform.content_symbols as content_symbol") &&
       text.includes("order by content_symbol.position")
     ) {
-      return [];
+      return this.#options.currentSymbols ?? [];
     }
     if (
       text.includes("from platform.content_topics as content_topic") &&
       text.includes("order by content_topic.position")
     ) {
-      return [];
+      return this.#options.currentTopics ?? [];
     }
     if (
       text.includes("from platform.source_links as source") &&
@@ -648,6 +654,8 @@ class SqlHarness {
           root_lifecycle_state: "published",
           root_distribution_state: "normal",
           primary_community_id: communityId,
+          root_symbol_ids: [],
+          root_topic_ids: [],
         },
       ];
     }
@@ -679,6 +687,20 @@ class SqlHarness {
         {
           admitted_count: this.#options.threadReplyCount ?? 0,
           retry_at: new Date(now.valueOf() + 30 * 60 * 1_000),
+        },
+      ];
+    }
+    if (
+      text.includes("as community_ids") &&
+      text.includes("classification.symbol_id") &&
+      text.includes("classification.topic_id") &&
+      text.includes("from platform.content_items as content")
+    ) {
+      return [
+        {
+          community_ids: [communityId],
+          symbol_ids: this.#options.notificationSymbolIds ?? [symbolId],
+          topic_ids: this.#options.notificationTopicIds ?? [topicId],
         },
       ];
     }
@@ -1845,6 +1867,37 @@ describe("PostgresResearchWriteService", () => {
     });
     expect(hasSql(harness, "insert into platform.content_revisions")).toBe(false);
     expect(hasSql(harness, "insert into platform.content_symbols")).toBe(true);
+  });
+
+  it("freezes both removed and added classifications for revised Follow fan-out", async () => {
+    const harness = new SqlHarness({
+      currentSymbols: [{ id: previousSymbolId, value: "MU" }],
+      currentTopics: [{ id: previousTopicId, value: "memory" }],
+      notificationSymbolIds: [symbolId],
+      notificationTopicIds: [topicId],
+    });
+
+    const result = await service(harness).updateContent(
+      agentContext("autonomous"),
+      updateInput({
+        patch: { symbols: ["AMD"], topics: ["semiconductors"] },
+        editSummary: undefined,
+        idempotencyKey: "update-frozen-classification-delta-v3",
+      }),
+      { requestId: "req-update-frozen-classification-delta" },
+    );
+
+    expect(result.status).toBe("succeeded");
+    const outbox = harness.queries.find((query) =>
+      query.text.startsWith("insert into system.outbox_events"),
+    );
+    expect(outbox?.values[5]).toMatchObject({
+      affected_symbol_ids: [symbolId, previousSymbolId].sort(),
+      affected_topic_ids: [topicId, previousTopicId].sort(),
+      changed_groups: ["symbols", "topics"],
+      symbol_ids: [symbolId],
+      topic_ids: [topicId],
+    });
   });
 
   it("soft-deletes authored content with OCC, a tombstone event, and a replayable terminal result", async () => {

@@ -124,6 +124,83 @@ BEGIN
 END;
 $runtime_moderation_boundary$;
 
+DO $runtime_notification_boundary$
+BEGIN
+  IF NOT has_table_privilege(
+       current_user,
+       'platform.notifications',
+       'SELECT'
+     )
+     OR NOT has_table_privilege(
+       current_user,
+       'system.notification_change_journal',
+       'SELECT'
+     )
+     OR NOT has_table_privilege(
+       current_user,
+       'system.notification_recipient_sequences',
+       'SELECT'
+     ) THEN
+    RAISE EXCEPTION 'Runtime cannot read the notification projection boundary';
+  END IF;
+
+  IF has_table_privilege(
+       current_user,
+       'platform.notifications',
+       'INSERT,UPDATE,DELETE'
+     )
+     OR has_table_privilege(
+       current_user,
+       'platform.notification_aggregate_actors',
+       'SELECT,INSERT,UPDATE,DELETE'
+     )
+     OR has_table_privilege(
+       current_user,
+       'system.notification_change_journal',
+       'INSERT,UPDATE,DELETE'
+     )
+     OR has_table_privilege(
+       current_user,
+       'system.notification_recipient_sequences',
+       'INSERT,UPDATE,DELETE'
+     ) THEN
+    RAISE EXCEPTION 'Runtime can bypass notification projection entry points';
+  END IF;
+
+  IF NOT has_function_privilege(
+       current_user,
+       'system.project_notification(uuid,uuid,text,uuid,text,uuid,text[],uuid[],text,text,text,jsonb,text,timestamptz,text)',
+       'EXECUTE'
+     )
+     OR NOT has_function_privilege(
+       current_user,
+       'system.project_reaction_notification(uuid,uuid,uuid,text,timestamptz,uuid,boolean,timestamptz,bigint)',
+       'EXECUTE'
+     )
+     OR NOT has_function_privilege(
+       current_user,
+       'system.set_notification_read_state(uuid,uuid,boolean)',
+       'EXECUTE'
+     )
+     OR NOT has_function_privilege(
+       current_user,
+       'system.mark_all_notifications_read(uuid)',
+       'EXECUTE'
+     )
+     OR NOT has_function_privilege(
+       current_user,
+       'system.purge_expired_notifications(integer)',
+       'EXECUTE'
+     ) THEN
+    RAISE EXCEPTION 'Runtime notification entry-point inventory is incomplete';
+  END IF;
+END;
+$runtime_notification_boundary$;
+
+SELECT system.purge_expired_notifications(1)::integer
+  AS notification_purge_probe_count
+\gset
+
 SELECT
   pg_catalog.gen_random_uuid()::text AS user_id,
   pg_catalog.gen_random_uuid()::text AS target_user_id,
@@ -137,6 +214,8 @@ SELECT
   pg_catalog.gen_random_uuid()::text AS credential_id,
   pg_catalog.gen_random_uuid()::text AS replacement_credential_id,
   pg_catalog.gen_random_uuid()::text AS follow_id,
+  pg_catalog.gen_random_uuid()::text AS notification_id,
+  pg_catalog.gen_random_uuid()::text AS reaction_notification_id,
   pg_catalog.gen_random_uuid()::text AS search_event_id,
   pg_catalog.gen_random_uuid()::text AS content_community_id,
   pg_catalog.gen_random_uuid()::text AS content_id,
@@ -671,6 +750,60 @@ WHERE id = :'content_idempotency_id'
 SET CONSTRAINTS ALL IMMEDIATE;
 SET CONSTRAINTS ALL DEFERRED;
 
+SELECT (system.project_notification(
+  :'notification_id',
+  :'actor_id',
+  'content.reply',
+  :'target_actor_id',
+  'content',
+  :'content_id',
+  ARRAY[]::text[],
+  ARRAY[:'content_community_id']::uuid[],
+  NULL,
+  NULL,
+  NULL,
+  jsonb_build_object('root_content_id', :'content_id'),
+  'notification.content_reply',
+  statement_timestamp(),
+  'runtime-smoke:reply:' || :'content_id'
+)).id::text AS projected_notification_id
+\gset
+
+SELECT
+  id::text AS projected_reaction_notification_id,
+  version::integer AS reaction_version_before_read,
+  change_sequence::integer AS reaction_change_before_read
+FROM system.project_reaction_notification(
+  :'reaction_notification_id',
+  :'actor_id',
+  :'content_id',
+  'helpful',
+  date_bin(
+    interval '10 minutes',
+    statement_timestamp(),
+    '2000-01-01T00:00:00Z'::timestamptz
+  ),
+  :'target_actor_id',
+  true,
+  statement_timestamp(),
+  1
+)
+\gset
+
+SELECT
+  version::integer AS reaction_version_after_read,
+  change_sequence::integer AS reaction_change_after_read
+FROM system.set_notification_read_state(
+  :'reaction_notification_id',
+  :'actor_id',
+  true
+)
+\gset
+
+SELECT marked_count::integer AS notification_bulk_read_count
+FROM system.mark_all_notifications_read(:'actor_id')
+\gset
+
 SAVEPOINT runtime_raw_delete_probe;
 UPDATE platform.content_items
 SET version = version + 1,
@@ -1040,6 +1173,35 @@ SELECT (
       AND current_revision_id = :'content_revision_id'
       AND lifecycle_state = 'published'
       AND deleted_at IS NULL
+  )
+  AND :'projected_notification_id' = :'notification_id'
+  AND :'projected_reaction_notification_id' = :'reaction_notification_id'
+  AND :'reaction_version_before_read'::integer = 1
+  AND :'reaction_version_after_read'::integer = 1
+  AND :'reaction_change_before_read'::integer = 2
+  AND :'reaction_change_after_read'::integer = 2
+  AND :'notification_bulk_read_count'::integer = 1
+  AND :'notification_purge_probe_count'::integer BETWEEN 0 AND 1
+  AND (
+    SELECT count(*) = 2
+    FROM platform.notifications AS notification
+    WHERE notification.recipient_actor_id = :'actor_id'
+      AND notification.read_at IS NOT NULL
+      AND notification.schema_version = 'notification-v1'
+      AND notification.context::text NOT LIKE
+        '%A complete Runtime bundle creates this rollback-only post.%'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM system.notification_recipient_sequences AS sequence_head
+    WHERE sequence_head.recipient_actor_id = :'actor_id'
+      AND sequence_head.last_created_sequence = 2
+      AND sequence_head.last_change_sequence = 2
+  )
+  AND (
+    SELECT count(*) = 2
+    FROM system.notification_change_journal AS journal
+    WHERE journal.recipient_actor_id = :'actor_id'
   )
   AND EXISTS (
     SELECT 1

@@ -216,6 +216,7 @@ interface SummaryRow {
 
 interface DetailRow extends SummaryRow {
   approval_method: string | null;
+  actor_id: string;
   attempt_count: number;
   completed_at: Date | null;
   credential_id: string;
@@ -1266,6 +1267,8 @@ export class PostgresOwnerPendingActionService implements OwnerPendingActionServ
         // Decrypt and validate the frozen row before any decision mutation. A
         // corrupt command or authority binding must never be approved/rejected.
         const current = mapDetailRow(row, this.#keyRing, this.#cursorSigningKey);
+        const actorId = normalizeUuid(row.actor_id);
+        if (actorId === null) throw unavailable();
         if (row.owner_status !== "active" || row.owner_email_verified !== true) {
           throw new OwnerPendingActionError("ACTION_DECISION_CONFLICT", {
             currentState: current.state,
@@ -1306,17 +1309,31 @@ export class PostgresOwnerPendingActionService implements OwnerPendingActionServ
         const event = await appendOutboxEvent(transaction, {
           aggregateId: current.id,
           aggregateType: "pending_action",
-          eventType: decision === "approve" ? "action.approved" : "action.rejected",
+          eventType: decision === "approve" ? "action.approved" : "action.resolved",
           eventVersion: 1,
           occurredAt: row.database_now,
-          payload: {
-            action_id: current.id,
-            agent_id: current.agent.id,
-            decision_reason_code: input.reasonCode,
-            operation: current.operation,
-            owner_id: ids.ownerId,
-            state: nextState,
-          },
+          payload:
+            decision === "approve"
+              ? {
+                  action_id: current.id,
+                  actor_id: actorId,
+                  agent_id: current.agent.id,
+                  decision_reason_code: input.reasonCode,
+                  operation: current.operation,
+                  owner_id: ids.ownerId,
+                  state: nextState,
+                }
+              : {
+                  action_id: current.id,
+                  actor_id: actorId,
+                  agent_id: current.agent.id,
+                  decision_reason_code: input.reasonCode,
+                  error_code: "ACTION_REJECTED",
+                  operation: current.operation,
+                  owner_id: ids.ownerId,
+                  reason_code: input.reasonCode,
+                  state: "rejected",
+                },
         });
         await this.#writeDecisionAudit(transaction, {
           actionId: current.id,
@@ -1458,6 +1475,7 @@ export class PostgresOwnerPendingActionService implements OwnerPendingActionServ
         action.version::text as version_text,
         action.owner_id,
         action.agent_id,
+        actor.id::text as actor_id,
         action.credential_id,
         action.idempotency_record_id,
         action.idempotency_key,
@@ -1529,6 +1547,7 @@ export class PostgresOwnerPendingActionService implements OwnerPendingActionServ
         action.version::text as version_text,
         action.owner_id,
         action.agent_id,
+        actor.id::text as actor_id,
         action.credential_id,
         action.idempotency_record_id,
         action.idempotency_key,

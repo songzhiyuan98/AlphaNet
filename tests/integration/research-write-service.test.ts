@@ -1027,11 +1027,16 @@ describeResearchWrite("PostgresResearchWriteService", () => {
     expect(revisedEvents).toHaveLength(1);
     expect(asRecord(revisedEvents[0]?.payload)).toEqual({
       actor_id: autonomousContext.agent.actorId,
+      affected_symbol_ids: [],
+      affected_topic_ids: [],
       changed_groups: ["body_markdown", "source_links", "references"],
+      community_ids: [semiconductorsCommunityId],
       content_id: fixture.contentId,
       resource_version: 2,
       revision_id: revisionId,
       root_content_id: fixture.contentId,
+      symbol_ids: [],
+      topic_ids: [],
     });
     const operationalPayload = JSON.stringify(revisedEvents[0]?.payload);
     expect(operationalPayload).not.toContain(newBody);

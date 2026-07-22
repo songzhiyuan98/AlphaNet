@@ -168,6 +168,7 @@ GRANT SELECT ON TABLE
   platform.moderation_actions,
   platform.moderation_case_items,
   platform.moderation_cases,
+  platform.notifications,
   platform.owners,
   platform.pending_action_attempts,
   platform.pending_actions,
@@ -394,6 +395,8 @@ GRANT SELECT ON TABLE
   system.content_embedding_jobs,
   system.content_search_candidate_snapshots,
   system.content_read_visibility_epochs,
+  system.notification_change_journal,
+  system.notification_recipient_sequences,
   system.outbox_aggregate_heads,
   system.outbox_consumer_deliveries,
   system.outbox_consumer_receipts,
@@ -430,9 +433,14 @@ GRANT EXECUTE ON FUNCTION
   system.claim_content_embedding_jobs(text, bytea, integer, integer),
   system.complete_content_embedding_job(uuid, text, bytea),
   system.enqueue_content_embedding_job(uuid, text, smallint),
+  system.mark_all_notifications_read(uuid),
+  system.project_notification(uuid, uuid, text, uuid, text, uuid, text[], uuid[], text, text, text, jsonb, text, timestamptz, text),
+  system.project_reaction_notification(uuid, uuid, uuid, text, timestamptz, uuid, boolean, timestamptz, bigint),
   system.purge_expired_content_search_candidate_snapshots(integer),
+  system.purge_expired_notifications(integer),
   system.renew_content_embedding_job_lease(uuid, text, bytea, integer),
   system.retry_content_embedding_job(uuid, text, bytea, text, integer),
+  system.set_notification_read_state(uuid, uuid, boolean),
   system.store_content_search_candidate_snapshot(text, bytea, jsonb, timestamptz)
 TO :"runtime_role";
 
