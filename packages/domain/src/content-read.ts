@@ -1455,7 +1455,10 @@ function mapReferences(value: unknown): ContentReferenceProjection[] {
 }
 
 function mapRevision(row: ProjectionRow): RevisionProjection | null {
-  if (row.lifecycle_state === "deleted") {
+  if (
+    row.lifecycle_state === "deleted" ||
+    (row.distribution_state === "hidden" && row.revision_id === null)
+  ) {
     return null;
   }
   if (
@@ -1586,14 +1589,18 @@ function mapProjectionRow(row: ProjectionRow): ContentDetailProjection {
   }
   const kind = row.kind as ContentKind;
   const lifecycleState = row.lifecycle_state;
-  const effectiveCommunityIds = asStringArray(row.effective_community_ids ?? [], 5);
+  const rawEffectiveCommunityIds = asStringArray(row.effective_community_ids ?? [], 5);
   asStringArray(row.additional_community_ids ?? [], 4);
+  const revision = mapRevision(row);
+  const tombstone = revision === null;
+  const hiddenTombstone = tombstone && row.distribution_state === "hidden";
+  const effectiveCommunityIds = tombstone ? [] : rawEffectiveCommunityIds;
   const projectedPrimaryCommunityId =
     kind === "post" ? (effectiveCommunityIds[0] ?? null) : null;
-  const additionalCommunityIds = kind === "post" ? effectiveCommunityIds.slice(1) : [];
-  const symbols =
-    lifecycleState === "deleted" ? [] : asStringArray(row.symbols ?? [], 10);
-  const topics = lifecycleState === "deleted" ? [] : asStringArray(row.topics ?? [], 5);
+  const additionalCommunityIds =
+    kind === "post" && !tombstone ? effectiveCommunityIds.slice(1) : [];
+  const symbols = tombstone ? [] : asStringArray(row.symbols ?? [], 10);
+  const topics = tombstone ? [] : asStringArray(row.topics ?? [], 5);
   const author: ContentAuthorProjection =
     row.actor_kind === "agent"
       ? (() => {
@@ -1612,37 +1619,43 @@ function mapProjectionRow(row: ProjectionRow): ContentDetailProjection {
           handle: row.author_handle,
           kind: "human",
         };
-  const revision = mapRevision(row);
-  const currentRevisionId =
-    lifecycleState === "published" ? row.current_revision_id : null;
+  const currentRevisionId = tombstone ? null : row.current_revision_id;
   if (
     (lifecycleState === "published" &&
-      (revision === null || currentRevisionId === null)) ||
-    row.distribution_state === "hidden" ||
-    effectiveCommunityIds.length < 1 ||
-    (kind === "post" && projectedPrimaryCommunityId === null) ||
+      tombstone &&
+      row.distribution_state !== "hidden") ||
+    (!tombstone && currentRevisionId === null) ||
+    (!tombstone && effectiveCommunityIds.length < 1) ||
+    (!tombstone && kind === "post" && projectedPrimaryCommunityId === null) ||
     (kind === "reply" && row.primary_community_id !== null)
   ) {
     throw new ContentReadError("CONTENT_DATA_INVALID");
   }
   const version = asPositiveInteger(row.version);
-  const reactionCounts = {
-    agree: asNonnegativeInteger(row.agree_count),
-    disagree: asNonnegativeInteger(row.disagree_count),
-    helpful: asNonnegativeInteger(row.helpful_count),
-  };
-  const reactionCountsByActorKind = {
-    agent: {
-      agree: asNonnegativeInteger(row.agree_agent_count),
-      disagree: asNonnegativeInteger(row.disagree_agent_count),
-      helpful: asNonnegativeInteger(row.helpful_agent_count),
-    },
-    human: {
-      agree: asNonnegativeInteger(row.agree_human_count),
-      disagree: asNonnegativeInteger(row.disagree_human_count),
-      helpful: asNonnegativeInteger(row.helpful_human_count),
-    },
-  };
+  const reactionCounts = tombstone
+    ? { agree: 0, disagree: 0, helpful: 0 }
+    : {
+        agree: asNonnegativeInteger(row.agree_count),
+        disagree: asNonnegativeInteger(row.disagree_count),
+        helpful: asNonnegativeInteger(row.helpful_count),
+      };
+  const reactionCountsByActorKind = tombstone
+    ? {
+        agent: { agree: 0, disagree: 0, helpful: 0 },
+        human: { agree: 0, disagree: 0, helpful: 0 },
+      }
+    : {
+        agent: {
+          agree: asNonnegativeInteger(row.agree_agent_count),
+          disagree: asNonnegativeInteger(row.disagree_agent_count),
+          helpful: asNonnegativeInteger(row.helpful_agent_count),
+        },
+        human: {
+          agree: asNonnegativeInteger(row.agree_human_count),
+          disagree: asNonnegativeInteger(row.disagree_human_count),
+          helpful: asNonnegativeInteger(row.helpful_human_count),
+        },
+      };
   for (const reaction of ["helpful", "agree", "disagree"] as const) {
     if (
       reactionCounts[reaction] !==
@@ -1679,15 +1692,17 @@ function mapProjectionRow(row: ProjectionRow): ContentDetailProjection {
     contentSafety,
     countsAsOf: new Date(0),
     effectiveCommunityIds,
-    inboundReferenceCount: asNonnegativeInteger(row.inbound_reference_count),
+    inboundReferenceCount: tombstone
+      ? 0
+      : asNonnegativeInteger(row.inbound_reference_count),
     reactionCounts,
     reactionCountsByActorKind,
-    replyCount: asNonnegativeInteger(row.reply_count),
+    replyCount: hiddenTombstone ? 0 : asNonnegativeInteger(row.reply_count),
     resourceVersion: version,
     revision,
     viewerState: {
-      following: row.following,
-      reactions: mapReactionTypes(row.active_reactions),
+      following: tombstone ? false : row.following,
+      reactions: tombstone ? [] : mapReactionTypes(row.active_reactions),
     },
   };
 }
@@ -2181,6 +2196,7 @@ export class PostgresContentReadService implements ContentReadService {
           transaction,
           [normalized.contentId],
           viewer,
+          { includeHiddenTargets: true },
         );
         const detail = details[0];
         if (detail === undefined) {
@@ -2188,10 +2204,10 @@ export class PostgresContentReadService implements ContentReadService {
         }
         detail.countsAsOf = countsAsOf;
 
-        // A tombstone is the complete public projection for deleted content. Never
-        // consult append-only payload tables after deletion, even when callers pass
-        // a formerly valid Revision ID or history cursor.
-        if (detail.content.lifecycleState === "deleted") {
+        // A tombstone is the complete public projection for deleted or moderated
+        // content. Never consult append-only payload tables when the caller is not
+        // authorized to see the retained Revision, even if it supplies an old ID.
+        if (detail.revision === null) {
           return detail;
         }
         const currentRevision = detail.revision;
@@ -2798,7 +2814,7 @@ export class PostgresContentReadService implements ContentReadService {
                   where reply.root_id = content.id
                     and reply.id <> content.id
                     and reply.lifecycle_state = 'published'
-                    and reply.distribution_state <> 'hidden'
+                    and reply.distribution_state = 'normal'
                     and reply.published_at <= ${asOf}
                     and pg_visible_in_snapshot(
                       reply.content_read_created_xid,
@@ -2858,6 +2874,13 @@ export class PostgresContentReadService implements ContentReadService {
               and visible_root.kind = 'post'
               and visible_root.lifecycle_state = 'published'
               and visible_root.distribution_state <> 'hidden'
+              and (
+                ${input.sort}::text = 'latest'
+                or (
+                  content.distribution_state = 'normal'
+                  and visible_root.distribution_state = 'normal'
+                )
+              )
               and exists (
                 select 1
                 from platform.communities as visible_community
@@ -3331,12 +3354,15 @@ export class PostgresContentReadService implements ContentReadService {
     sql: QuerySql,
     contentIds: readonly string[],
     viewer: ContentReadViewer,
+    options: { includeHiddenTargets?: boolean } = {},
   ): Promise<ContentDetailProjection[]> {
     if (contentIds.length === 0) {
       return [];
     }
     const allowSuspendedCommunities = viewer !== null;
     const viewerActorId = viewer?.agent.actorId ?? null;
+    const viewerOwnerId = viewer?.owner.id ?? null;
+    const includeHiddenTargets = options.includeHiddenTargets === true;
     const rows = await sql<ProjectionRow[]>`
       select
         content.id::text as id,
@@ -3350,7 +3376,10 @@ export class PostgresContentReadService implements ContentReadService {
         content.parent_id::text as parent_id,
         content.depth::integer as depth,
         content.lifecycle_state,
-        content.distribution_state,
+        case
+          when root.distribution_state = 'hidden' then 'hidden'
+          else content.distribution_state
+        end as distribution_state,
         content.erasure_state,
         content.primary_community_id::text as primary_community_id,
         content.published_at,
@@ -3366,7 +3395,7 @@ export class PostgresContentReadService implements ContentReadService {
               where reply.root_id = content.id
                 and reply.id <> content.id
                 and reply.lifecycle_state = 'published'
-                and reply.distribution_state <> 'hidden'
+                and reply.distribution_state = 'normal'
             ), content.updated_at)
           )
           else content.updated_at
@@ -3476,7 +3505,7 @@ export class PostgresContentReadService implements ContentReadService {
           where content_topic.content_id = content.id
         ), array[]::text[]) as topics,
         case
-          when content.lifecycle_state = 'published' then coalesce((
+          when revision.id is not null then coalesce((
             select jsonb_agg(
               jsonb_build_object(
                 'sourceLinkId', source.id::text,
@@ -3495,7 +3524,7 @@ export class PostgresContentReadService implements ContentReadService {
           else '[]'::jsonb
         end as source_links,
         case
-          when content.lifecycle_state = 'published' then coalesce((
+          when revision.id is not null then coalesce((
             select jsonb_agg(
               jsonb_build_object(
                 'actorId', mentioned.id::text,
@@ -3514,7 +3543,7 @@ export class PostgresContentReadService implements ContentReadService {
           else '[]'::jsonb
         end as mentions,
         case
-          when content.lifecycle_state = 'published' then coalesce((
+          when revision.id is not null then coalesce((
             select jsonb_agg(
               jsonb_build_object(
                 'targetContentId', relation.to_content_id::text,
@@ -3640,6 +3669,9 @@ export class PostgresContentReadService implements ContentReadService {
       from platform.content_items as content
       join platform.actors as actor
         on actor.id = content.author_actor_id
+      cross join (
+        select ${includeHiddenTargets}::boolean as include_hidden_targets
+      ) as request_visibility
       left join platform.agents as agent
         on agent.actor_id = actor.id
       join platform.content_items as root
@@ -3648,6 +3680,14 @@ export class PostgresContentReadService implements ContentReadService {
       left join platform.content_revisions as revision
         on revision.id = content.current_revision_id
        and revision.content_id = content.id
+       and content.lifecycle_state = 'published'
+       and (
+         (
+           content.distribution_state <> 'hidden'
+           and root.distribution_state <> 'hidden'
+         )
+         or actor.owner_id = ${viewerOwnerId}::uuid
+       )
       left join lateral (
         select
           count(*) filter (
@@ -3699,8 +3739,13 @@ export class PostgresContentReadService implements ContentReadService {
         where reaction.content_id = content.id
       ) as reaction_aggregate on true
       where content.id = any(${contentIds}::uuid[])
-        and content.distribution_state <> 'hidden'
-        and root.distribution_state <> 'hidden'
+        and (
+          request_visibility.include_hidden_targets
+          or (
+            content.distribution_state <> 'hidden'
+            and root.distribution_state <> 'hidden'
+          )
+        )
         and exists (
           select 1
           from platform.communities as visible_community

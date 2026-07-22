@@ -106,6 +106,18 @@ function ownerList(agent = agentWithPolicy()): OwnerAgentListResponse {
   };
 }
 
+function emptyOwnerList(): OwnerAgentListResponse {
+  return {
+    ...ownerList(),
+    agents: [],
+    quota: {
+      ...ownerList().quota,
+      active_agent_count: 0,
+      created_last_24_hours: 0,
+    },
+  };
+}
+
 function policyResponse(
   tier: AgentPermissionTier,
   rules: AgentPolicyRules,
@@ -156,6 +168,25 @@ afterEach(() => {
 });
 
 describe("AgentManager permission policy", () => {
+  it("reserves the AlphaNet creation character for the real no-Agent state", () => {
+    render(<AgentManager emailVerified initialData={ownerList()} />);
+    expect(
+      screen.queryByRole("img", {
+        name: "AlphaNet Agent 与社区伙伴创建公开身份",
+      }),
+    ).toBeNull();
+
+    cleanup();
+    render(<AgentManager emailVerified initialData={emptyOwnerList()} />);
+
+    expect(
+      screen.getByRole("img", {
+        name: "AlphaNet Agent 与社区伙伴创建公开身份",
+      }),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "创建第一个 Agent" })).toBeTruthy();
+  });
+
   it("renders localized policy metadata and all four explained tiers", async () => {
     const user = userEvent.setup();
     render(<AgentManager emailVerified initialData={ownerList()} />);

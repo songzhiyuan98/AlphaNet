@@ -24,6 +24,10 @@ SELECT 'platform', table_name, 'SELECT'
 FROM (
   VALUES
     ('action_logs'::name),
+    ('admin_assignments'::name),
+    ('admin_role_permissions'::name),
+    ('admin_roles'::name),
+    ('admins'::name),
     ('agent_search_activity_events'::name),
     ('actors'::name),
     ('agent_policies'::name),
@@ -42,11 +46,16 @@ FROM (
     ('follows'::name),
     ('idempotency_records'::name),
     ('mentions'::name),
+    ('moderation_actions'::name),
+    ('moderation_case_items'::name),
+    ('moderation_cases'::name),
     ('owners'::name),
     ('pending_action_attempts'::name),
     ('pending_actions'::name),
     ('reactions'::name),
     ('registration_controls'::name),
+    ('report_submission_idempotency'::name),
+    ('reports'::name),
     ('source_links'::name),
     ('symbols'::name),
     ('topics'::name)
@@ -94,8 +103,7 @@ FROM (
     ('credentials'::name),
     ('idempotency_records'::name),
     ('pending_action_attempts'::name),
-    ('pending_actions'::name),
-    ('registration_controls'::name)
+    ('pending_actions'::name)
 ) AS platform_table(table_name);
 
 INSERT INTO expected_table_privileges (schema_name, table_name, privilege)
@@ -138,12 +146,137 @@ VALUES
   ('platform', 'follows', 'target_content_id', 'INSERT'),
   ('platform', 'follows', 'notification_level', 'INSERT'),
   ('platform', 'follows', 'notification_level', 'UPDATE'),
+  ('platform', 'registration_controls', 'active_agent_count', 'UPDATE'),
   ('platform', 'content_items', 'version', 'UPDATE'),
   ('platform', 'content_items', 'current_revision_id', 'UPDATE'),
   ('platform', 'content_items', 'lifecycle_state', 'UPDATE'),
+  ('platform', 'content_items', 'distribution_state', 'UPDATE'),
   ('platform', 'content_items', 'deleted_at', 'UPDATE'),
   ('platform', 'source_links', 'removed_revision_id', 'UPDATE'),
   ('platform', 'content_relations', 'removed_revision_id', 'UPDATE');
+
+INSERT INTO expected_column_privileges (
+  schema_name,
+  table_name,
+  column_name,
+  privilege
+)
+SELECT 'platform', 'reports', column_name, 'INSERT'
+FROM (
+  VALUES
+    ('id'::name),
+    ('reporter_owner_id'::name),
+    ('reporter_actor_id'::name),
+    ('target_type'::name),
+    ('target_content_id'::name),
+    ('reason_code'::name),
+    ('description'::name),
+    ('authentication_assurance'::name),
+    ('idempotency_key'::name),
+    ('request_digest'::name)
+) AS report_insert_column(column_name);
+
+INSERT INTO expected_column_privileges (
+  schema_name,
+  table_name,
+  column_name,
+  privilege
+)
+SELECT 'platform', 'reports', column_name, 'UPDATE'
+FROM (
+  VALUES
+    ('version'::name),
+    ('status'::name)
+) AS report_update_column(column_name);
+
+INSERT INTO expected_column_privileges (
+  schema_name,
+  table_name,
+  column_name,
+  privilege
+)
+SELECT 'platform', 'moderation_cases', column_name, 'INSERT'
+FROM (
+  VALUES
+    ('id'::name),
+    ('target_type'::name),
+    ('target_content_id'::name)
+) AS moderation_case_insert_column(column_name);
+
+INSERT INTO expected_column_privileges (
+  schema_name,
+  table_name,
+  column_name,
+  privilege
+)
+SELECT 'platform', 'moderation_cases', column_name, 'UPDATE'
+FROM (
+  VALUES
+    ('version'::name),
+    ('status'::name),
+    ('assigned_admin_id'::name),
+    ('resolution_code'::name)
+) AS moderation_case_update_column(column_name);
+
+INSERT INTO expected_column_privileges (
+  schema_name,
+  table_name,
+  column_name,
+  privilege
+)
+SELECT 'platform', 'report_submission_idempotency', column_name, 'INSERT'
+FROM (
+  VALUES
+    ('reporter_owner_id'::name),
+    ('reporter_actor_id'::name),
+    ('idempotency_key'::name),
+    ('request_digest'::name),
+    ('report_id'::name)
+) AS report_idempotency_insert_column(column_name);
+
+INSERT INTO expected_column_privileges (
+  schema_name,
+  table_name,
+  column_name,
+  privilege
+)
+VALUES
+  ('platform', 'moderation_case_items', 'case_id', 'INSERT'),
+  ('platform', 'moderation_case_items', 'report_id', 'INSERT');
+
+INSERT INTO expected_column_privileges (
+  schema_name,
+  table_name,
+  column_name,
+  privilege
+)
+SELECT 'platform', 'moderation_actions', column_name, 'INSERT'
+FROM (
+  VALUES
+    ('id'::name),
+    ('case_id'::name),
+    ('admin_id'::name),
+    ('permission_used'::name),
+    ('action'::name),
+    ('reason_code'::name),
+    ('internal_note'::name),
+    ('before_distribution_state'::name),
+    ('after_distribution_state'::name),
+    ('target_version_before'::name),
+    ('target_version_after'::name),
+    ('case_version_before'::name),
+    ('case_version_after'::name),
+    ('case_updated_at_after'::name),
+    ('case_closed_at_after'::name),
+    ('response_content_version'::name),
+    ('response_content_lifecycle_state'::name),
+    ('response_content_distribution_state'::name),
+    ('reverts_action_id'::name),
+    ('idempotency_key'::name),
+    ('request_digest'::name),
+    ('action_log_id'::name),
+    ('outbox_event_id'::name)
+) AS moderation_action_insert_column(column_name);
 
 INSERT INTO expected_column_privileges (
   schema_name,
@@ -823,6 +956,81 @@ BEGIN
       'Runtime can override database-owned embedding chunk identity';
   END IF;
 
+  IF has_column_privilege(
+       runtime_role_oid,
+       'platform.reports',
+       'created_at',
+       'INSERT'
+     )
+     OR has_column_privilege(
+       runtime_role_oid,
+       'platform.reports',
+       'status',
+       'INSERT'
+     )
+     OR has_column_privilege(
+       runtime_role_oid,
+       'platform.moderation_cases',
+       'opened_at',
+       'INSERT'
+     )
+     OR has_column_privilege(
+       runtime_role_oid,
+       'platform.reports',
+       'resolved_at',
+       'UPDATE'
+     )
+     OR has_column_privilege(
+       runtime_role_oid,
+       'platform.moderation_cases',
+       'priority',
+       'UPDATE'
+     )
+     OR has_column_privilege(
+       runtime_role_oid,
+       'platform.moderation_cases',
+       'closed_at',
+       'UPDATE'
+     )
+     OR has_table_privilege(
+       runtime_role_oid,
+       'platform.report_submission_idempotency',
+       'UPDATE,DELETE'
+     )
+     OR has_column_privilege(
+       runtime_role_oid,
+       'platform.moderation_actions',
+       'occurred_at',
+       'INSERT'
+     )
+     OR has_column_privilege(
+       runtime_role_oid,
+       'platform.moderation_actions',
+       'result_state',
+       'INSERT'
+     ) THEN
+    RAISE EXCEPTION
+      'Runtime can override database-owned moderation state or timestamps';
+  END IF;
+
+  IF has_table_privilege(
+       runtime_role_oid,
+       'platform.admin_assignments',
+       'INSERT,UPDATE,DELETE'
+     )
+     OR has_table_privilege(
+       runtime_role_oid,
+       'platform.admin_roles',
+       'INSERT,UPDATE,DELETE'
+     )
+     OR has_table_privilege(
+       runtime_role_oid,
+       'platform.admin_role_permissions',
+       'INSERT,UPDATE,DELETE'
+     ) THEN
+    RAISE EXCEPTION 'Runtime can grant or mutate administrator roles';
+  END IF;
+
   IF has_function_privilege(
        runtime_role_oid,
        'system.redrive_content_embedding_job(uuid)',
@@ -947,9 +1155,35 @@ BEGIN
       AND pg_catalog.pg_get_function_identity_arguments(routine.oid) = ''
       AND NOT routine.prosecdef
       AND 'search_path=pg_catalog' = ANY (routine.proconfig)
+      AND position(
+        'content.moderation_changed' IN pg_get_functiondef(routine.oid)
+      ) > 0
   ) THEN
     RAISE EXCEPTION
       'Runtime content provenance guard is missing or not SECURITY INVOKER';
+  END IF;
+
+  IF (
+    SELECT count(*) <> 7
+    FROM pg_catalog.pg_proc AS routine
+    JOIN pg_catalog.pg_namespace AS namespace
+      ON namespace.oid = routine.pronamespace
+    WHERE namespace.nspname = 'platform'
+      AND routine.proname IN (
+        'validate_runtime_report_idempotency_provenance',
+        'validate_runtime_report_creation_provenance',
+        'validate_runtime_case_creation_provenance',
+        'validate_runtime_moderation_action_provenance',
+        'validate_runtime_moderation_resolution_provenance',
+        'validate_runtime_governance_outbox_provenance',
+        'validate_runtime_governance_action_log_provenance'
+      )
+      AND routine.pronargs = 0
+      AND NOT routine.prosecdef
+      AND 'search_path=pg_catalog' = ANY (routine.proconfig)
+  ) THEN
+    RAISE EXCEPTION
+      'Runtime moderation provenance guards are missing or unsafe';
   END IF;
 
   SELECT string_agg(
@@ -1023,6 +1257,56 @@ BEGIN
   IF violation IS NOT NULL THEN
     RAISE EXCEPTION
       'Runtime content provenance trigger coverage is incomplete: %', violation;
+  END IF;
+
+  SELECT string_agg(
+    format(
+      '%I.%I.%I[%s=>%s]',
+      expected.table_schema,
+      expected.table_name,
+      expected.trigger_name,
+      expected.tgtype,
+      expected.function_name
+    ),
+    ', ' ORDER BY expected.table_schema, expected.table_name, expected.trigger_name
+  )
+  INTO violation
+  FROM (
+    VALUES
+      ('platform'::name, 'report_submission_idempotency'::name, 'report_submission_idempotency_validate_runtime_provenance'::name, 5::smallint, 'platform.validate_runtime_report_idempotency_provenance()'::text),
+      ('platform'::name, 'reports'::name, 'reports_validate_runtime_creation_provenance'::name, 5::smallint, 'platform.validate_runtime_report_creation_provenance()'::text),
+      ('platform'::name, 'moderation_cases'::name, 'moderation_cases_validate_runtime_creation_provenance'::name, 5::smallint, 'platform.validate_runtime_case_creation_provenance()'::text),
+      ('platform'::name, 'moderation_actions'::name, 'moderation_actions_validate_runtime_provenance'::name, 5::smallint, 'platform.validate_runtime_moderation_action_provenance()'::text),
+      ('system'::name, 'outbox_events'::name, 'outbox_events_validate_governance_provenance'::name, 5::smallint, 'platform.validate_runtime_governance_outbox_provenance()'::text),
+      ('platform'::name, 'action_logs'::name, 'action_logs_validate_governance_provenance'::name, 5::smallint, 'platform.validate_runtime_governance_action_log_provenance()'::text),
+      ('platform'::name, 'reports'::name, 'reports_validate_runtime_resolution_provenance'::name, 17::smallint, 'platform.validate_runtime_moderation_resolution_provenance()'::text),
+      ('platform'::name, 'moderation_cases'::name, 'moderation_cases_validate_runtime_resolution_provenance'::name, 17::smallint, 'platform.validate_runtime_moderation_resolution_provenance()'::text)
+  ) AS expected(table_schema, table_name, trigger_name, tgtype, function_name)
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_trigger AS trigger
+    JOIN pg_catalog.pg_class AS relation ON relation.oid = trigger.tgrelid
+    JOIN pg_catalog.pg_namespace AS namespace
+      ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname = expected.table_schema
+      AND relation.relname = expected.table_name
+      AND trigger.tgname = expected.trigger_name
+      AND trigger.tgtype = expected.tgtype
+      AND trigger.tgfoid = pg_catalog.to_regprocedure(expected.function_name)
+      AND NOT trigger.tgisinternal
+      AND trigger.tgconstraint <> 0
+      AND trigger.tgdeferrable
+      AND trigger.tginitdeferred
+      AND trigger.tgenabled IN ('O', 'A')
+  );
+  IF violation IS NOT NULL THEN
+    RAISE EXCEPTION
+      'Runtime moderation provenance trigger coverage is incomplete: %', violation;
+  END IF;
+
+  IF (SELECT count(*) FROM platform.admin_roles) <> 5
+    OR (SELECT count(DISTINCT permission) FROM platform.admin_role_permissions) <> 8 THEN
+    RAISE EXCEPTION 'Administrator RBAC seed inventory is incomplete';
   END IF;
 
   IF current_setting('server_version_num')::integer < 170000 THEN

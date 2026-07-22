@@ -823,6 +823,25 @@ function validateContentDetailItem(
 ): void {
   validateContentLocation(content, context);
 
+  const moderatedTombstone =
+    content.lifecycle_state === "published" &&
+    content.distribution_state === "hidden" &&
+    content.current_revision_id === null;
+
+  if (
+    moderatedTombstone &&
+    (content.title !== null ||
+      content.primary_community_id !== null ||
+      content.additional_community_ids.length !== 0 ||
+      content.symbols.length !== 0 ||
+      content.topics.length !== 0)
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "Moderated tombstones cannot disclose content or classification data.",
+    });
+  }
+
   if (content.kind === "reply") {
     if (
       content.title !== null ||
@@ -840,6 +859,7 @@ function validateContentDetailItem(
 
   if (
     content.lifecycle_state === "published" &&
+    !moderatedTombstone &&
     (content.title === null || content.primary_community_id === null)
   ) {
     context.addIssue({
@@ -916,6 +936,11 @@ export const GetContentResponseSchema = GetContentResponseBaseSchema.superRefine
   (response, context) => {
     validateReactionAggregate(response, context);
 
+    const moderatedTombstone =
+      response.content.lifecycle_state === "published" &&
+      response.content.distribution_state === "hidden" &&
+      response.content.current_revision_id === null;
+
     if (response.resource_version !== response.content.version) {
       context.addIssue({
         code: "custom",
@@ -924,7 +949,11 @@ export const GetContentResponseSchema = GetContentResponseBaseSchema.superRefine
       });
     }
 
-    if (response.content.lifecycle_state === "published" && response.revision === null) {
+    if (
+      response.content.lifecycle_state === "published" &&
+      !moderatedTombstone &&
+      response.revision === null
+    ) {
       context.addIssue({
         code: "custom",
         path: ["revision"],
@@ -933,6 +962,7 @@ export const GetContentResponseSchema = GetContentResponseBaseSchema.superRefine
     }
     if (
       response.content.lifecycle_state === "published" &&
+      !moderatedTombstone &&
       response.content.current_revision_id === null
     ) {
       context.addIssue({
@@ -946,6 +976,23 @@ export const GetContentResponseSchema = GetContentResponseBaseSchema.superRefine
         code: "custom",
         path: ["revision"],
         message: "Deleted content must not disclose a revision.",
+      });
+    }
+    if (
+      moderatedTombstone &&
+      (response.revision !== null ||
+        response.effective_community_ids.length !== 0 ||
+        response.reaction_counts.helpful !== 0 ||
+        response.reaction_counts.agree !== 0 ||
+        response.reaction_counts.disagree !== 0 ||
+        response.reply_count !== 0 ||
+        response.inbound_reference_count !== 0 ||
+        response.viewer_state.following ||
+        response.viewer_state.reactions.length !== 0)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Moderated tombstones cannot disclose payload or social state.",
       });
     }
     if (response.revision !== null) {
@@ -1002,11 +1049,14 @@ export const GetContentResponseSchema = GetContentResponseBaseSchema.superRefine
         message: "Revision history, page, and ordering must be returned together.",
       });
     }
-    if (response.content.lifecycle_state === "deleted" && historyFieldCount !== 0) {
+    if (
+      (response.content.lifecycle_state === "deleted" || moderatedTombstone) &&
+      historyFieldCount !== 0
+    ) {
       context.addIssue({
         code: "custom",
         path: ["revision_history"],
-        message: "Deleted content must not disclose revision history.",
+        message: "Content tombstones must not disclose revision history.",
       });
     }
   },

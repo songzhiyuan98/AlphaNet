@@ -1,13 +1,48 @@
 :root {
   color-scheme: dark;
   --bg: #080a09;
-  --panel: #101310;
-  --panel-soft: #141814;
-  --line: #282d28;
+  --panel: #090c0a;
+  --panel-soft: #0c100d;
+  --line: #202620;
   --text: #f3f6f0;
   --muted: #9ba49a;
   --accent: #b7f343;
   --accent-soft: rgba(183, 243, 67, 0.12);
+  --surface-canvas: #080a09;
+  --surface-raised: #090c0a;
+  --surface-subtle: #0c100d;
+  --surface-hover: #101511;
+  --border-subtle: #202720;
+  --border-strong: #364137;
+  --foreground-primary: #f4f7f1;
+  --foreground-secondary: #b3bdb0;
+  --foreground-muted: #899586;
+  --foreground-faint: #778376;
+  --accent-hover: #c8fb61;
+  --warning: #e8bd63;
+  --danger: #e9857f;
+  --radius-control: 9px;
+  --radius-panel: 14px;
+  --radius-large: 18px;
+  --shadow-panel: 0 18px 60px rgba(0, 0, 0, 0.22);
+  --page-gutter: clamp(20px, 4vw, 48px);
+  --content-measure: 72ch;
+  --transition-fast: 140ms ease;
+  --font-sans:
+    Inter, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+    "Noto Sans CJK SC", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  --font-display:
+    Inter, "SF Pro Display", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+    "Noto Sans CJK SC", ui-sans-serif, system-ui, sans-serif;
+  --font-mono:
+    "SFMono-Regular", "Roboto Mono", "Noto Sans Mono CJK SC", ui-monospace, Menlo,
+    Consolas, monospace;
+  --type-landing: clamp(52px, 4.8vw, 62px);
+  --type-page: clamp(38px, 3.8vw, 46px);
+  --type-post: clamp(36px, 3.6vw, 42px);
+  --type-section: clamp(24px, 2.35vw, 28px);
+  --type-feed: clamp(20px, 2.15vw, 26px);
 }
 
 * {
@@ -24,14 +59,29 @@ body {
     radial-gradient(circle at 75% 8%, rgba(183, 243, 67, 0.08), transparent 28rem),
     var(--bg);
   color: var(--text);
-  font-family:
-    Inter,
-    ui-sans-serif,
-    system-ui,
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    sans-serif;
+  font-family: var(--font-sans);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+body:has(.landingPage) {
+  background: #040604;
+}
+
+body:has(.researchPage) {
+  background: var(--bg);
+}
+
+.landingPage {
+  background: #040604;
+}
+
+h1,
+h2,
+h3,
+.authTitle,
+.researchContentTitle {
+  font-family: var(--font-display);
 }
 
 a {
@@ -57,6 +107,7 @@ a {
 
 button:focus-visible,
 a:focus-visible,
+summary:focus-visible,
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible {
@@ -111,6 +162,35 @@ main {
 
 .navLinks a:hover {
   color: var(--text);
+}
+
+.navLinks a[aria-current="page"] {
+  color: var(--text);
+}
+
+.navManageLink {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: #dce3d8;
+  padding: 8px 11px;
+}
+
+.navManageLink:hover {
+  background: rgba(255, 255, 255, 0.035);
+  border-color: #424b40;
+}
+
+.navMore {
+  display: none;
+  position: relative;
+}
+
+.navMore summary {
+  list-style: none;
+}
+
+.navMore summary::-webkit-details-marker {
+  display: none;
 }
 
 .stage {
@@ -386,14 +466,6 @@ footer {
   height: 2px;
   inset-inline: 0;
   position: absolute;
-}
-
-.researchNotice {
-  border-bottom: 1px solid #20251f;
-  color: #737c70;
-  font-size: 10px;
-  line-height: 1.5;
-  padding: 11px 0;
 }
 
 .communityDirectoryHero,
@@ -1161,18 +1233,6 @@ footer {
   color: var(--accent);
 }
 
-.contentSafetyNotice {
-  background: rgba(183, 243, 67, 0.055);
-  border: 1px solid rgba(183, 243, 67, 0.17);
-  border-radius: 9px;
-  color: #9da995;
-  font-size: 10px;
-  line-height: 1.65;
-  margin-top: 42px;
-  max-width: 980px;
-  padding: 13px 15px;
-}
-
 .publicContentBody {
   color: #d8ded4;
   font-size: clamp(15px, 1.5vw, 18px);
@@ -1305,14 +1365,6 @@ footer {
   font-size: 24px;
 }
 
-.reactionSignalNotice {
-  color: #727b70;
-  font-size: 9px;
-  line-height: 1.6;
-  margin: 9px 0 0;
-  max-width: 520px;
-}
-
 .publicDiscussion {
   padding: 70px 0;
 }
@@ -1384,19 +1436,11 @@ footer {
   text-align: center;
 }
 
-.communityEmptyFeed > span {
-  align-items: center;
-  background: var(--accent-soft);
-  border: 1px solid rgba(183, 243, 67, 0.2);
-  border-radius: 12px;
-  color: var(--accent);
-  display: flex;
-  height: 48px;
-  justify-content: center;
-  width: 48px;
+.communityEmptyFeed h2 {
+  font-size: 34px;
+  margin: 0 0 14px;
 }
 
-.communityEmptyFeed h2,
 .communityUnavailable h1 {
   font-size: 34px;
   margin: 24px 0 14px;
@@ -4323,10 +4367,6 @@ footer {
     display: none;
   }
 
-  .researchNotice {
-    font-size: 9px;
-  }
-
   .communityDirectoryHero,
   .communityDetailHero {
     align-items: start;
@@ -4804,5 +4844,1831 @@ footer {
     gap: 38px;
     grid-template-columns: 1fr;
     padding-top: 52px;
+  }
+}
+
+/* Enterprise UI refinement v1
+ * Preserve AlphaNet's editorial dark-and-acid-green identity while giving
+ * product surfaces a denser, more legible social-network rhythm.
+ */
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+button,
+a,
+input,
+select,
+textarea {
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    color var(--transition-fast),
+    opacity var(--transition-fast);
+}
+
+main,
+.researchPage,
+.ownerPage,
+.publicAgentPage {
+  max-width: 1280px;
+  padding-inline: var(--page-gutter);
+}
+
+.nav,
+.researchNav,
+.ownerNav {
+  min-height: 72px;
+}
+
+.mark {
+  box-shadow: 0 0 24px rgba(183, 243, 67, 0.12);
+}
+
+.hero {
+  padding: clamp(88px, 10vw, 128px) 0 clamp(76px, 8vw, 104px);
+}
+
+.hero h1 {
+  font-size: clamp(64px, 7.6vw, 98px);
+  max-width: 1040px;
+}
+
+.lede {
+  color: var(--foreground-secondary);
+  font-size: clamp(17px, 1.7vw, 20px);
+  max-width: var(--content-measure);
+}
+
+.primaryAction,
+.secondaryAction {
+  align-items: center;
+  display: inline-flex;
+  min-height: 44px;
+}
+
+.foundation {
+  gap: clamp(48px, 7vw, 84px);
+  padding: clamp(80px, 9vw, 112px) 0;
+}
+
+.statusPanel,
+.authCard,
+.ownerPanel,
+.ownerIdentity,
+.settingsHeaderAside,
+.quotaStrip {
+  box-shadow: var(--shadow-panel);
+}
+
+/* Public social network shell */
+
+.researchPage {
+  padding-bottom: 72px;
+}
+
+.researchNav {
+  backdrop-filter: blur(18px);
+  background: rgba(8, 10, 9, 0.9);
+  height: 72px;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.researchNavLinks {
+  color: var(--foreground-muted);
+  font-size: 13px;
+  gap: 10px;
+}
+
+.researchNavLinks a {
+  border-radius: var(--radius-control);
+  height: 40px;
+  padding-inline: 12px;
+}
+
+.researchNavLinks a:hover {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.researchNavLinks a[aria-current="page"]::after {
+  bottom: -17px;
+}
+
+.researchNavLinks .researchOwnerLink {
+  border: 1px solid var(--border-strong);
+  color: #dbe2d7;
+  margin-left: 4px;
+  padding-inline: 14px;
+}
+
+.researchNavLinks .researchOwnerLink:hover {
+  background: var(--surface-hover);
+  border-color: #4b5549;
+}
+
+.communityDirectoryHero,
+.communityDetailHero {
+  gap: clamp(40px, 6vw, 76px);
+  padding: clamp(52px, 6vw, 72px) 0 44px;
+}
+
+.communityDirectoryHero h1,
+.communityDetailHero h1,
+.latestResearchHero h1,
+.searchResearchHero h1,
+.settingsHeader h1,
+.ownerHero h1,
+.publicAgentTitle h1 {
+  font-size: clamp(40px, 5vw, 64px);
+  letter-spacing: -0.052em;
+  line-height: 1.02;
+}
+
+.communityDetailHero h1,
+.publicAgentTitle h1 {
+  font-size: clamp(38px, 3.6vw, 46px);
+}
+
+.ownerHero h1 {
+  font-size: clamp(40px, 3.8vw, 48px);
+}
+
+.communityDirectoryHero h1,
+.latestResearchHero h1 {
+  font-size: var(--type-page);
+}
+
+.searchResearchHero h1 {
+  font-size: var(--type-page);
+}
+
+.communityDirectoryHero h1,
+.latestResearchHero h1,
+.searchResearchHero h1 {
+  letter-spacing: -0.04em;
+  line-height: 1.06;
+  max-width: 22ch;
+  text-wrap: balance;
+}
+
+.communityTitleBreak {
+  display: none;
+}
+
+.settingsHeader h1 {
+  font-size: clamp(36px, 3vw, 40px);
+}
+
+.communityDirectoryHero > div > p:last-child,
+.communityDetailHero > div > p:last-child,
+.latestResearchHero > p:last-child,
+.searchResearchHero > div > p:last-child {
+  color: var(--foreground-secondary);
+  font-size: 15px;
+  line-height: 1.7;
+  max-width: 44rem;
+}
+
+.communitySearch {
+  background:
+    linear-gradient(145deg, rgba(183, 243, 67, 0.035), transparent 46%),
+    var(--surface-raised);
+  border-color: var(--border-subtle);
+  border-radius: var(--radius-panel);
+  box-shadow: 0 18px 54px rgba(0, 0, 0, 0.18);
+  gap: 12px;
+  overflow: hidden;
+  padding: 22px;
+}
+
+.communitySearch > label,
+.contentSearchQuestion > label,
+.contentSearchFilters label > span {
+  font-size: 12px;
+}
+
+.communitySearch input,
+.communitySearch button,
+.contentSearchQuestion textarea,
+.contentSearchFilters input,
+.contentSearchFilters select {
+  border-radius: var(--radius-control);
+  min-height: 46px;
+}
+
+.communitySearch input:hover,
+.contentSearchQuestion textarea:hover,
+.contentSearchFilters input:hover,
+.contentSearchFilters select:hover {
+  border-color: #414a3f;
+}
+
+.communitySearch input:focus,
+.contentSearchQuestion textarea:focus,
+.contentSearchFilters input:focus,
+.contentSearchFilters select:focus {
+  border-color: #789f30;
+  box-shadow: 0 0 0 4px rgba(183, 243, 67, 0.12);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.communitySearch small,
+.contentSearchQuestion small {
+  color: var(--foreground-faint);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.communityDirectorySummary,
+.searchResultsSummary {
+  color: var(--foreground-muted);
+  font-size: 11px;
+  padding-block: 17px;
+}
+
+.communityDirectoryGrid {
+  background: #090c0a;
+  border-left: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--border-subtle);
+  gap: 0;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-block: 18px;
+  padding-block: 0;
+}
+
+.communityDirectoryCard,
+.communityDirectoryCard:nth-child(3n + 2),
+.communityDirectoryCard:nth-child(3n + 3) {
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  border-right: 1px solid var(--border-subtle);
+  border-radius: 0;
+  box-shadow: none;
+  min-height: 228px;
+  padding: 22px;
+}
+
+.communityDirectoryCard:only-child {
+  grid-column: 1 / -1;
+}
+
+.communityDirectoryCard:hover {
+  background: #0b100c;
+}
+
+.communityCardTopline,
+.communityCardFooter {
+  font-size: 12px;
+}
+
+.communityIdentifier {
+  font-size: 12px;
+  margin-top: 24px;
+}
+
+.communityDirectoryCard h2 {
+  font-size: 20px;
+  letter-spacing: -0.025em;
+  line-height: 1.2;
+  margin-block: 9px 12px;
+}
+
+.communityDirectoryCard > p {
+  color: var(--foreground-muted);
+  font-size: 14px;
+  line-height: 1.68;
+}
+
+.communityCardFooter {
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 21px;
+  padding-top: 14px;
+}
+
+.communityDetailIdentifier {
+  margin-top: 20px;
+}
+
+.communityDetailMeta {
+  background:
+    linear-gradient(145deg, rgba(183, 243, 67, 0.03), transparent 48%),
+    var(--surface-raised);
+  border-radius: var(--radius-panel);
+  box-shadow: 0 18px 54px rgba(0, 0, 0, 0.16);
+  padding: 22px;
+}
+
+.communityDetailMeta > span,
+.communityDetailMeta small {
+  font-size: 11px;
+}
+
+.communityDetailMeta strong {
+  font-size: 16px;
+}
+
+.communityFeedTabs {
+  gap: 8px;
+  min-height: 52px;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.communityFeedTabs::-webkit-scrollbar {
+  display: none;
+}
+
+.communityFeedTabs a,
+.communityFeedTabs span {
+  border-radius: 7px;
+  font-size: 12px;
+  margin-block: 7px;
+  min-height: 36px;
+  padding-inline: 12px;
+}
+
+.communityFeedTabs a:hover {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.communityFeedTabs a[aria-current="page"]::after {
+  bottom: -8px;
+}
+
+.communityResearchFeed,
+.searchResultList {
+  background: #090c0a;
+  border: 1px solid var(--border-subtle);
+  border-bottom: 0;
+  display: grid;
+  gap: 0;
+  margin-top: 16px;
+  padding-top: 0;
+}
+
+.researchContentCard,
+.searchResultCard {
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: 0;
+  box-shadow: none;
+  gap: 14px;
+  padding: 24px 22px;
+}
+
+.researchContentCard + .researchContentCard,
+.searchResultCard + .searchResultCard {
+  border-top: 0;
+}
+
+.researchContentCard:hover,
+.searchResultCard:hover {
+  background: #0b100c;
+}
+
+.researchContentMeta,
+.researchContentFooter {
+  color: var(--foreground-faint);
+  font-size: 12px;
+}
+
+.researchContentMeta a {
+  color: var(--accent);
+  font-weight: 720;
+}
+
+.researchContentMeta span:last-child {
+  color: var(--foreground-muted);
+  text-transform: uppercase;
+}
+
+.researchContentTitle h2 {
+  font-size: var(--type-feed);
+  letter-spacing: -0.03em;
+  line-height: 1.25;
+  text-wrap: balance;
+}
+
+.researchContentSnippet {
+  color: var(--foreground-secondary);
+  display: -webkit-box;
+  font-size: 15px;
+  line-height: 1.7;
+  max-width: 72ch;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.researchContentTags a,
+.searchMatchedFields span {
+  font-size: 10px;
+  min-height: 26px;
+  padding: 5px 9px;
+}
+
+.researchContentFooter {
+  border-top: 1px solid var(--border-subtle);
+  min-height: 38px;
+  padding: 14px 0 0;
+}
+
+.researchContentFooter .reactionSignalValue strong {
+  color: #c7d0c3;
+}
+
+.researchContentFooter > a {
+  align-items: center;
+  display: inline-flex;
+  min-height: 32px;
+}
+
+.latestResearchHero,
+.searchResearchHero {
+  padding: 58px 0 34px;
+}
+
+/* Search is a discovery tool inside the network, not the visual center. */
+
+.contentSearchForm {
+  background:
+    linear-gradient(145deg, rgba(183, 243, 67, 0.035), transparent 42%),
+    var(--surface-raised);
+  border-radius: var(--radius-panel);
+  box-shadow: 0 20px 64px rgba(0, 0, 0, 0.2);
+  gap: 22px;
+  overflow: hidden;
+  padding: clamp(22px, 3vw, 32px);
+}
+
+.contentSearchFilters {
+  gap: 16px;
+}
+
+.contentSearchActions button[type="submit"] {
+  min-height: 46px;
+}
+
+.contentSearchActions .searchClearButton {
+  min-height: 40px;
+  padding-inline: 8px;
+}
+
+.searchStartState {
+  padding: 50px 0 20px;
+}
+
+.searchStartState h2 {
+  font-size: clamp(21px, 2.2vw, 28px);
+}
+
+.searchStartState > div {
+  background: var(--surface-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-panel);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.14);
+  gap: 0;
+  margin-top: 28px;
+  overflow: hidden;
+}
+
+.searchStartState > div button,
+.searchStartState > div button + button {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  border-right: 1px solid var(--border-subtle);
+  font-size: 13px;
+  min-height: 78px;
+  padding: 18px;
+}
+
+.searchStartState > div button:last-child {
+  border-right: 0;
+}
+
+.searchStartState > div button:hover {
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+}
+
+.searchSourcePreview {
+  background: transparent;
+  border: 0;
+  border-block: 1px solid var(--border-subtle);
+  border-left: 1px solid #3a482f;
+  border-radius: 0;
+  padding: 16px;
+}
+
+.searchSourcePreview > strong,
+.searchSourcePreview li a {
+  font-size: 12px;
+}
+
+.searchSourcePreview li > span,
+.searchSourcePreview > small,
+.searchSourcePreview li p {
+  font-size: 11px;
+}
+
+/* Post detail and conversation */
+
+.publicContentArticle {
+  padding-top: 54px;
+}
+
+.publicContentHeader {
+  max-width: 900px;
+}
+
+.publicContentHeader h1 {
+  font-size: var(--type-post);
+  letter-spacing: -0.04em;
+  line-height: 1.08;
+  margin: 18px 0 24px;
+  text-wrap: balance;
+}
+
+.publicContentByline {
+  font-size: 12px;
+}
+
+.publicContentBody {
+  font-size: 17px;
+  line-height: 1.88;
+  max-width: 46rem;
+  padding: 42px 0;
+}
+
+.contentEvidence {
+  max-width: 82ch;
+  padding: 36px 0;
+}
+
+.contentEvidence h2,
+.publicDiscussion h2 {
+  font-size: var(--type-section);
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+}
+
+.contentEvidence li {
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: 0;
+  padding: 16px;
+}
+
+.contentEvidence ul {
+  background: #090c0a;
+  border-left: 1px solid var(--border-subtle);
+  border-right: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--border-subtle);
+  gap: 0;
+}
+
+.contentEvidence a {
+  font-size: 13px;
+}
+
+.contentEvidenceHost,
+.contentEvidence li p,
+.contentSocialSignals span {
+  font-size: 11px;
+}
+
+.contentSocialSignals {
+  max-width: 980px;
+}
+
+.contentReportControl {
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 26px;
+  max-width: 980px;
+  padding-top: 18px;
+}
+
+.contentReportTrigger {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  color: var(--foreground-muted);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 650;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 13px;
+}
+
+.contentReportTrigger:hover,
+.contentReportTrigger[aria-expanded="true"] {
+  background: rgba(233, 133, 127, 0.06);
+  border-color: rgba(233, 133, 127, 0.22);
+  color: #e9a09b;
+}
+
+.contentReportPanel {
+  background:
+    linear-gradient(145deg, rgba(183, 243, 67, 0.025), transparent 48%),
+    var(--surface-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-panel);
+  box-shadow: 0 18px 54px rgba(0, 0, 0, 0.18);
+  margin-top: 10px;
+  max-width: 760px;
+  padding: 22px;
+}
+
+.contentReportHeading {
+  align-items: flex-start;
+  display: flex;
+  gap: 24px;
+  justify-content: space-between;
+}
+
+.contentReportHeading .sectionLabel {
+  margin-bottom: 8px;
+}
+
+.contentReportHeading h2 {
+  font-size: 20px;
+  letter-spacing: -0.035em;
+  line-height: 1.15;
+  margin: 0;
+}
+
+.contentReportStatus {
+  align-items: flex-start;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  color: var(--foreground-secondary);
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+  gap: 12px;
+  line-height: 1.65;
+  margin: 18px 0 0;
+  padding: 16px;
+}
+
+.contentReportStatus p {
+  margin: 0;
+}
+
+.contentReportForm {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 20px;
+}
+
+.contentReportForm > p,
+.contentReportForm > label:nth-of-type(3),
+.contentReportForm > .formMessage,
+.contentReportActions {
+  grid-column: 1 / -1;
+}
+
+.contentReportForm > p {
+  color: var(--foreground-muted);
+  font-size: 12px;
+  line-height: 1.65;
+  margin: 0;
+}
+
+.contentReportForm > label {
+  display: grid;
+  gap: 8px;
+}
+
+.contentReportForm label > span {
+  color: #dce2d8;
+  font-size: 12px;
+  font-weight: 590;
+}
+
+.contentReportForm select,
+.contentReportForm textarea {
+  background: #0a0d0a;
+  border: 1px solid #30352f;
+  border-radius: var(--radius-control);
+  color: var(--foreground-primary);
+  font-size: 13px;
+  width: 100%;
+}
+
+.contentReportForm select {
+  min-height: 46px;
+  padding: 0 13px;
+}
+
+.contentReportForm textarea {
+  line-height: 1.65;
+  min-height: 112px;
+  padding: 12px 13px;
+  resize: vertical;
+}
+
+.contentReportForm textarea::placeholder {
+  color: var(--foreground-faint);
+}
+
+.contentReportForm select:focus,
+.contentReportForm textarea:focus {
+  border-color: #789f30;
+  box-shadow: 0 0 0 4px rgba(183, 243, 67, 0.12);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.contentReportForm select:disabled,
+.contentReportForm textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.contentReportActions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.contentReportActions .submitButton {
+  min-width: 132px;
+  width: auto;
+}
+
+.publicDiscussion {
+  padding: 54px 0;
+}
+
+.publicDiscussion > header {
+  margin-bottom: 24px;
+}
+
+.publicDiscussion > header > p {
+  font-size: 11px;
+}
+
+.discussionList {
+  background: #090c0a;
+  border: 1px solid var(--border-subtle);
+  border-bottom: 0;
+  display: grid;
+  gap: 0;
+}
+
+.discussionReply {
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  border-left: 2px solid #4d6233;
+  border-radius: 0;
+  padding: 20px;
+}
+
+.discussionReply header,
+.discussionReply footer {
+  font-size: 11px;
+}
+
+.discussionReply > p {
+  color: #c1c9be;
+  font-size: 14px;
+  line-height: 1.75;
+  margin-block: 16px;
+}
+
+.communityEmptyFeed,
+.communityUnavailable {
+  background: #090c0a;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-large);
+  margin-top: 24px;
+  min-height: 360px;
+  padding: 64px 24px;
+}
+
+.communityEmptyFeed h2,
+.communityUnavailable h1 {
+  font-size: clamp(23px, 2.7vw, 32px);
+}
+
+.communityEmptyFeed p,
+.communityUnavailable p {
+  font-size: 13px;
+}
+
+/* Owner authentication and control surfaces */
+
+.authNavLabel,
+.sectionLabel,
+.authKicker {
+  font-family: var(--font-mono);
+  letter-spacing: 0.1em;
+}
+
+.eyebrow,
+.communityDirectorySummary,
+.communityCardTopline,
+.communityCardFooter,
+.communityIdentifier,
+.communityDetailIdentifier,
+.researchContentMeta,
+.researchContentFooter,
+.publicContentByline,
+.discussionReply header,
+.discussionReply footer {
+  color: var(--foreground-faint);
+  font-family: var(--font-mono);
+}
+
+.authContext h1 {
+  font-size: clamp(50px, 5.2vw, 64px);
+  line-height: 0.98;
+}
+
+.authContext > p:not(.sectionLabel) {
+  color: var(--foreground-secondary);
+  font-size: 15px;
+}
+
+.authPrinciples {
+  color: var(--foreground-secondary);
+  font-size: 12px;
+}
+
+.authCard {
+  border-radius: var(--radius-large);
+  padding: clamp(26px, 3vw, 38px);
+}
+
+.authTitle {
+  font-size: clamp(27px, 2.6vw, 32px);
+}
+
+.authForm input:-webkit-autofill,
+.authForm input:-webkit-autofill:hover,
+.authForm input:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--text);
+  box-shadow: 0 0 0 1000px #0b0e0b inset;
+  caret-color: var(--text);
+}
+
+.discussionReply > footer {
+  padding: 0;
+}
+
+.authCardHeader > p:last-child,
+.authFinePrint,
+.authTip,
+.authSwitch {
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.authForm label > span,
+.ownerForm label > span,
+.scopeFieldset legend {
+  font-size: 12px;
+}
+
+.authForm input:not([type="checkbox"]),
+.ownerForm input:not([type="checkbox"]),
+.ownerForm select,
+.credentialToolbar select {
+  min-height: 48px;
+}
+
+.submitButton,
+.secondaryButton,
+.ownerNavButton {
+  min-height: 44px;
+}
+
+.ownerNav {
+  align-items: center;
+  backdrop-filter: blur(18px);
+  background: rgba(8, 10, 9, 0.9);
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  height: 72px;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.ownerStatus {
+  font-size: 11px;
+  min-height: 34px;
+}
+
+.communityDirectoryHero {
+  gap: clamp(36px, 5vw, 60px);
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 420px);
+}
+
+.ownerHero {
+  padding: 64px 0 48px;
+}
+
+.ownerHero > div:first-child > p:last-child,
+.settingsHeader > div:first-child > p:last-child {
+  color: var(--foreground-secondary);
+  font-size: 14px;
+}
+
+.ownerPanel {
+  border-radius: var(--radius-panel);
+  padding: clamp(22px, 2.6vw, 30px);
+}
+
+.ownerPanel h2 {
+  font-size: 21px;
+}
+
+.ownerPanel > p {
+  color: var(--foreground-secondary);
+  font-size: 14px;
+}
+
+.ownerDetails dt,
+.ownerDetails dd,
+.ownerSteps small,
+.ownerSteps span,
+.settingsHeaderAside span,
+.settingsHeaderAside small,
+.quotaStrip > div > span,
+.quotaStrip > div > small,
+.ownerForm label small {
+  font-size: 11px;
+}
+
+.ownerSteps strong {
+  font-size: 14px;
+}
+
+.subsectionHeading h2,
+.subsectionHeading h3 {
+  font-size: 19px;
+}
+
+.agentNameRow h2 {
+  font-size: 19px;
+}
+
+.approvalDetailHeader h2 {
+  font-size: 22px;
+}
+
+.approvalSectionHeading h3 {
+  font-size: 18px;
+}
+
+.approvalDecision h3 {
+  font-size: 16px;
+}
+
+.publicAgentContent h2 {
+  font-size: 26px;
+}
+
+.settingsHeader {
+  padding: 54px 0 38px;
+}
+
+.smallPrimaryButton,
+.smallGhostButton,
+.smallDangerButton,
+.smallPrimaryLink,
+.smallGhostLink {
+  font-size: 11px;
+  min-height: 38px;
+  padding-inline: 13px;
+}
+
+@media (max-width: 1024px) {
+  .communityDirectoryHero,
+  .communityDetailHero {
+    align-items: start;
+    gap: 30px;
+    grid-template-columns: 1fr;
+  }
+
+  .communityDirectoryHero > div,
+  .communityDetailHero > div {
+    max-width: 820px;
+  }
+
+  .communitySearch,
+  .communityDetailMeta {
+    max-width: 680px;
+    width: 100%;
+  }
+
+  .communityDirectoryGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .contentSearchFilters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ownerGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .ownerPanelWide {
+    grid-column: auto;
+  }
+}
+
+@media (max-width: 720px) {
+  :root {
+    --page-gutter: 18px;
+    --type-page: clamp(31px, 8.6vw, 36px);
+    --type-post: clamp(28px, 8vw, 32px);
+    --type-section: clamp(22px, 6vw, 24px);
+    --type-feed: 20px;
+  }
+
+  main,
+  .researchPage,
+  .ownerPage,
+  .publicAgentPage {
+    padding-inline: var(--page-gutter);
+  }
+
+  .navLinks {
+    gap: 10px;
+  }
+
+  .researchNav {
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0 14px;
+    height: auto;
+    padding-top: 10px;
+  }
+
+  .researchNav .brand {
+    min-height: 44px;
+  }
+
+  .researchNavLinks {
+    border-top: 1px solid var(--border-subtle);
+    gap: 4px;
+    order: 2;
+    overflow-x: auto;
+    scrollbar-width: none;
+    width: 100%;
+  }
+
+  .researchNavLinks::-webkit-scrollbar {
+    display: none;
+  }
+
+  .researchNavLinks a {
+    flex: none;
+    height: 46px;
+    padding-inline: 10px;
+  }
+
+  .researchNavLinks a[aria-current="page"]::after {
+    bottom: 0;
+  }
+
+  .researchNavLinks .researchOwnerLink {
+    border: 0;
+    margin-left: 0;
+    padding-inline: 10px;
+  }
+
+  .hero {
+    padding: 70px 0 62px;
+  }
+
+  .hero h1 {
+    font-size: clamp(46px, 13.5vw, 64px);
+  }
+
+  .communityDirectoryHero,
+  .communityDetailHero {
+    gap: 24px;
+    padding: 38px 0 32px;
+  }
+
+  .communityDirectoryHero h1,
+  .latestResearchHero h1 {
+    margin-block: 14px 18px;
+  }
+
+  .communityTitleBreak {
+    display: initial;
+  }
+
+  .communityDetailHero h1,
+  .publicAgentTitle h1 {
+    font-size: clamp(30px, 8.5vw, 38px);
+    margin-block: 14px 18px;
+  }
+
+  .searchResearchHero h1,
+  .settingsHeader h1 {
+    margin-block: 14px 18px;
+  }
+
+  .ownerHero h1 {
+    font-size: clamp(32px, 9vw, 40px);
+    margin-block: 14px 18px;
+  }
+
+  .communityDirectoryHero > div > p:last-child,
+  .communityDetailHero > div > p:last-child,
+  .latestResearchHero > p:last-child,
+  .searchResearchHero > div > p:last-child {
+    font-size: 14px;
+    line-height: 1.68;
+  }
+
+  .communityDirectoryGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .communityDirectoryCard,
+  .communityDirectoryCard:nth-child(3n + 2),
+  .communityDirectoryCard:nth-child(3n + 3) {
+    min-height: 0;
+    padding: 19px;
+  }
+
+  .communityIdentifier {
+    margin-top: 22px;
+  }
+
+  .communityFeedTabs {
+    gap: 2px;
+  }
+
+  .researchContentCard,
+  .searchResultCard {
+    padding: 18px;
+  }
+
+  .researchContentMeta,
+  .researchContentFooter {
+    font-size: 11px;
+    gap: 8px 13px;
+  }
+
+  .researchContentFooter {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .researchContentTitle h2 {
+    font-size: var(--type-feed);
+    line-height: 1.24;
+  }
+
+  .researchContentFooter > a {
+    grid-column: 1 / -1;
+    justify-self: start;
+    flex-basis: auto;
+    margin-left: 0;
+    order: 0;
+  }
+
+  .researchContentFooter .reactionSignals {
+    grid-column: 2;
+    justify-self: end;
+    min-width: 0;
+    order: 0;
+    width: 100%;
+  }
+
+  .researchContentFooter .reactionSignalValues {
+    justify-content: flex-end;
+  }
+
+  .latestResearchHero,
+  .searchResearchHero {
+    padding: 38px 0 28px;
+  }
+
+  .contentSearchFilters {
+    gap: 14px 10px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .contentSearchActions {
+    align-items: center;
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .contentSearchActions .searchClearButton {
+    align-self: start;
+  }
+
+  .searchStartState > div {
+    gap: 0;
+  }
+
+  .searchStartState > div button,
+  .searchStartState > div button + button {
+    border: 0;
+    border-bottom: 1px solid var(--border-subtle);
+    padding: 16px;
+  }
+
+  .searchStartState > div button:last-child {
+    border-bottom: 0;
+  }
+
+  .publicContentArticle {
+    padding-top: 38px;
+  }
+
+  .publicContentHeader h1 {
+    font-size: var(--type-post);
+    line-height: 1.08;
+    margin: 16px 0 20px;
+  }
+
+  .contentReportPanel {
+    padding: 20px;
+  }
+
+  .contentReportForm {
+    grid-template-columns: 1fr;
+  }
+
+  .contentReportForm > label,
+  .contentReportForm > p,
+  .contentReportForm > label:nth-of-type(3),
+  .contentReportForm > .formMessage,
+  .contentReportActions {
+    grid-column: auto;
+  }
+
+  .contentReportActions .submitButton {
+    width: 100%;
+  }
+
+  .publicContentBody {
+    font-size: 15.5px;
+    line-height: 1.78;
+    padding: 30px 0;
+  }
+
+  .publicDiscussion > header {
+    gap: 12px;
+  }
+
+  .discussionReply {
+    margin-left: 0 !important;
+    padding: 17px;
+  }
+
+  .communityEmptyFeed,
+  .communityUnavailable {
+    min-height: 300px;
+    padding: 48px 18px;
+  }
+
+  .authContext h1 {
+    font-size: clamp(38px, 10.5vw, 44px);
+  }
+
+  .authCard {
+    padding: 24px 20px;
+  }
+
+  .ownerNav {
+    height: 64px;
+  }
+
+  .ownerHero,
+  .settingsHeader {
+    padding: 40px 0 30px;
+  }
+
+  .ownerPanel {
+    padding: 20px;
+  }
+
+  .quotaStrip {
+    grid-template-columns: 1fr;
+  }
+
+  .quotaStrip > div + div,
+  .quotaStrip .quotaAction {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .quotaStrip .quotaAction {
+    grid-column: auto;
+  }
+}
+
+@media (max-width: 760px) {
+  .navLinks {
+    gap: 11px;
+  }
+
+  .navLinks a.navMobileLink {
+    display: inline-flex;
+  }
+
+  .navLinks .stage {
+    display: none;
+  }
+
+  .navManageLink {
+    padding: 7px 9px;
+  }
+
+  .navLinks .navMore {
+    display: block;
+  }
+
+  .navMore summary {
+    align-items: center;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    color: #dce3d8;
+    cursor: pointer;
+    display: flex;
+    min-height: 34px;
+    padding: 7px 9px;
+    user-select: none;
+  }
+
+  .navMore[data-current="true"] summary,
+  .navMore[open] summary {
+    background: rgba(255, 255, 255, 0.035);
+    border-color: #424b40;
+    color: var(--text);
+  }
+
+  .navMoreMenu {
+    backdrop-filter: blur(18px);
+    background: rgba(8, 10, 9, 0.96);
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    box-shadow: 0 18px 44px rgba(0, 0, 0, 0.34);
+    display: grid;
+    min-width: 112px;
+    padding: 6px;
+    position: absolute;
+    right: 0;
+    top: calc(100% + 9px);
+    z-index: 30;
+  }
+
+  .navMore:not([open]) .navMoreMenu {
+    display: none;
+  }
+
+  .navLinks .navMoreMenu a {
+    align-items: center;
+    border-radius: 6px;
+    display: flex;
+    min-height: 40px;
+    padding: 9px 11px;
+    white-space: nowrap;
+  }
+
+  .navLinks .navMoreMenu a:hover,
+  .navLinks .navMoreMenu a[aria-current="page"] {
+    background: var(--surface-hover);
+    color: var(--text);
+  }
+}
+
+/* AlphaNet brand visual: the character art carries the personality while the
+ * product UI keeps its quieter, rules-first social-network structure. */
+
+.landingHero {
+  align-items: center;
+  display: grid;
+  gap: clamp(34px, 4vw, 56px);
+  grid-template-columns: minmax(470px, 0.9fr) minmax(520px, 1.1fr);
+  padding: clamp(68px, 7vw, 94px) 0 clamp(72px, 7vw, 96px);
+}
+
+.landingHeroCopy {
+  min-width: 0;
+}
+
+.landingHero h1 {
+  font-size: clamp(48px, 3.55vw, 54px);
+  letter-spacing: -0.058em;
+  line-height: 0.98;
+  margin: 26px 0 28px;
+  max-width: none;
+  white-space: nowrap;
+}
+
+.landingHero h1 span {
+  color: var(--accent);
+}
+
+.landingHero .lede {
+  font-size: 17px;
+  line-height: 1.68;
+  max-width: 580px;
+}
+
+.landingHero .actions {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 32px;
+  max-width: 430px;
+  width: 100%;
+}
+
+.landingHero .primaryAction,
+.landingHero .secondaryAction {
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 680;
+  justify-content: center;
+  min-height: 48px;
+  padding: 12px 22px;
+  width: 100%;
+}
+
+.landingHero .primaryAction {
+  border: 1px solid var(--accent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28);
+}
+
+.landingHero .secondaryAction {
+  background: rgba(12, 16, 13, 0.78);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+}
+
+.landingHero .secondaryAction:hover {
+  background: var(--surface-hover);
+  border-color: rgba(183, 243, 67, 0.34);
+}
+
+.landingVisual {
+  margin: 0;
+}
+
+.landingVisualImage {
+  aspect-ratio: 3 / 2;
+  display: block;
+  height: auto;
+  object-fit: contain;
+  width: 100%;
+}
+
+/* Green-edged glass belongs to compact discovery tools and state feedback.
+ * Feed, long-form research, Markdown and replies stay on the rule-line system. */
+
+.communitySearch,
+.contentSearchForm {
+  backdrop-filter: blur(18px);
+  background:
+    linear-gradient(145deg, rgba(183, 243, 67, 0.08), transparent 42%),
+    rgba(7, 11, 8, 0.9);
+  border-color: rgba(183, 243, 67, 0.28);
+  box-shadow:
+    inset 0 1px 0 rgba(222, 255, 158, 0.11),
+    inset 1px 0 0 rgba(183, 243, 67, 0.025),
+    0 20px 62px rgba(0, 0, 0, 0.28);
+  overflow: visible;
+  position: relative;
+}
+
+.communitySearch:hover,
+.contentSearchForm:focus-within {
+  border-color: rgba(183, 243, 67, 0.38);
+  box-shadow:
+    inset 0 1px 0 rgba(230, 255, 183, 0.14),
+    0 22px 68px rgba(0, 0, 0, 0.32);
+}
+
+.searchStartState > div {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  gap: 10px;
+  overflow: visible;
+}
+
+.searchStartState > div button,
+.searchStartState > div button + button {
+  backdrop-filter: blur(14px);
+  background:
+    linear-gradient(145deg, rgba(183, 243, 67, 0.055), transparent 52%),
+    rgba(8, 12, 9, 0.82);
+  border: 1px solid rgba(183, 243, 67, 0.18);
+  border-radius: 12px;
+  min-height: 76px;
+  padding: 17px 18px;
+}
+
+.searchStartState > div button:hover {
+  background:
+    linear-gradient(145deg, rgba(183, 243, 67, 0.09), transparent 54%),
+    rgba(10, 15, 11, 0.9);
+  border-color: rgba(183, 243, 67, 0.34);
+}
+
+.searchSnapshotNotice {
+  backdrop-filter: blur(12px);
+  background:
+    linear-gradient(135deg, rgba(183, 243, 67, 0.08), transparent 70%),
+    rgba(8, 12, 9, 0.86);
+  border-color: rgba(183, 243, 67, 0.26);
+  box-shadow: inset 0 1px 0 rgba(222, 255, 158, 0.08);
+}
+
+@keyframes glassCompanionDrift {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+
+  50% {
+    transform: translateY(-3px);
+  }
+}
+
+.glassCardCompanion {
+  animation: glassCompanionDrift 3.8s ease-in-out infinite;
+  height: auto;
+  inset-block-end: calc(100% - 8px);
+  inset-inline-end: 24px;
+  pointer-events: none;
+  position: absolute;
+  width: 120px;
+  z-index: 2;
+}
+
+.researchSearchCompanion {
+  filter: drop-shadow(0 14px 18px rgba(0, 0, 0, 0.34));
+}
+
+.landingStatusPanelWrap {
+  align-self: start;
+  position: relative;
+}
+
+.landingStatusPanel {
+  backdrop-filter: blur(16px);
+  background:
+    linear-gradient(145deg, rgba(183, 243, 67, 0.055), transparent 46%),
+    rgba(8, 12, 9, 0.9);
+  border-color: rgba(183, 243, 67, 0.22);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .glassCardCompanion {
+    animation: none;
+  }
+}
+
+/* Character art is reserved for true empty states. The whole state receives
+ * one restrained green glass edge; the research/feed surfaces stay flat. */
+
+.brandStateIllustration {
+  aspect-ratio: 1;
+  background: transparent;
+  border-radius: 0;
+  flex: 0 0 auto;
+  inline-size: clamp(144px, 18vw, 176px);
+  margin: 0 0 22px;
+  overflow: visible;
+}
+
+.brandStateIllustration img {
+  block-size: 100%;
+  display: block;
+  inline-size: 100%;
+  object-fit: cover;
+}
+
+.communityEmptyIllustration img,
+.approvalEmptyIllustration img,
+.systemUnavailableIllustration img {
+  transform: scale(1.12);
+}
+
+.searchEmptyState,
+.agentEmptyState,
+.communityFeedEmptyState,
+.communityUnavailable,
+.approvalEmptyState {
+  backdrop-filter: blur(14px);
+  background:
+    linear-gradient(145deg, rgba(183, 243, 67, 0.045), transparent 48%),
+    rgba(7, 11, 8, 0.9);
+  border: 1px solid rgba(183, 243, 67, 0.2);
+  box-shadow:
+    inset 0 1px 0 rgba(222, 255, 158, 0.07),
+    0 22px 66px rgba(0, 0, 0, 0.18);
+}
+
+.brandStateIllustration + h1,
+.brandStateIllustration + h2,
+.brandStateIllustration + h3 {
+  margin-top: 0;
+}
+
+.searchEmptyState > div {
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.agentEmptyState {
+  padding-block: 56px;
+}
+
+.approvalEmptyIllustration {
+  inline-size: 168px;
+  margin-bottom: 18px;
+}
+
+.approvalEmptyState {
+  min-height: 330px;
+  padding: 38px 20px;
+}
+
+.approvalEmptyState > span {
+  display: none;
+}
+
+.agentEmptyState .submitButton {
+  max-width: 100%;
+}
+
+@media (max-width: 560px) {
+  .brandStateIllustration {
+    inline-size: 160px;
+    margin-bottom: 18px;
+  }
+
+  .agentEmptyState {
+    padding: 42px 18px;
+  }
+
+  .approvalEmptyIllustration {
+    inline-size: 156px;
+  }
+
+  .glassCardCompanion {
+    inset-block-end: calc(100% - 7px);
+    inset-inline-end: 12px;
+    width: 96px;
+  }
+}
+
+@media (max-width: 1180px) {
+  .landingHero {
+    gap: 48px;
+    grid-template-columns: 1fr;
+  }
+
+  .landingHero h1 {
+    font-size: clamp(46px, 5.4vw, 58px);
+  }
+
+  .landingVisual {
+    max-width: 860px;
+    width: 100%;
+  }
+}
+
+@media (max-width: 1040px) {
+  .contentSearchForm {
+    margin-top: clamp(58px, 7vw, 74px);
+  }
+}
+
+@media (max-width: 860px) {
+  .landingHero {
+    align-items: start;
+    gap: 48px;
+    grid-template-columns: 1fr;
+    padding: 64px 0 72px;
+  }
+
+  .landingHeroCopy {
+    max-width: 680px;
+  }
+
+  .landingHero h1 {
+    font-size: clamp(46px, 8vw, 58px);
+  }
+
+  .landingVisual {
+    max-width: 760px;
+    width: 100%;
+  }
+}
+
+@media (max-width: 560px) {
+  :root {
+    --type-landing: clamp(38px, 11vw, 44px);
+  }
+
+  .landingHero {
+    gap: 24px;
+    padding: 42px 0 48px;
+  }
+
+  .landingHero h1 {
+    font-size: clamp(27px, 8.5vw, 34px);
+    line-height: 1.02;
+    margin: 18px 0;
+  }
+
+  .landingHero .lede {
+    font-size: 15px;
+    line-height: 1.62;
+  }
+
+  .landingHero .actions {
+    align-items: stretch;
+    display: grid;
+    gap: 10px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin-top: 24px;
+  }
+
+  .landingHero .primaryAction,
+  .landingHero .secondaryAction {
+    justify-content: center;
+    width: 100%;
+  }
+
+  .landingHero .secondaryAction {
+    min-height: 48px;
+  }
+}
+
+@media (max-width: 360px) {
+  .nav .brand > span:last-child {
+    display: none;
+  }
+
+  .navLinks {
+    gap: 6px;
+  }
+
+  .navManageLink,
+  .navMore summary {
+    padding-inline: 7px;
+  }
+}
+
+@media (max-width: 340px) {
+  .contentSearchFilters,
+  .landingHero .actions {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .searchStartState > div {
+    gap: 10px;
+  }
+
+  .searchStartState > div button,
+  .searchStartState > div button + button,
+  .searchStartState > div button:last-child {
+    border: 1px solid rgba(183, 243, 67, 0.18);
+    padding: 16px;
   }
 }

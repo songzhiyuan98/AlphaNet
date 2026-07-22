@@ -19,6 +19,7 @@ readonly follow_graph_checksum="3505e7a190e266d792c4f0e7b03997a6042687f1fe12550f
 readonly content_revision_write_checksum="c0e3b1f605651e30a619caede945eb978840a725dc0585bb1e05abc9d88d484c"
 readonly content_search_v1_checksum="ae8c3d68863d78b8d131129a4f3cedd4f6026e733530eaf8f6a563b7fdfeeaf2"
 readonly content_delete_antispam_v1_checksum="c02af8f023edc8ab6eb58fc78afef9a5e4c0909f4833e04666ddfcfc384a2b18"
+readonly web_reporting_content_moderation_v1_checksum="d5d7e900d8270914ff927c7a08ec89f677a9fcfbd71d33238756394f5ec60c3b"
 readonly suffix="${GITHUB_RUN_ID:-local}_${RANDOM}_$$"
 readonly empty_database="alphanet_migration_empty_${suffix}"
 readonly owner_database="alphanet_migration_owner_${suffix}"
@@ -1023,9 +1024,10 @@ for database in \
       --set=follow_graph_checksum="${follow_graph_checksum}" \
       --set=content_revision_write_checksum="${content_revision_write_checksum}" \
       --set=content_search_v1_checksum="${content_search_v1_checksum}" \
-      --set=content_delete_antispam_v1_checksum="${content_delete_antispam_v1_checksum}" <<'SQL'
+      --set=content_delete_antispam_v1_checksum="${content_delete_antispam_v1_checksum}" \
+      --set=web_reporting_content_moderation_v1_checksum="${web_reporting_content_moderation_v1_checksum}" <<'SQL'
 SELECT
-  (SELECT count(*) FROM system.schema_migrations) = 14
+  (SELECT count(*) FROM system.schema_migrations) = 15
   AND EXISTS (
     SELECT 1
     FROM system.schema_migrations
@@ -1091,6 +1093,80 @@ SELECT
     WHERE version = '000014'
       AND name = 'content_delete_antispam_v1'
       AND checksum = :'content_delete_antispam_v1_checksum'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM system.schema_migrations
+    WHERE version = '000015'
+      AND name = 'web_reporting_content_moderation_v1'
+      AND checksum = :'web_reporting_content_moderation_v1_checksum'
+  )
+  AND (
+    SELECT count(*) = 8
+    FROM pg_class AS relation
+    JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname = 'platform'
+      AND relation.relkind IN ('p', 'r')
+      AND relation.relname IN (
+        'admins',
+        'admin_roles',
+        'admin_role_permissions',
+        'admin_assignments',
+        'reports',
+        'moderation_cases',
+        'moderation_case_items',
+        'moderation_actions'
+      )
+  )
+  AND (SELECT count(*) = 5 FROM platform.admin_roles)
+  AND (
+    SELECT count(DISTINCT permission) = 8
+    FROM platform.admin_role_permissions
+  )
+  AND NOT EXISTS (SELECT 1 FROM platform.admins)
+  AND NOT EXISTS (SELECT 1 FROM platform.admin_assignments)
+  AND to_regclass('platform.reports_active_owner_content_unique') IS NOT NULL
+  AND to_regclass('platform.reports_active_owner_agent_unique') IS NULL
+  AND to_regclass('platform.moderation_cases_active_content_unique') IS NOT NULL
+  AND to_regclass('platform.moderation_cases_active_agent_unique') IS NULL
+  AND to_regclass(
+    'platform.report_submission_idempotency_owner_created_idx'
+  ) IS NOT NULL
+  AND to_regclass(
+    'platform.report_submission_idempotency_owner_actor_created_idx'
+  ) IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+    FROM pg_attribute AS attribute
+    JOIN pg_class AS relation ON relation.oid = attribute.attrelid
+    JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname = 'platform'
+      AND relation.relname = 'moderation_actions'
+      AND attribute.attname = 'occurred_at'
+      AND attribute.attgenerated = 's'
+      AND NOT attribute.attisdropped
+  )
+  AND position(
+    'content.moderation_changed'
+    in pg_get_functiondef(
+      'platform.validate_runtime_content_write_provenance()'::regprocedure
+    )
+  ) > 0
+  AND (
+    SELECT count(*) = 5
+    FROM pg_trigger AS trigger_record
+    WHERE trigger_record.tgname = ANY (ARRAY[
+      'reports_validate_runtime_creation_provenance',
+      'moderation_cases_validate_runtime_creation_provenance',
+      'moderation_actions_validate_runtime_provenance',
+      'reports_validate_runtime_resolution_provenance',
+      'moderation_cases_validate_runtime_resolution_provenance'
+    ])
+      AND NOT trigger_record.tgisinternal
+      AND trigger_record.tgconstraint <> 0
+      AND trigger_record.tgdeferrable
+      AND trigger_record.tginitdeferred
+      AND trigger_record.tgenabled IN ('O', 'A')
   )
   AND to_regclass('platform.content_revisions_actor_hash_recent_idx')
     IS NOT NULL
@@ -1753,4 +1829,4 @@ SQL
   fi
 done
 
-echo "Empty, Owner-schema, and published Agent-v1 paths all reach the Content Delete/Anti-spam v1 schema."
+echo "Empty, Owner-schema, and published Agent-v1 paths all reach the Web Reporting/Content Moderation v1 schema."

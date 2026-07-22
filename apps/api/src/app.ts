@@ -17,7 +17,9 @@ import { closeDependencies, type HealthDependency } from "@alphanet/database";
 import type {
   AgentConnectionService,
   CommunityDirectoryService,
+  ContentModerationService,
   ContentReadService,
+  ContentReportService,
   ContentSearchService,
   FollowService,
   OwnerPendingActionService,
@@ -39,6 +41,10 @@ import {
   registerPublicCommunityRoutes,
 } from "./community-routes.js";
 import {
+  registerAdminContentModerationRoutes,
+  registerOwnerContentModerationRoutes,
+} from "./content-moderation-routes.js";
+import {
   registerContentReadRoutes,
   registerPublicContentReadRoutes,
 } from "./content-read-routes.js";
@@ -48,19 +54,24 @@ import {
 } from "./content-search-routes.js";
 import { registerOwnerActionRoutes } from "./owner-action-routes.js";
 import { registerOwnerAgentPolicyRoutes } from "./owner-policy-routes.js";
+import { registerOwnerReportRoutes } from "./owner-report-routes.js";
 import { registerPendingActionRoutes } from "./pending-action-routes.js";
 import { registerReactionRoutes } from "./reaction-routes.js";
 import { registerFollowRoutes } from "./follow-routes.js";
 import { registerResearchWriteRoutes } from "./research-write-routes.js";
+import type { AdminRequestRuntime } from "./admin-request.js";
 import { createRequestClientIpResolver, ssrClientIpHeaders } from "./ssr-client-ip.js";
 
 export interface ApiAppOptions {
   allowedOrigins: string[];
+  adminRequestRuntime?: AdminRequestRuntime;
   agentConnectionService?: AgentConnectionService;
   agentRateLimiter?: Pick<RedisRateLimitStorage, "consume">;
   authRuntime?: AlphaNetAuthRuntime;
   communityDirectoryService?: CommunityDirectoryService;
+  contentModerationService?: ContentModerationService;
   contentReadService?: ContentReadService;
+  contentReportService?: ContentReportService;
   contentSearchService?: ContentSearchService;
   followService?: FollowService;
   dependencies?: readonly HealthDependency[];
@@ -306,7 +317,9 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
     (options.authRuntime ||
       options.agentConnectionService ||
       options.communityDirectoryService ||
+      options.contentModerationService ||
       options.contentReadService ||
+      options.contentReportService ||
       options.contentSearchService ||
       options.followService ||
       options.ownerPendingActionService ||
@@ -356,6 +369,24 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
             critical: true,
             name: "content-read-schema",
             check: () => options.contentReadService!.checkReady(),
+          },
+        ]
+      : []),
+    ...(options.contentModerationService
+      ? [
+          {
+            critical: true,
+            name: "content-moderation-schema",
+            check: () => options.contentModerationService!.checkReady(),
+          },
+        ]
+      : []),
+    ...(options.contentReportService
+      ? [
+          {
+            critical: true,
+            name: "content-report-schema",
+            check: () => options.contentReportService!.checkReady(),
           },
         ]
       : []),
@@ -455,6 +486,7 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
       routeUrl === "/api/auth/*" ||
       routeUrl === "/v1/owner/session" ||
       routeUrl.startsWith("/v1/owner/") ||
+      routeUrl.startsWith("/v1/admin/") ||
       routeUrl === "/v1/agent/context"
     ) {
       void reply.header("cache-control", "no-store, private");
@@ -690,6 +722,33 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
         service: options.ownerPendingActionService,
       });
     }
+
+    if (options.contentReportService) {
+      registerOwnerReportRoutes(app, {
+        allowedOrigins: options.allowedOrigins,
+        authRuntime,
+        ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
+        resolveClientIp,
+        service: options.contentReportService,
+      });
+    }
+
+    if (options.contentModerationService) {
+      registerOwnerContentModerationRoutes(app, {
+        allowedOrigins: options.allowedOrigins,
+        authRuntime,
+        ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
+        resolveClientIp,
+        service: options.contentModerationService,
+      });
+    }
+  }
+
+  if (options.adminRequestRuntime && options.contentModerationService) {
+    registerAdminContentModerationRoutes(app, {
+      adminRuntime: options.adminRequestRuntime,
+      service: options.contentModerationService,
+    });
   }
 
   if (options.communityDirectoryService) {

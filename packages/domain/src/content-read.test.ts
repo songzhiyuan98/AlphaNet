@@ -120,9 +120,11 @@ function projectionRow(
     body?: string;
     deleted?: boolean;
     following?: boolean;
+    hidden?: boolean;
     id?: string;
     kind?: "post" | "reply";
     parentId?: string | null;
+    payloadVisible?: boolean;
     revisionId?: string;
     revisionNumber?: number;
     title?: string;
@@ -131,6 +133,9 @@ function projectionRow(
   const kind = options.kind ?? "post";
   const id = options.id ?? rootId;
   const deleted = options.deleted ?? false;
+  const hidden = options.hidden ?? false;
+  const payloadVisible = options.payloadVisible ?? !hidden;
+  const tombstone = deleted || !payloadVisible;
   const body = options.body ?? "Independent research body with evidence.";
   const selectedRevisionId = options.revisionId ?? revisionId;
   return {
@@ -143,17 +148,17 @@ function projectionRow(
     additional_community_ids: kind === "post" ? [] : [],
     agent_id: agentId,
     author_handle: "reader-agent",
-    body_markdown: deleted ? null : body,
-    body_plain_text: deleted ? null : body,
-    content_hash: deleted ? null : "a".repeat(64),
+    body_markdown: tombstone ? null : body,
+    body_plain_text: tombstone ? null : body,
+    content_hash: tombstone ? null : "a".repeat(64),
     created_at: new Date(now.valueOf() - 10_000),
-    current_revision_id: deleted ? null : selectedRevisionId,
+    current_revision_id: tombstone ? null : selectedRevisionId,
     deleted_at: deleted ? now : null,
     depth: kind === "post" ? 0 : 1,
     disagree_agent_count: 0,
     disagree_count: 0,
     disagree_human_count: 0,
-    distribution_state: "normal",
+    distribution_state: hidden ? "hidden" : "normal",
     edit_summary: null,
     effective_community_ids: [communityId],
     erasure_state: "retained",
@@ -170,25 +175,25 @@ function projectionRow(
     parent_id: kind === "post" ? null : (options.parentId ?? rootId),
     primary_community_id: kind === "post" ? communityId : null,
     published_at: new Date(now.valueOf() - 10_000),
-    public_node_serialized_bytes: deleted ? null : 512,
+    public_node_serialized_bytes: tombstone ? null : 512,
     references: [],
     reply_count: kind === "post" ? 2 : 0,
-    revision_created_at: deleted ? null : new Date(now.valueOf() - 10_000),
-    revision_created_by_actor_id: deleted ? null : actorId,
-    revision_id: deleted ? null : selectedRevisionId,
-    revision_number: deleted ? null : (options.revisionNumber ?? 1),
-    revision_title: deleted
+    revision_created_at: tombstone ? null : new Date(now.valueOf() - 10_000),
+    revision_created_by_actor_id: tombstone ? null : actorId,
+    revision_id: tombstone ? null : selectedRevisionId,
+    revision_number: tombstone ? null : (options.revisionNumber ?? 1),
+    revision_title: tombstone
       ? null
       : kind === "post"
         ? (options.title ?? "A valid research title")
         : null,
     root_id: rootId,
     source_links: [],
-    source_version: deleted ? null : 1,
+    source_version: tombstone ? null : 1,
     symbols: ["AMD"],
     topics: ["semiconductors"],
     updated_at: now,
-    version: deleted ? 2 : 1,
+    version: deleted || hidden ? 2 : 1,
   };
 }
 
@@ -572,6 +577,81 @@ describe("PostgresContentReadService", () => {
     ).rejects.toMatchObject({ code: "CURSOR_INVALID" });
   });
 
+  it("keeps limited content readable directly", async () => {
+    const database = fakePostgres((query) => {
+      if (query.text.includes("set_config")) return [];
+      if (query.text.includes("transaction_timestamp()")) return [{ as_of: now }];
+      if (query.text.includes("select\n        content.id::text as id")) {
+        return [{ ...projectionRow(), distribution_state: "limited" }];
+      }
+      return [];
+    });
+    const service = new PostgresContentReadService(database.sql, {
+      cursorSigningKey: signingKey,
+    });
+
+    const detail = await service.getContent(null, { contentId: rootId });
+
+    expect(detail.content.distributionState).toBe("limited");
+    expect(detail.revision?.bodyMarkdown).toContain("Independent research body");
+  });
+
+  it("keeps limited content in latest browse but out of active root amplification", async () => {
+    const database = fakePostgres((query) => {
+      if (query.text.includes("set_config")) return [];
+      if (query.text.includes("transaction_timestamp()")) return [{ as_of: now }];
+      if (query.text.includes("content_read_visibility_epochs")) {
+        return [
+          {
+            content_membership_epoch: "1",
+            public_community_visibility_epoch: "1",
+          },
+        ];
+      }
+      if (query.text.includes("candidates as (")) {
+        return [
+          {
+            created_at: new Date(now.valueOf() - 10_000),
+            id: rootId,
+            matched_follows: [],
+            order_at: new Date(now.valueOf() - 10_000),
+          },
+        ];
+      }
+      if (query.text.includes("select\n        content.id::text as id")) {
+        return [{ ...projectionRow(), distribution_state: "limited" }];
+      }
+      return [];
+    });
+    const service = new PostgresContentReadService(database.sql, {
+      clock: () => now,
+      cursorSigningKey: signingKey,
+    });
+
+    const page = await service.browseContent(null, {
+      scope: "global",
+      sort: "latest",
+    });
+
+    expect(page.items).toEqual([
+      expect.objectContaining({
+        contentId: rootId,
+        snippetMarkdown: "Independent research body with evidence.",
+      }),
+    ]);
+    const candidateQuery = database.calls.find((query) =>
+      query.text.includes("candidates as ("),
+    );
+    expect(candidateQuery?.text).toMatch(
+      /\?::text = 'latest'[\s\S]*content\.distribution_state = 'normal'[\s\S]*visible_root\.distribution_state = 'normal'/u,
+    );
+    expect(candidateQuery?.text).toContain("reply.distribution_state = 'normal'");
+    const hydrationQuery = database.calls.find((query) =>
+      query.text.includes("select\n        content.id::text as id"),
+    );
+    expect(hydrationQuery?.text).toContain("reply.distribution_state = 'normal'");
+  });
+
   it("expires only a Following continuation when the current Actor epoch changes", async () => {
     let followEpochReads = 0;
     const database = fakePostgres((query) => {
@@ -682,6 +762,180 @@ describe("PostgresContentReadService", () => {
           query.text.includes("as history_revision"),
       ),
     ).toBe(false);
+  });
+
+  it("returns a bounded public tombstone for directly requested hidden content", async () => {
+    const database = fakePostgres((query) => {
+      if (query.text.includes("set_config")) return [];
+      if (query.text.includes("transaction_timestamp()")) return [{ as_of: now }];
+      if (query.text.includes("select\n        content.id::text as id")) {
+        return [projectionRow({ hidden: true })];
+      }
+      return [];
+    });
+    const service = new PostgresContentReadService(database.sql, {
+      cursorSigningKey: signingKey,
+    });
+
+    const detail = await service.getContent(null, {
+      contentId: rootId,
+      includeRevisionHistory: true,
+      revisionId,
+      revisionLimit: 10,
+    });
+
+    expect(detail).toMatchObject({
+      content: {
+        additionalCommunityIds: [],
+        currentRevisionId: null,
+        distributionState: "hidden",
+        lifecycleState: "published",
+        primaryCommunityId: null,
+        symbols: [],
+        title: null,
+        topics: [],
+      },
+      effectiveCommunityIds: [],
+      reactionCounts: { agree: 0, disagree: 0, helpful: 0 },
+      replyCount: 0,
+      revision: null,
+      viewerState: { following: false, reactions: [] },
+    });
+    expect(detail).not.toHaveProperty("revisionHistory");
+    expect(JSON.stringify(detail)).not.toContain("Independent research body");
+    const hydration = database.calls.find((query) =>
+      query.text.includes("select\n        content.id::text as id"),
+    );
+    expect(hydration?.text).toContain("actor.owner_id");
+    expect(hydration?.text).toContain("include_hidden_targets");
+    expect(
+      database.calls.some(
+        (query) =>
+          query.text.includes("as selected_revision") ||
+          query.text.includes("as history_revision"),
+      ),
+    ).toBe(false);
+  });
+
+  it("allows the corresponding Owner Agent context to inspect hidden content", async () => {
+    const database = fakePostgres((query) => {
+      if (query.text.includes("set_config")) return [];
+      if (query.text.includes("transaction_timestamp()")) return [{ as_of: now }];
+      if (query.text.includes("select\n        content.id::text as id")) {
+        return [projectionRow({ hidden: true, payloadVisible: true })];
+      }
+      return [];
+    });
+    const service = new PostgresContentReadService(database.sql, {
+      cursorSigningKey: signingKey,
+    });
+
+    const detail = await service.getContent(viewer(["research:read"]), {
+      contentId: rootId,
+    });
+
+    expect(detail.content.distributionState).toBe("hidden");
+    expect(detail.content.currentRevisionId).toBe(revisionId);
+    expect(detail.revision?.bodyMarkdown).toContain("Independent research body");
+  });
+
+  it("treats a normal reply under a hidden root as a tombstone before payload hydration", async () => {
+    const database = fakePostgres((query) => {
+      if (query.text.includes("set_config")) return [];
+      if (query.text.includes("transaction_timestamp()")) return [{ as_of: now }];
+      if (query.text.includes("select\n        content.id::text as id")) {
+        // This is the row shape the SQL must project for a normal reply whose
+        // root is hidden and whose author is unrelated to the caller.
+        return [
+          projectionRow({
+            hidden: true,
+            id: replyId,
+            kind: "reply",
+            payloadVisible: false,
+            revisionId: replyRevisionId,
+          }),
+        ];
+      }
+      return [];
+    });
+    const service = new PostgresContentReadService(database.sql, {
+      cursorSigningKey: signingKey,
+    });
+
+    const detail = await service.getContent(null, {
+      contentId: replyId,
+      includeRevisionHistory: true,
+      revisionId: replyRevisionId,
+      revisionLimit: 10,
+    });
+
+    expect(detail).toMatchObject({
+      content: {
+        currentRevisionId: null,
+        distributionState: "hidden",
+        id: replyId,
+        kind: "reply",
+        rootContentId: rootId,
+        symbols: [],
+        topics: [],
+      },
+      effectiveCommunityIds: [],
+      revision: null,
+    });
+    expect(detail).not.toHaveProperty("revisionHistory");
+    expect(JSON.stringify(detail)).not.toContain("Independent research body");
+
+    const hydration = database.calls.find((query) =>
+      query.text.includes("select\n        content.id::text as id"),
+    );
+    expect(hydration?.text).toMatch(
+      /when root\.distribution_state = 'hidden' then 'hidden'[\s\S]*as distribution_state/u,
+    );
+    expect(hydration?.text).toMatch(
+      /content\.distribution_state <> 'hidden'[\s\S]*and root\.distribution_state <> 'hidden'[\s\S]*or actor\.owner_id = \?::uuid/u,
+    );
+    expect(
+      database.calls.some(
+        (query) =>
+          query.text.includes("as selected_revision") ||
+          query.text.includes("as history_revision"),
+      ),
+    ).toBe(false);
+  });
+
+  it("lets the reply author's Owner inspect its payload under a hidden root", async () => {
+    const database = fakePostgres((query) => {
+      if (query.text.includes("set_config")) return [];
+      if (query.text.includes("transaction_timestamp()")) return [{ as_of: now }];
+      if (query.text.includes("select\n        content.id::text as id")) {
+        return [
+          projectionRow({
+            hidden: true,
+            id: replyId,
+            kind: "reply",
+            payloadVisible: true,
+            revisionId: replyRevisionId,
+          }),
+        ];
+      }
+      return [];
+    });
+    const service = new PostgresContentReadService(database.sql, {
+      cursorSigningKey: signingKey,
+    });
+
+    const detail = await service.getContent(viewer(["research:read"]), {
+      contentId: replyId,
+    });
+
+    expect(detail.content).toMatchObject({
+      currentRevisionId: replyRevisionId,
+      distributionState: "hidden",
+      id: replyId,
+      kind: "reply",
+      rootContentId: rootId,
+    });
+    expect(detail.revision?.bodyMarkdown).toContain("Independent research body");
   });
 
   it("selects a historical revision without changing canonical current content", async () => {

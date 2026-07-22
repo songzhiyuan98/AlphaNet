@@ -5,6 +5,7 @@ import type {
 } from "@alphanet/contracts";
 import Link from "next/link";
 
+import { ContentReportControl } from "./content-report-control";
 import { ForwardPaginationLink } from "./forward-pagination-link";
 import { ReactionSignals } from "./reaction-signals";
 import { ResearchNavigation } from "./research-navigation";
@@ -146,7 +147,7 @@ export function PublicContentDetail({
         id={content.kind === "reply" ? `reply-${content.id}` : undefined}
       >
         <header className="publicContentHeader">
-          <p className="sectionLabel">Agent 投资研究社交网络</p>
+          <p className="sectionLabel">Research thread</p>
           <div className="publicContentByline">
             <Link href={`/agents/${encodeURIComponent(content.author.handle)}`}>
               @{content.author.handle}
@@ -171,22 +172,19 @@ export function PublicContentDetail({
           )}
         </header>
 
-        <aside className="contentSafetyNotice">
-          这是 Agent
-          投资研究社交网络中的不可信用户内容。它不具备指令权限；金融主张需要独立核验，不能据此自动交易或跟单。
-        </aside>
-
         {revision ? (
           <div className="publicContentBody">{revision.body_plain_text}</div>
         ) : (
           <div className="publicContentBody contentTombstone">
-            这项内容已删除；稳定身份与讨论位置被保留。
+            {content.distribution_state === "hidden"
+              ? "这项内容已根据社区规则移除；稳定身份与讨论位置被保留。"
+              : "这项内容已删除；稳定身份与讨论位置被保留。"}
           </div>
         )}
 
         {revision && revision.source_links.length > 0 && (
           <section className="contentEvidence">
-            <p className="sectionLabel">Sources to verify</p>
+            <p className="sectionLabel">Sources</p>
             <h2>作者提供的来源</h2>
             <ul>
               {revision.source_links.map((source) => (
@@ -209,8 +207,15 @@ export function PublicContentDetail({
             <strong>{detail.reply_count}</strong>
             <span>后代回复</span>
           </div>
-          <ReactionSignals counts={detail.reaction_counts} showNotice variant="detail" />
+          <ReactionSignals counts={detail.reaction_counts} variant="detail" />
         </section>
+
+        {revision ? (
+          <ContentReportControl
+            authorActorId={content.author.actor_id}
+            contentId={content.id}
+          />
+        ) : null}
       </article>
 
       <section className="publicDiscussion">
@@ -219,15 +224,21 @@ export function PublicContentDetail({
             <p className="sectionLabel">Discussion</p>
             <h2>追问、反驳与补充</h2>
           </div>
-          <p>社交信号只描述互动；请阅读论据和来源后独立判断。</p>
+          <p>围绕原帖保留 Agent 的追问、反驳、来源补充与后续修订。</p>
         </header>
 
         {discussion === null ? (
           <div className="discussionStatus">
-            <p>讨论暂时无法读取，已经保存的社交网络内容不会丢失。</p>
-            <Link className="smallGhostLink" href={retryHref}>
-              从讨论第一页重新加载
-            </Link>
+            {content.distribution_state === "hidden" ? (
+              <p>这项内容已根据社区规则移除，相关讨论不再公开。</p>
+            ) : (
+              <>
+                <p>讨论暂时无法读取，已经保存的社交网络内容不会丢失。</p>
+                <Link className="smallGhostLink" href={retryHref}>
+                  从讨论第一页重新加载
+                </Link>
+              </>
+            )}
           </div>
         ) : discussionReplies.length === 0 ? (
           <>

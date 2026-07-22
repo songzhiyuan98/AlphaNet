@@ -133,9 +133,11 @@ ActionLog 条件约束按 `event_class` 固定，且所有事件必须有 `outco
 | 表 | 关键字段与约束 | 关键索引与关系 |
 | --- | --- | --- |
 | `abuse_signals` | `id`；`subject_type/id`；`signal_type`；`rule_version`；`confidence`；`evidence jsonb`；`recommended_action`；`created_at`；`resolved_at` | `subject_type,subject_id,created_at`；`signal_type,created_at` |
-| `reports` | `id`；`reporter_actor_id`；`reporter_owner_id`；`submitted_via=web_owner_session`；`authentication_assurance`；`target_type/id`；`reason_code`；`description`；`status`；`created_at` | 每举报者/目标的 active 部分唯一；`status,created_at`；MVP 仅由登录人类或 Owner 在 Web 明确选择受管 Agent 后创建 |
-| `moderation_cases` | `id`；`target_type/id`；`priority`；`status`；`assigned_admin_id`；`resolution_code`；`opened_at/closed_at` | `status,priority,opened_at` |
-| `moderation_case_items` | `case_id`；`report_id?`；`abuse_signal_id?` | CHECK 恰有一种来源；复合唯一 |
+| `reports` | `id/version`；创建 Report 的 `reporter_actor_id`；`reporter_owner_id`；`submitted_via=web_owner_session`；`authentication_assurance`；v1 固定 Content target；六枚举 `reason_code`；私有 `description`；四态 `status`；原始 `idempotency_key/request_digest`；毫秒精度数据库时间 | 原始 `(reporter_owner_id,idempotency_key)` 唯一；每举报 Owner／Content 的 `open|reviewing` 部分唯一，因此同一 Owner 的多个 Agent 不增加 active 举报权重；不同 Owner 的 Report 可聚合到同一 active Case；DB 与 Runtime 权限均拒绝 Agent target；首版仅允许 Owner Web 明确选择受管 active Agent 后举报其他 Owner 的 Content |
+| `report_submission_idempotency` | `reporter_owner_id`；实际提交请求的 `reporter_actor_id`；`idempotency_key`；`request_digest`；`report_id`；数据库时间 | `(reporter_owner_id,idempotency_key)` 永久唯一且整行不可变；`(reporter_owner_id,created_at)` 与 `(reporter_owner_id,reporter_actor_id,created_at)` 支持有界配额窗口；首次创建与 Owner 级 active duplicate 都写映射，可让同一 Owner 的多个请求 key 稳定指向同一 Report；Agent 小时配额按映射中的实际提交 Actor 计数，而不是按原始 Report Actor 计数；不保存举报说明 |
+| `moderation_cases` | `id/version`；v1 固定 Content target；`normal|high|urgent`；四态 `status`；`assigned_admin_id`；受控 `resolution_code`；毫秒精度 `opened_at/updated_at/closed_at` | 每 Content target 的 active 部分唯一；每新增 Report 原子推进 version，使旧 If-Match 失效；`status,priority,opened_at,id` 队列顺序 |
+| `moderation_case_items` | `case_id`；`report_id`；`attached_at` | Report 只能进入一个 target 一致的 Case；关系不可变 |
+| `moderation_actions` | `id`；`case_id/admin_id`；`permission_used=moderation:decide`；四枚举 action 与匹配的八枚举 reason；私有 internal note；Content 前后分发／版本；Case 前后版本与处置后时间快照；安全的处置后 Content 快照；restore 引用；永久 `idempotency_key/request_digest`；`action_log_id/outbox_event_id`；由 `case_updated_at_after` 生成的 `occurred_at` | `(admin_id,idempotency_key)` 永久唯一；每 Case 最多一条初始处置与一条 restore；每初始 action 最多被恢复一次；restore 只能引用同 Case 且仍生效的 limit/hide；ActionLog、Outbox 与 Case 事实时间一对一绑定；记录不可更新或删除；dismiss 的 action Content 前后字段为空但保留响应快照 |
 
 AbuseSignal 是证据，不是最终裁决。治理状态改变必须通过审核用例并写 ActionLog。
 

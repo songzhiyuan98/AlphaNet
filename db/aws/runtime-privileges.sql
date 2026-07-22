@@ -143,6 +143,10 @@ TO :"runtime_role";
 -- release. Writes remain table-specific.
 GRANT SELECT ON TABLE
   platform.action_logs,
+  platform.admin_assignments,
+  platform.admin_role_permissions,
+  platform.admin_roles,
+  platform.admins,
   platform.agent_search_activity_events,
   platform.actors,
   platform.agent_policies,
@@ -161,14 +165,85 @@ GRANT SELECT ON TABLE
   platform.follows,
   platform.idempotency_records,
   platform.mentions,
+  platform.moderation_actions,
+  platform.moderation_case_items,
+  platform.moderation_cases,
   platform.owners,
   platform.pending_action_attempts,
   platform.pending_actions,
   platform.reactions,
   platform.registration_controls,
+  platform.report_submission_idempotency,
+  platform.reports,
   platform.source_links,
   platform.symbols,
   platform.topics
+TO :"runtime_role";
+
+-- Owner Web report creation and administrator decisions use narrow columns.
+-- Database-owned state/version/timestamps are populated by defaults and
+-- triggers; the Runtime has no delete or RBAC grant path.
+GRANT INSERT (
+  id,
+  reporter_owner_id,
+  reporter_actor_id,
+  target_type,
+  target_content_id,
+  reason_code,
+  description,
+  authentication_assurance,
+  idempotency_key,
+  request_digest
+) ON TABLE platform.reports
+TO :"runtime_role";
+
+GRANT INSERT (
+  id,
+  target_type,
+  target_content_id
+) ON TABLE platform.moderation_cases
+TO :"runtime_role";
+
+GRANT INSERT (
+  case_id,
+  report_id
+) ON TABLE platform.moderation_case_items
+TO :"runtime_role";
+
+GRANT INSERT (
+  id,
+  case_id,
+  admin_id,
+  permission_used,
+  action,
+  reason_code,
+  internal_note,
+  before_distribution_state,
+  after_distribution_state,
+  target_version_before,
+  target_version_after,
+  case_version_before,
+  case_version_after,
+  case_updated_at_after,
+  case_closed_at_after,
+  response_content_version,
+  response_content_lifecycle_state,
+  response_content_distribution_state,
+  reverts_action_id,
+  idempotency_key,
+  request_digest,
+  action_log_id,
+  outbox_event_id
+) ON TABLE platform.moderation_actions
+TO :"runtime_role";
+
+GRANT INSERT (
+  reporter_owner_id,
+  reporter_actor_id,
+  idempotency_key,
+  request_digest,
+  report_id
+) ON TABLE platform.report_submission_idempotency
 TO :"runtime_role";
 
 GRANT INSERT ON TABLE
@@ -232,6 +307,20 @@ GRANT UPDATE (notification_level) ON TABLE
   platform.follows
 TO :"runtime_role";
 
+GRANT UPDATE (
+  version,
+  status
+) ON TABLE platform.reports
+TO :"runtime_role";
+
+GRANT UPDATE (
+  version,
+  status,
+  assigned_admin_id,
+  resolution_code
+) ON TABLE platform.moderation_cases
+TO :"runtime_role";
+
 GRANT UPDATE ON TABLE
   platform.actors,
   platform.agent_policies,
@@ -239,13 +328,18 @@ GRANT UPDATE ON TABLE
   platform.credentials,
   platform.idempotency_records,
   platform.pending_action_attempts,
-  platform.pending_actions,
+  platform.pending_actions
+TO :"runtime_role";
+
+-- Runtime may reserve or release capacity, but cannot pause registration,
+-- rewrite operating limits, or impersonate an administrator update.
+GRANT UPDATE (active_agent_count) ON TABLE
   platform.registration_controls
 TO :"runtime_role";
 
 -- Content writes can advance optimistic concurrency, select the immutable
 -- current Revision, or author-soft-delete by setting the lifecycle tombstone.
--- Runtime cannot rewrite identity, placement, distribution, erasure, or
+-- Runtime cannot rewrite identity, placement, erasure, or
 -- database-owned timestamps. Classification sets are replaced as facts. The
 -- deferred provenance guard requires every Runtime mutation to commit with its
 -- ContentItem version, Outbox event, ActionLog, and succeeded
@@ -256,6 +350,7 @@ GRANT UPDATE (
   version,
   current_revision_id,
   lifecycle_state,
+  distribution_state,
   deleted_at
 ) ON TABLE
   platform.content_items

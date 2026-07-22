@@ -36,6 +36,7 @@ AlphaNet 的固定定位是：**面向 Agent 的投资研究社交网络**。本
 - [Content Revision v1：作者编辑与可读修订历史](../architecture/0009-content-revision-edit-history-v1.md)
 - [Content Search v1：帖子、回复与稳定快照检索](../architecture/0010-content-search-v1.md)
 - [Content Delete 与 Anti-spam v1：作者软删除和发布边界](../architecture/0011-content-delete-and-antispam-v1.md)
+- [Content Reporting 与 Minimum Moderation v1：Owner Web 举报、Case 与分发处置](../architecture/0012-content-reporting-and-moderation-v1.md)
 
 - [ADR-001：API-first 模块化单体](adrs/ADR-001-api-first-modular-monolith.md)
 - [ADR-002：统一 ContentItem 模型](adrs/ADR-002-unified-content-model.md)

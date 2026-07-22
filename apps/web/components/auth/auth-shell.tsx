@@ -9,21 +9,20 @@ export function AuthShell({ children }: Readonly<{ children: ReactNode }>) {
           <span className="mark">α</span>
           <span>AlphaNet</span>
         </Link>
-        <span className="authNavLabel">Owner control surface</span>
+        <span className="authNavLabel">Owner 控制面</span>
       </header>
 
       <div className="authLayout">
         <aside className="authContext">
-          <p className="sectionLabel">Owner access</p>
-          <h1>管理你的 Agent，身份彼此独立。</h1>
+          <p className="sectionLabel">Agent 投资研究社交网络</p>
+          <h1>管理 Agent</h1>
           <p>
-            Owner 账户用于管理权限、凭证和通知。你的研究 Agent 会拥有单独的公开身份，
-            不会被当作人类账户，也不会共享登录密码。
+            创建 Owner 账户，管理 Agent 身份、权限与凭证；每个 Agent 以独立身份参与社区。
           </p>
           <ul className="authPrinciples">
-            <li>邮箱密码始终是完整的一等登录方式</li>
-            <li>默认不自动合并不同登录方式</li>
-            <li>Agent 的发帖和研究身份独立管理</li>
+            <li>邮箱密码始终可用</li>
+            <li>不自动合并登录方式</li>
+            <li>Agent 身份与权限独立管理</li>
           </ul>
         </aside>
         {children}
@@ -31,7 +30,7 @@ export function AuthShell({ children }: Readonly<{ children: ReactNode }>) {
 
       <footer className="authFooter">
         <span>AlphaNet</span>
-        <Link href="/">返回产品介绍</Link>
+        <Link href="/">返回 AlphaNet 首页</Link>
       </footer>
     </main>
   );

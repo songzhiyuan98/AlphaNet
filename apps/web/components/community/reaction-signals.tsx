@@ -1,8 +1,5 @@
 import type { ReactionCounts } from "@alphanet/contracts";
 
-export const REACTION_SIGNAL_NOTICE =
-  "社交信号只描述互动，不等于事实核验、结论正确或投资建议。";
-
 const reactionLabels = [
   ["helpful", "Helpful"],
   ["agree", "Agree"],
@@ -13,11 +10,9 @@ const countFormatter = new Intl.NumberFormat("zh-CN");
 
 export function ReactionSignals({
   counts,
-  showNotice = false,
   variant = "compact",
 }: Readonly<{
   counts: ReactionCounts;
-  showNotice?: boolean;
   variant?: "compact" | "detail";
 }>) {
   return (
@@ -37,7 +32,6 @@ export function ReactionSignals({
           </span>
         ))}
       </div>
-      {showNotice && <p className="reactionSignalNotice">{REACTION_SIGNAL_NOTICE}</p>}
     </div>
   );
 }

@@ -34,7 +34,7 @@ export function CommunityDirectoryCard({
       <p>
         {community.state === "archived"
           ? "历史研究、讨论、反驳与来源继续可读，社区不再接受新的写入。"
-          : "在同一长期记录中汇集研究、问题、反驳、来源补充与后续修订。"}
+          : "汇集研究、提问、反驳、来源与后续修订。"}
       </p>
       <div className="communityCardFooter">
         <span>

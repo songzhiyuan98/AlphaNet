@@ -10,7 +10,6 @@ import type {
 import { afterEach, describe, expect, it } from "vitest";
 
 import { PublicContentDetail } from "./public-content-detail";
-import { REACTION_SIGNAL_NOTICE } from "./reaction-signals";
 
 const timestamp = "2026-07-20T20:00:00.000Z";
 const rootId = "00000000-0000-4000-8000-000000000001";
@@ -249,7 +248,7 @@ describe("PublicContentDetail social context", () => {
     expect(screen.getByText("evidence.example")).toBeTruthy();
   });
 
-  it("shows real detail and reply reactions with an explicit social-signal boundary", () => {
+  it("shows real detail and reply reactions as social-network data", () => {
     render(
       <PublicContentDetail
         detail={detail}
@@ -265,6 +264,73 @@ describe("PublicContentDetail social context", () => {
     expect(screen.getByLabelText("Helpful 5")).toBeTruthy();
     expect(screen.getByLabelText("Agree 3")).toBeTruthy();
     expect(screen.getByLabelText("Disagree 1")).toBeTruthy();
-    expect(screen.getByText(REACTION_SIGNAL_NOTICE)).toBeTruthy();
+  });
+
+  it("labels a hidden stable URL as a permanent moderation tombstone", () => {
+    const moderatedDetail: GetContentResponse = {
+      ...detail,
+      content: {
+        ...detail.content,
+        additional_community_ids: [],
+        current_revision_id: null,
+        distribution_state: "hidden",
+        symbols: [],
+        topics: [],
+        version: 2,
+      },
+      effective_community_ids: [],
+      reaction_counts: emptyReactions,
+      reaction_counts_by_actor_kind: {
+        agent: emptyReactions,
+        human: emptyReactions,
+      },
+      resource_version: 2,
+      revision: null,
+      revision_scope: "none",
+      viewer_state: viewerState,
+    };
+
+    render(
+      <PublicContentDetail
+        detail={moderatedDetail}
+        discussion={null}
+        nextPageHref={null}
+        retryHref={`/content/${replyId}`}
+      />,
+    );
+
+    expect(
+      screen.getByText("这项内容已根据社区规则移除；稳定身份与讨论位置被保留。"),
+    ).toBeTruthy();
+    expect(screen.queryByText("这项内容已删除；稳定身份与讨论位置被保留。")).toBeNull();
+    expect(screen.queryByText("当前回复正文")).toBeNull();
+    expect(
+      screen.getByText("这项内容已根据社区规则移除，相关讨论不再公开。"),
+    ).toBeTruthy();
+    expect(
+      screen.queryByText("讨论暂时无法读取，已经保存的社交网络内容不会丢失。"),
+    ).toBeNull();
+    expect(screen.queryByRole("link", { name: "从讨论第一页重新加载" })).toBeNull();
+  });
+
+  it("keeps the retry affordance for an ordinary unavailable discussion", () => {
+    render(
+      <PublicContentDetail
+        detail={detail}
+        discussion={null}
+        nextPageHref={null}
+        retryHref={`/content/${replyId}`}
+      />,
+    );
+
+    expect(
+      screen.getByText("讨论暂时无法读取，已经保存的社交网络内容不会丢失。"),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("link", { name: "从讨论第一页重新加载" }).getAttribute("href"),
+    ).toBe(`/content/${replyId}`);
+    expect(
+      screen.queryByText("这项内容已根据社区规则移除，相关讨论不再公开。"),
+    ).toBeNull();
   });
 });

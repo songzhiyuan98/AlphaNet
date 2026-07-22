@@ -84,10 +84,53 @@ BEGIN
 END;
 $runtime_search_boundary$;
 
+DO $runtime_moderation_boundary$
+BEGIN
+  IF has_table_privilege(current_user, 'platform.admin_assignments', 'INSERT')
+    OR has_table_privilege(current_user, 'platform.admin_assignments', 'UPDATE')
+    OR has_table_privilege(current_user, 'platform.admin_assignments', 'DELETE')
+    OR has_table_privilege(current_user, 'platform.admin_roles', 'INSERT')
+    OR has_table_privilege(current_user, 'platform.admin_roles', 'UPDATE')
+    OR has_table_privilege(current_user, 'platform.admin_roles', 'DELETE') THEN
+    RAISE EXCEPTION 'Runtime can grant or mutate administrator roles';
+  END IF;
+
+  IF has_column_privilege(current_user, 'platform.reports', 'created_at', 'INSERT')
+    OR has_column_privilege(
+      current_user,
+      'platform.reports',
+      'target_agent_id',
+      'INSERT'
+    )
+    OR has_column_privilege(current_user, 'platform.reports', 'status', 'INSERT')
+    OR has_column_privilege(current_user, 'platform.reports', 'resolved_at', 'UPDATE')
+    OR has_column_privilege(current_user, 'platform.moderation_cases', 'priority', 'UPDATE')
+    OR has_column_privilege(
+      current_user,
+      'platform.moderation_cases',
+      'target_agent_id',
+      'INSERT'
+    )
+    OR has_column_privilege(current_user, 'platform.moderation_cases', 'closed_at', 'UPDATE')
+    OR has_table_privilege(
+      current_user,
+      'platform.report_submission_idempotency',
+      'UPDATE,DELETE'
+    )
+    OR has_column_privilege(current_user, 'platform.moderation_actions', 'occurred_at', 'INSERT')
+    OR has_column_privilege(current_user, 'platform.moderation_actions', 'result_state', 'INSERT') THEN
+    RAISE EXCEPTION 'Runtime can override database-owned moderation facts';
+  END IF;
+END;
+$runtime_moderation_boundary$;
+
 SELECT
   pg_catalog.gen_random_uuid()::text AS user_id,
+  pg_catalog.gen_random_uuid()::text AS target_user_id,
   pg_catalog.gen_random_uuid()::text AS actor_id,
   pg_catalog.gen_random_uuid()::text AS target_actor_id,
+  pg_catalog.gen_random_uuid()::text AS target_agent_id,
+  pg_catalog.gen_random_uuid()::text AS target_policy_id,
   pg_catalog.gen_random_uuid()::text AS agent_id,
   pg_catalog.gen_random_uuid()::text AS policy_id,
   pg_catalog.gen_random_uuid()::text AS replacement_policy_id,
@@ -100,6 +143,9 @@ SELECT
   pg_catalog.gen_random_uuid()::text AS content_revision_id,
   pg_catalog.gen_random_uuid()::text AS content_idempotency_id,
   pg_catalog.gen_random_uuid()::text AS content_outbox_id,
+  pg_catalog.gen_random_uuid()::text AS report_id,
+  pg_catalog.gen_random_uuid()::text AS report_case_id,
+  pg_catalog.gen_random_uuid()::text AS report_outbox_id,
   'css_' || left(replace(pg_catalog.gen_random_uuid()::text, '-', ''), 32)
     AS search_snapshot_id,
   pg_catalog.gen_random_uuid()::text AS search_snapshot_content_id,
@@ -128,6 +174,28 @@ VALUES (
 SELECT id::text AS owner_id
 FROM platform.owners
 WHERE auth_user_id = :'user_id'
+\gset
+
+INSERT INTO auth.users (
+  id,
+  name,
+  email,
+  email_verified,
+  created_at,
+  updated_at
+)
+VALUES (
+  :'target_user_id',
+  'AWS runtime smoke report owner',
+  :'target_user_id' || '@runtime-smoke.invalid',
+  true,
+  clock_timestamp(),
+  clock_timestamp()
+);
+
+SELECT id::text AS target_owner_id
+FROM platform.owners
+WHERE auth_user_id = :'target_user_id'
 \gset
 
 INSERT INTO auth.verifications (
@@ -194,11 +262,51 @@ INSERT INTO platform.actors (
 )
 VALUES (
   :'target_actor_id',
-  'human',
-  :'owner_id',
+  'agent',
+  :'target_owner_id',
   'smoke-target-' || left(replace(:'target_actor_id', '-', ''), 16),
   'AWS runtime smoke Follow target',
   'active'
+);
+
+INSERT INTO platform.agents (
+  id,
+  actor_id,
+  owner_id,
+  discovery_tags,
+  status,
+  activated_at
+)
+VALUES (
+  :'target_agent_id',
+  :'target_actor_id',
+  :'target_owner_id',
+  ARRAY['moderation']::text[],
+  'active',
+  clock_timestamp()
+);
+
+INSERT INTO platform.agent_policies (
+  id,
+  agent_id,
+  tier,
+  defaults_version,
+  policy_schema_version,
+  version,
+  rules,
+  is_active,
+  configured_by_owner_id
+)
+VALUES (
+  :'target_policy_id',
+  :'target_agent_id',
+  'assisted',
+  'agent-permission-defaults-v1',
+  1,
+  1,
+  '{}'::jsonb,
+  true,
+  :'target_owner_id'
 );
 
 INSERT INTO platform.agent_policies (
@@ -225,7 +333,7 @@ VALUES (
 );
 
 UPDATE platform.registration_controls
-SET active_agent_count = active_agent_count + 1
+SET active_agent_count = active_agent_count + 2
 WHERE id = true;
 
 INSERT INTO platform.credentials (
@@ -478,7 +586,11 @@ INSERT INTO system.outbox_events (
   aggregate_sequence,
   event_type,
   event_version,
-  payload
+  payload,
+  occurred_at,
+  available_at,
+  max_attempts,
+  created_at
 )
 VALUES (
   :'content_outbox_id',
@@ -492,7 +604,11 @@ VALUES (
     'content_id', :'content_id',
     'kind', 'post',
     'revision_id', :'content_revision_id'
-  )
+  ),
+  statement_timestamp(),
+  statement_timestamp(),
+  12,
+  statement_timestamp()
 );
 
 INSERT INTO platform.action_logs (
@@ -583,6 +699,183 @@ SELECT (
 \endif
 
 RELEASE SAVEPOINT runtime_raw_delete_probe;
+
+-- Private report UGC remains in platform.reports while the atomic discovery
+-- event contains only controlled identifiers and the reason enum.
+SET CONSTRAINTS ALL DEFERRED;
+
+INSERT INTO platform.moderation_cases (
+  id,
+  target_type,
+  target_content_id
+)
+VALUES (
+  :'report_case_id',
+  'content',
+  :'content_id'
+);
+
+INSERT INTO platform.reports (
+  id,
+  reporter_owner_id,
+  reporter_actor_id,
+  target_type,
+  target_content_id,
+  reason_code,
+  description,
+  authentication_assurance,
+  idempotency_key,
+  request_digest
+)
+VALUES (
+  :'report_id',
+  :'target_owner_id',
+  :'target_actor_id',
+  'content',
+  :'content_id',
+  'spam',
+  'private runtime smoke description',
+  'owner_session',
+  'runtime-smoke-report-' || :'report_id',
+  public.digest('runtime-smoke-report:' || :'report_id', 'sha256')
+);
+
+INSERT INTO platform.moderation_case_items (case_id, report_id)
+VALUES (:'report_case_id', :'report_id');
+
+INSERT INTO platform.report_submission_idempotency (
+  reporter_owner_id,
+  reporter_actor_id,
+  idempotency_key,
+  request_digest,
+  report_id
+)
+VALUES (
+  :'target_owner_id',
+  :'target_actor_id',
+  'runtime-smoke-report-' || :'report_id',
+  public.digest('runtime-smoke-report:' || :'report_id', 'sha256'),
+  :'report_id'
+);
+
+INSERT INTO system.outbox_events (
+  id,
+  aggregate_type,
+  aggregate_id,
+  aggregate_sequence,
+  event_type,
+  event_version,
+  payload,
+  occurred_at,
+  available_at,
+  max_attempts,
+  created_at
+)
+VALUES (
+  :'report_outbox_id',
+  'report',
+  :'report_id',
+  1,
+  'report.created',
+  1,
+  jsonb_build_object(
+    'report_id', :'report_id'::uuid,
+    'case_id', :'report_case_id'::uuid,
+    'content_id', :'content_id'::uuid,
+    'reason_code', 'spam'
+  ),
+  (SELECT created_at FROM platform.reports WHERE id = :'report_id'),
+  (SELECT created_at FROM platform.reports WHERE id = :'report_id'),
+  12,
+  (SELECT created_at FROM platform.reports WHERE id = :'report_id')
+);
+
+SET CONSTRAINTS ALL IMMEDIATE;
+SET CONSTRAINTS ALL DEFERRED;
+
+SAVEPOINT runtime_raw_report_review_probe;
+UPDATE platform.reports
+SET version = version + 1,
+    status = 'reviewing'
+WHERE id = :'report_id'
+  AND status = 'open';
+
+\set ON_ERROR_STOP off
+SET CONSTRAINTS ALL IMMEDIATE;
+\set raw_report_review_sqlstate :SQLSTATE
+ROLLBACK TO SAVEPOINT runtime_raw_report_review_probe;
+\set raw_report_review_rollback_sqlstate :SQLSTATE
+\set ON_ERROR_STOP on
+
+SELECT (
+  :'raw_report_review_sqlstate' = '23514'
+  AND :'raw_report_review_rollback_sqlstate' = '00000'
+) AS raw_report_review_rejected_by_deferred_provenance
+\gset
+
+\if :raw_report_review_rejected_by_deferred_provenance
+\else
+  SELECT 1 / 0 AS raw_report_review_bypassed_commit_provenance;
+\endif
+
+RELEASE SAVEPOINT runtime_raw_report_review_probe;
+SET CONSTRAINTS ALL DEFERRED;
+
+SAVEPOINT runtime_raw_case_review_probe;
+UPDATE platform.moderation_cases
+SET version = version + 1,
+    status = 'reviewing'
+WHERE id = :'report_case_id'
+  AND status = 'open';
+
+\set ON_ERROR_STOP off
+SET CONSTRAINTS ALL IMMEDIATE;
+\set raw_case_review_sqlstate :SQLSTATE
+ROLLBACK TO SAVEPOINT runtime_raw_case_review_probe;
+\set raw_case_review_rollback_sqlstate :SQLSTATE
+\set ON_ERROR_STOP on
+
+SELECT (
+  :'raw_case_review_sqlstate' = '23514'
+  AND :'raw_case_review_rollback_sqlstate' = '00000'
+) AS raw_case_review_rejected_by_deferred_provenance
+\gset
+
+\if :raw_case_review_rejected_by_deferred_provenance
+\else
+  SELECT 1 / 0 AS raw_case_review_bypassed_commit_provenance;
+\endif
+
+RELEASE SAVEPOINT runtime_raw_case_review_probe;
+SET CONSTRAINTS ALL DEFERRED;
+
+SAVEPOINT runtime_raw_moderation_probe;
+UPDATE platform.content_items
+SET version = version + 1,
+    distribution_state = 'hidden'
+WHERE id = :'content_id'
+  AND version = 1
+  AND lifecycle_state = 'published';
+
+\set ON_ERROR_STOP off
+SET CONSTRAINTS ALL IMMEDIATE;
+\set raw_moderation_sqlstate :SQLSTATE
+ROLLBACK TO SAVEPOINT runtime_raw_moderation_probe;
+\set raw_moderation_rollback_sqlstate :SQLSTATE
+\set ON_ERROR_STOP on
+
+SELECT (
+  :'raw_moderation_sqlstate' = '23514'
+  AND :'raw_moderation_rollback_sqlstate' = '00000'
+) AS raw_moderation_rejected_by_deferred_provenance
+\gset
+
+\if :raw_moderation_rejected_by_deferred_provenance
+\else
+  SELECT 1 / 0 AS raw_runtime_moderation_bypassed_commit_provenance;
+\endif
+
+RELEASE SAVEPOINT runtime_raw_moderation_probe;
 
 INSERT INTO platform.agent_search_activity_events (
   id,
@@ -747,6 +1040,35 @@ SELECT (
       AND current_revision_id = :'content_revision_id'
       AND lifecycle_state = 'published'
       AND deleted_at IS NULL
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM platform.reports AS report
+    JOIN platform.moderation_case_items AS item
+      ON item.report_id = report.id
+    JOIN platform.moderation_cases AS moderation_case
+      ON moderation_case.id = item.case_id
+    JOIN platform.report_submission_idempotency AS submission
+      ON submission.report_id = report.id
+     AND submission.reporter_owner_id = report.reporter_owner_id
+    JOIN system.outbox_events AS event
+      ON event.id = :'report_outbox_id'
+    WHERE report.id = :'report_id'
+      AND report.description = 'private runtime smoke description'
+      AND report.status = 'open'
+      AND moderation_case.id = :'report_case_id'
+      AND moderation_case.status = 'open'
+      AND submission.idempotency_key =
+        'runtime-smoke-report-' || :'report_id'
+      AND submission.request_digest =
+        public.digest('runtime-smoke-report:' || :'report_id', 'sha256')
+      AND event.payload = jsonb_build_object(
+        'report_id', :'report_id'::uuid,
+        'case_id', :'report_case_id'::uuid,
+        'content_id', :'content_id'::uuid,
+        'reason_code', 'spam'
+      )
+      AND event.payload::text NOT LIKE '%private runtime smoke description%'
   )
   AND EXISTS (
     SELECT 1

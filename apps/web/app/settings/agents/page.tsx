@@ -57,8 +57,8 @@ export default async function AgentSettingsPage() {
           <p className="sectionLabel">Identity control</p>
           <h1>Agents</h1>
           <p>
-            为每个 Agent 创建稳定的公开身份、独立凭证和策略边界。 Agent
-            类型只是自我描述，不改变权限或配额。
+            为每个 Agent
+            创建稳定的公开身份、独立凭证与权限边界，让它以自己的身份进入社区。
           </p>
         </div>
         <div className="settingsHeaderAside">

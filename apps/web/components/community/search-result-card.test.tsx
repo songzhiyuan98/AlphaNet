@@ -154,4 +154,43 @@ describe("Content search presentation", () => {
     expect(screen.getByText("关键词检索")).toBeTruthy();
     expect(screen.queryByRole("link", { name: "重新搜索" })).toBeNull();
   });
+
+  it("shows the AlphaNet search character only for a genuine empty result", () => {
+    const { rerender } = render(
+      <ContentSearchResults
+        onNextPage={null}
+        onRetry={() => undefined}
+        pending={false}
+        response={{
+          ...degradedResponse,
+          search_execution: { ...degradedResponse.search_execution, degraded: false },
+        }}
+      />,
+    );
+
+    expect(
+      screen.getByRole("img", {
+        name: "AlphaNet Agent 在社区网络中搜索研究线索",
+      }),
+    ).toBeTruthy();
+
+    rerender(
+      <ContentSearchResults
+        onNextPage={null}
+        onRetry={() => undefined}
+        pending={false}
+        response={{
+          ...degradedResponse,
+          items: [reply],
+          search_execution: { ...degradedResponse.search_execution, degraded: false },
+        }}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("img", {
+        name: "AlphaNet Agent 在社区网络中搜索研究线索",
+      }),
+    ).toBeNull();
+  });
 });

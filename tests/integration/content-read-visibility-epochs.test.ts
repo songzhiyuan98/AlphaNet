@@ -7,8 +7,12 @@ import {
   createPostgresDependency,
   type HealthDependency,
 } from "../../packages/database/src/index.js";
-import { PostgresAgentConnectionService } from "../../packages/domain/src/agent-connection.js";
+import {
+  PostgresAgentConnectionService,
+  type AgentCredentialContext,
+} from "../../packages/domain/src/agent-connection.js";
 import { PostgresContentReadService } from "../../packages/domain/src/content-read.js";
+import { PostgresContentSearchService } from "../../packages/domain/src/content-search.js";
 
 const databaseUrl = process.env.DATABASE_URL;
 const mustRun = process.env.REQUIRE_INTEGRATION_SERVICES === "true";
@@ -59,6 +63,16 @@ describeVisibilityEpochs("content read visibility epochs", () => {
       "utf8",
     ),
   });
+  const searchService = new PostgresContentSearchService(postgres.sql, {
+    activityDigestKey: Buffer.from(
+      "content-visibility-search-activity-key-material-v1",
+      "utf8",
+    ),
+    cursorSigningKey: Buffer.from(
+      "content-visibility-search-cursor-key-material-v1",
+      "utf8",
+    ),
+  });
   dependencies.push(postgres);
 
   let actorId = "";
@@ -73,6 +87,9 @@ describeVisibilityEpochs("content read visibility epochs", () => {
   let initialTopicId = "";
   let replyTopicId = "";
   let rootContentId = "";
+  let rootAuthorContext: AgentCredentialContext;
+  let replyAuthorActorId = "";
+  let replyAuthorContext: AgentCredentialContext;
 
   async function readEpochs(): Promise<EpochSnapshot> {
     const rows = await postgres.sql<
@@ -120,8 +137,10 @@ describeVisibilityEpochs("content read visibility epochs", () => {
 
   async function createContent(options: {
     additionalCommunityIds?: readonly string[];
+    body?: string;
     createdAt?: Date;
     kind?: "post" | "reply";
+    authorActorId?: string;
     parentId?: string;
     primaryCommunityId?: string;
     rootId?: string;
@@ -134,7 +153,7 @@ describeVisibilityEpochs("content read visibility epochs", () => {
     const rootId = kind === "post" ? contentId : requireId(options.rootId, "Reply root");
     const parentId = kind === "post" ? null : requireId(options.parentId, "Reply parent");
     const createdAt = options.createdAt ?? new Date();
-    const body = `Visibility epoch ${kind} fixture ${contentId}.`;
+    const body = options.body ?? `Visibility epoch ${kind} fixture ${contentId}.`;
 
     await postgres.sql.begin(async (transaction) => {
       await transaction`
@@ -153,7 +172,7 @@ describeVisibilityEpochs("content read visibility epochs", () => {
         values (
           ${contentId},
           ${kind},
-          ${actorId},
+          ${options.authorActorId ?? actorId},
           ${kind === "post" ? (options.primaryCommunityId ?? primaryCommunityId) : null},
           ${rootId},
           ${parentId},
@@ -184,7 +203,7 @@ describeVisibilityEpochs("content read visibility epochs", () => {
           ${kind === "post" ? "Visibility epoch integration research" : null},
           ${body},
           ${body},
-          ${actorId},
+          ${options.authorActorId ?? actorId},
           ${createdAt},
           1,
           ${randomBytes(32)},
@@ -292,6 +311,64 @@ describeVisibilityEpochs("content read visibility epochs", () => {
       randomUUID(),
     );
     actorId = createdAgent.agent.actorId;
+    const rootAuthorCredential = await agentService.createCredential(
+      ownerId,
+      createdAgent.agent.id,
+      {
+        name: "Content visibility root author read credential",
+        scopes: ["research:read"],
+      },
+      randomUUID(),
+    );
+    rootAuthorContext = await agentService.authenticateStaticApiKey(
+      rootAuthorCredential.apiKey,
+    );
+
+    const replyAuthUsers = await postgres.sql<{ id: string }[]>`
+      insert into auth.users (
+        name,
+        email,
+        email_verified,
+        created_at,
+        updated_at
+      )
+      values (
+        'Content Visibility Reply Owner',
+        ${`content-epoch-reply-${marker}@example.test`},
+        true,
+        clock_timestamp(),
+        clock_timestamp()
+      )
+      returning id
+    `;
+    const replyAuthUserId = requireId(replyAuthUsers[0]?.id, "Reply author Auth User");
+    const replyOwners = await postgres.sql<{ id: string }[]>`
+      select id
+      from platform.owners
+      where auth_user_id = ${replyAuthUserId}
+    `;
+    const replyOwnerId = requireId(replyOwners[0]?.id, "Reply author Owner projection");
+    const replyAgent = await agentService.createAgent(
+      replyOwnerId,
+      {
+        displayName: "Content Visibility Reply Agent",
+        handle: `content-epoch-reply-${marker}`,
+      },
+      randomUUID(),
+    );
+    replyAuthorActorId = replyAgent.agent.actorId;
+    const replyAuthorCredential = await agentService.createCredential(
+      replyOwnerId,
+      replyAgent.agent.id,
+      {
+        name: "Content visibility reply author read credential",
+        scopes: ["research:read"],
+      },
+      randomUUID(),
+    );
+    replyAuthorContext = await agentService.authenticateStaticApiKey(
+      replyAuthorCredential.apiKey,
+    );
 
     await postgres.sql.begin(async (transaction) => {
       await transaction`
@@ -404,6 +481,89 @@ describeVisibilityEpochs("content read visibility epochs", () => {
       { epoch: expect.any(Number), epoch_name: "public_community_visibility" },
       { epoch: expect.any(Number), epoch_name: "search_index" },
     ]);
+  });
+
+  it("tombstones a normal reply when its hidden root is requested directly", async () => {
+    const rootBody = `Hidden root payload ${randomUUID().replaceAll("-", "")}.`;
+    const searchToken = `hiddenrootreply${randomUUID().replaceAll("-", "")}`;
+    const replyBody = `Reply payload ${searchToken}.`;
+    const root = await createContent({ body: rootBody });
+    const reply = await createContent({
+      authorActorId: replyAuthorActorId,
+      body: replyBody,
+      kind: "reply",
+      parentId: root.contentId,
+      rootId: root.contentId,
+    });
+
+    const visibleSearch = await searchService.searchContent(null, {
+      query: searchToken,
+      scope: "global",
+      searchMode: "lexical",
+    });
+    expect(visibleSearch.items.map((item) => item.contentId)).toContain(reply.contentId);
+
+    await postgres.sql`
+      update platform.content_items
+      set version = version + 1,
+          distribution_state = 'hidden'
+      where id = ${root.contentId}
+    `;
+
+    for (const unrelatedViewer of [null, rootAuthorContext] as const) {
+      const detail = await readService.getContent(unrelatedViewer, {
+        contentId: reply.contentId,
+        includeRevisionHistory: true,
+        revisionId: reply.revisionId,
+      });
+      expect(detail).toMatchObject({
+        content: {
+          currentRevisionId: null,
+          distributionState: "hidden",
+          id: reply.contentId,
+          kind: "reply",
+          rootContentId: root.contentId,
+          symbols: [],
+          topics: [],
+        },
+        effectiveCommunityIds: [],
+        reactionCounts: { agree: 0, disagree: 0, helpful: 0 },
+        revision: null,
+      });
+      expect(detail).not.toHaveProperty("revisionHistory");
+      expect(JSON.stringify(detail)).not.toContain(replyBody);
+      expect(JSON.stringify(detail)).not.toContain(rootBody);
+    }
+
+    const authorDetail = await readService.getContent(replyAuthorContext, {
+      contentId: reply.contentId,
+    });
+    expect(authorDetail.content).toMatchObject({
+      currentRevisionId: reply.revisionId,
+      distributionState: "hidden",
+      id: reply.contentId,
+      rootContentId: root.contentId,
+    });
+    expect(authorDetail.revision?.bodyMarkdown).toBe(replyBody);
+    expect(JSON.stringify(authorDetail)).not.toContain(rootBody);
+
+    const browse = await readService.browseContent(null, {
+      authorActorId: replyAuthorActorId,
+      contentTypes: ["reply"],
+      scope: "author",
+    });
+    expect(browse.items.map((item) => item.contentId)).not.toContain(reply.contentId);
+    const hiddenSearch = await searchService.searchContent(null, {
+      query: searchToken,
+      scope: "global",
+      searchMode: "lexical",
+    });
+    expect(hiddenSearch.items.map((item) => item.contentId)).not.toContain(
+      reply.contentId,
+    );
+    await expect(
+      readService.getDiscussion(null, { contentId: reply.contentId }),
+    ).rejects.toMatchObject({ code: "CONTENT_NOT_FOUND", statusCode: 404 });
   });
 
   it("database-assigns immutable creation XIDs for Content and revisions", async () => {

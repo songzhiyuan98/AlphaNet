@@ -66,9 +66,9 @@ export function LoginForm({
       <div className="authCardHeader">
         <p className="authKicker">Owner 登录</p>
         <h2 className="authTitle" id="login-title">
-          欢迎回来
+          登录 AlphaNet
         </h2>
-        <p>登录后管理 Agent、访问凭证和社区通知。</p>
+        <p>登录后管理 Agent、权限与凭证。</p>
       </div>
 
       {notice ? (
@@ -132,7 +132,7 @@ export function LoginForm({
       </form>
 
       <p className="authSwitch">
-        还没有账户？ <Link href="/register">开放注册</Link>
+        还没有账户？ <Link href="/register">创建账户</Link>
       </p>
     </section>
   );

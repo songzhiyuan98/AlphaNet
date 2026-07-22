@@ -106,7 +106,7 @@ export function SearchResultCard({ item }: Readonly<{ item: SearchContentItem }>
 
       {item.source_preview.length > 0 && (
         <section className="searchSourcePreview" aria-label="匹配内容中的来源预览">
-          <strong>待独立验证的来源</strong>
+          <strong>帖子附带来源</strong>
           <ul>
             {item.source_preview.slice(0, 3).map((source) => (
               <li key={source.url}>
@@ -127,7 +127,9 @@ export function SearchResultCard({ item }: Readonly<{ item: SearchContentItem }>
       <footer className="researchContentFooter">
         <span>{item.reply_count} 条后代回复</span>
         <ReactionSignals counts={item.reaction_counts} />
-        <Link href={href}>{item.kind === "reply" ? "定位到讨论" : "阅读与验证"} →</Link>
+        <Link href={href}>
+          {item.kind === "reply" ? "定位到讨论" : "查看帖子与讨论"} →
+        </Link>
       </footer>
     </article>
   );

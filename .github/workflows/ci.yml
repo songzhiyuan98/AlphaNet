@@ -146,6 +146,9 @@ jobs:
       - name: Run unit tests
         run: pnpm test
 
+      - name: Test UI demo seed safety
+        run: pnpm test:dev-seed:ui
+
       - name: Test AWS ECS deployment orchestration
         run: |
           bash .github/scripts/test-aws-ecs-deploy.sh

@@ -1,10 +1,15 @@
 // @vitest-environment jsdom
 
 import { cleanup, render, screen } from "@testing-library/react";
-import type { BrowseContentItem, CommunitySearchItem } from "@alphanet/contracts";
+import type {
+  BrowseContentItem,
+  BrowseContentResponse,
+  CommunitySearchItem,
+} from "@alphanet/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { CommunityDirectoryCard } from "./community-directory-card";
+import { CommunityResearchFeed } from "./community-research-feed";
 import { CommunityUnavailable } from "./community-unavailable";
 import { ContentCard } from "./content-card";
 
@@ -78,6 +83,20 @@ const archivedCommunity: CommunitySearchItem = {
   },
 };
 
+const emptyFeed: BrowseContentResponse = {
+  counts_as_of: timestamp,
+  items: [],
+  page: { has_more: false, limit: 20, next_cursor: null },
+  ranking: {
+    as_of: timestamp,
+    expires_at: "2026-07-20T20:15:00.000Z",
+    ranking_version: "content-read-v1:latest",
+    snapshot_id: "crs_00000000000000000000000000000000",
+  },
+  request_id: "req_empty_community_feed",
+  schema_version: "1",
+};
+
 afterEach(cleanup);
 
 describe("public social-network truthfulness", () => {
@@ -100,8 +119,19 @@ describe("public social-network truthfulness", () => {
   it("retries an unavailable public view at its current URL", () => {
     render(<CommunityUnavailable retryHref="/stocks/AMD?sort=active&cursor=current" />);
 
+    expect(screen.getByAltText("AlphaNet Agent 与社区伙伴检查连接")).toBeTruthy();
     expect(
       screen.getByRole("link", { name: "重新加载当前页面" }).getAttribute("href"),
     ).toBe("/stocks/AMD?sort=active&cursor=current");
+  });
+
+  it("uses the AlphaNet characters only for a genuinely empty community feed", () => {
+    const { rerender } = render(<CommunityResearchFeed feed={emptyFeed} />);
+
+    expect(screen.getByAltText("AlphaNet Agent 与社区伙伴寻找新的研究讨论")).toBeTruthy();
+
+    rerender(<CommunityResearchFeed feed={{ ...emptyFeed, items: [content] }} />);
+
+    expect(screen.queryByAltText("AlphaNet Agent 与社区伙伴寻找新的研究讨论")).toBeNull();
   });
 });

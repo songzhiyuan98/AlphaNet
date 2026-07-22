@@ -4,7 +4,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AlphaNetAuthRuntime, OwnerSession } from "@alphanet/auth";
 import { V1ErrorResponseSchema } from "@alphanet/contracts";
 import type {
+  ContentModerationService,
   ContentReadService,
+  ContentReportService,
   ContentSearchService,
   FollowService,
   OwnerPendingActionService,
@@ -118,6 +120,32 @@ function createContentReadService(): ContentReadService & {
     checkReady: vi.fn(() => Promise.resolve()),
     getContent: vi.fn(() => Promise.reject(new Error("unexpected content read"))),
     getDiscussion: vi.fn(() => Promise.reject(new Error("unexpected discussion read"))),
+  };
+}
+
+function createContentReportService(): ContentReportService & {
+  checkReady: ReturnType<typeof vi.fn>;
+  createReport: ReturnType<typeof vi.fn>;
+} {
+  return {
+    checkReady: vi.fn(() => Promise.resolve()),
+    createReport: vi.fn(() => Promise.reject(new Error("unexpected Content report"))),
+  };
+}
+
+function createContentModerationService(): ContentModerationService & {
+  checkReady: ReturnType<typeof vi.fn>;
+  listCases: ReturnType<typeof vi.fn>;
+  listContentActions: ReturnType<typeof vi.fn>;
+} {
+  return {
+    checkReady: vi.fn(() => Promise.resolve()),
+    decideCase: vi.fn(() => Promise.reject(new Error("unexpected decision"))),
+    getCase: vi.fn(() => Promise.reject(new Error("unexpected Case read"))),
+    listCases: vi.fn(() => Promise.reject(new Error("unexpected Case list"))),
+    listContentActions: vi.fn(() =>
+      Promise.reject(new Error("unexpected Owner moderation history")),
+    ),
   };
 }
 
@@ -346,6 +374,62 @@ describe("API service", () => {
       page: { has_more: false, limit: 20, next_cursor: null },
       ranking: { ranking_version: "content-read-v1:latest" },
     });
+  });
+
+  it("includes the Owner Content reporting schema in readiness", async () => {
+    const service = createContentReportService();
+    const app = await createApiApp({
+      allowedOrigins: ["https://app.alphanet.test"],
+      contentReportService: service,
+      environment: "test",
+      version: "test-version",
+    });
+    apps.push(app);
+
+    const response = await app.inject({ method: "GET", url: "/health/ready" });
+
+    expect(response.statusCode).toBe(200);
+    expect(service.checkReady).toHaveBeenCalledOnce();
+  });
+
+  it("includes the Content moderation schema in readiness", async () => {
+    const service = createContentModerationService();
+    const app = await createApiApp({
+      allowedOrigins: ["https://app.alphanet.test"],
+      contentModerationService: service,
+      environment: "test",
+      version: "test-version",
+    });
+    apps.push(app);
+
+    const response = await app.inject({ method: "GET", url: "/health/ready" });
+
+    expect(response.statusCode).toBe(200);
+    expect(service.checkReady).toHaveBeenCalledOnce();
+  });
+
+  it("keeps Admin and Owner moderation routes closed without their distinct authentication runtimes", async () => {
+    const service = createContentModerationService();
+    const app = await createApiApp({
+      allowedOrigins: ["https://app.alphanet.test"],
+      contentModerationService: service,
+      environment: "test",
+      version: "test-version",
+    });
+    apps.push(app);
+
+    const [admin, owner] = await Promise.all([
+      app.inject({ method: "GET", url: "/v1/admin/moderation/cases" }),
+      app.inject({
+        method: "GET",
+        url: "/v1/owner/content/50000000-0000-4000-8000-000000000001/moderation-actions",
+      }),
+    ]);
+
+    expect(admin.statusCode).toBe(404);
+    expect(owner.statusCode).toBe(404);
+    expect(service.listCases).not.toHaveBeenCalled();
+    expect(service.listContentActions).not.toHaveBeenCalled();
   });
 
   it("includes the wired Content Search schema in readiness", async () => {

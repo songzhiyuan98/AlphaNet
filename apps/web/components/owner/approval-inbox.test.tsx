@@ -267,6 +267,24 @@ afterEach(() => {
 });
 
 describe("ApprovalInbox", () => {
+  it("shows the AlphaNet approval character when the queue is empty", async () => {
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      const url = requestUrl(input);
+      if (url === queuePath) {
+        return Promise.resolve(Response.json(listPayload([])));
+      }
+      throw new Error(`Unexpected approval request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<ApprovalInbox />);
+
+    expect(
+      await screen.findByAltText("AlphaNet Agent 与社区伙伴确认当前无需审批"),
+    ).toBeTruthy();
+    expect(screen.getByText("当前没有动作")).toBeTruthy();
+  });
+
   it("renders frozen Markdown as inert text and never fetches source links", async () => {
     const malicious = '<script>alert("xss")</script><img src="x" onerror="alert(1)">';
     const pending = detailFor("pending_approval", malicious);

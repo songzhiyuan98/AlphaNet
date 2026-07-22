@@ -25,6 +25,7 @@
   "dependencies": {
     "better-auth": "1.6.23",
     "ioredis": "5.11.1",
+    "jose": "6.2.3",
     "pg": "8.22.0"
   },
   "devDependencies": {
