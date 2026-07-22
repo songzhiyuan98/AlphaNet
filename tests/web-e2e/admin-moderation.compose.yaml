@@ -1,0 +1,81 @@
+name: ${COMPOSE_PROJECT_NAME:-alphanet-admin-moderation-e2e}
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-pgvector/pgvector:0.8.1-pg17-bookworm@sha256:3e8b3adfd27b5707128f60956f62a793c3c9326ea8cfaf0eab7adccb5d700b21}
+    environment:
+      ALPHANET_LOAD_SEED: "true"
+      POSTGRES_DB: ${E2E_POSTGRES_DB:-alphanet_admin_e2e}
+      POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C
+      POSTGRES_PASSWORD: ${E2E_POSTGRES_PASSWORD:-alphanet_admin_e2e_local_only}
+      POSTGRES_USER: ${E2E_POSTGRES_USER:-alphanet}
+    command:
+      - postgres
+      - -c
+      - timezone=UTC
+      - -c
+      - idle_in_transaction_session_timeout=60000
+      - -c
+      - log_parameter_max_length=0
+      - -c
+      - log_parameter_max_length_on_error=0
+    ports:
+      - "127.0.0.1:${E2E_POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - admin-moderation-postgres:/var/lib/postgresql/data
+      - ../../db:/opt/alphanet/db:ro
+      - ../../infra/local/postgres-init.sh:/opt/alphanet/infra/postgres-init.sh:ro
+      - ../../infra/local/postgres-init.sql:/docker-entrypoint-initdb.d/010-alphanet-bootstrap.sql:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          psql --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB"
+          --tuples-only --no-align
+          --command="select exists (
+            select 1 from system.schema_migrations
+            where version = '000020'
+          )"
+          2>/dev/null | grep -q '^t$$'
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 5s
+    stop_grace_period: 15s
+    shm_size: 256mb
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7.4.2-alpine@sha256:02419de7eddf55aa5bcf49efb74e88fa8d931b4d77c07eff8a6b2144472b6952}
+    environment:
+      REDIS_PASSWORD: ${E2E_REDIS_PASSWORD:-alphanet_admin_e2e_local_only}
+    command:
+      - redis-server
+      - --appendonly
+      - "no"
+      - --save
+      - ""
+      - --requirepass
+      - ${E2E_REDIS_PASSWORD:-alphanet_admin_e2e_local_only}
+    ports:
+      - "127.0.0.1:${E2E_REDIS_PORT:-56379}:6379"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - redis-cli --no-auth-warning -a "$$REDIS_PASSWORD" ping | grep -q PONG
+      interval: 2s
+      timeout: 3s
+      retries: 40
+      start_period: 3s
+
+  dynamodb:
+    image: ${DYNAMODB_LOCAL_IMAGE:-amazon/dynamodb-local:2.6.1@sha256:1856c05cc66a0e49dc1099e483ad2851477eeebe2135250ac11a1d1227db54b1}
+    command:
+      - -jar
+      - DynamoDBLocal.jar
+      - -inMemory
+      - -sharedDb
+    ports:
+      - "127.0.0.1:${E2E_DYNAMODB_PORT:-58000}:8000"
+
+volumes:
+  admin-moderation-postgres:

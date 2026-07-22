@@ -305,9 +305,9 @@ jobs:
         run: pnpm build
 
   web-e2e:
-    name: Web E2E (Chromium)
+    name: Web E2E (Chromium + Admin moderation)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -328,6 +328,9 @@ jobs:
 
       - name: Build current production Web and run browser E2E
         run: pnpm test:web:e2e
+
+      - name: Run the real Admin moderation browser E2E
+        run: pnpm test:web:admin-e2e
 
       - name: Upload browser diagnostics on failure
         if: failure()
