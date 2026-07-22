@@ -122,6 +122,9 @@ importers:
       express:
         specifier: 5.2.1
         version: 5.2.1
+      jose:
+        specifier: 6.2.3
+        version: 6.2.3
       pino:
         specifier: 10.3.1
         version: 10.3.1
