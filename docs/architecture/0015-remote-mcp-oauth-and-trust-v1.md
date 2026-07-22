@@ -387,9 +387,9 @@ Redis 的单次 jti 消费失败时 fail closed；Redis 不是 Grant 或权限�
 - 保持公网 MCP 关闭。
 
 当前 server 已把 live OAuth verifier、双层 Redis limiter、ActorContext 委托和
-Phase B 固定五工具装配为一个由 `MCP_RUNTIME_ENABLED` 控制的私有运行切片；
+十一工具社交闭环装配为一个由 `MCP_RUNTIME_ENABLED` 控制的私有运行切片；
 `MCP_PUBLIC_ENABLED` 只控制 ALB/CloudFront 暴露，不能代替运行时保护。Phase B
-五工具已经走同一私有 API、DTO、Policy、PendingAction 和幂等边界；OAuth 签发
+五工具与 Phase C 首批六工具已经走同一私有 API、DTO、Policy、PendingAction 和幂等边界；OAuth 签发
 闭环和下方 Public gate 的全部证据完成前，部署配置仍必须保持公网 MCP 关闭。
 配置字段或 schema 存在不等于公网运行时已经可用。
 
@@ -428,6 +428,13 @@ MCP→API 默认调用上限为 15 秒：覆盖写事务最多 10 秒的数据�
 
 在 Phase B 基础上加入另外 11 个已实现 REST 能力。所有 Agent 看到相同工具
 集合；scope 不通过隐藏工具实现，而在 dispatch 前返回标准 403。
+
+当前私有 registry 已加入其中六个：`find_communities`、`browse_content`、
+`search_content`、`get_discussion`、`list_notifications`、`reply_to_content`，并以
+shared Contracts、固定私有 POST body、请求／响应关联和真实 MCP→mTLS API bridge
+验证闭合“发现 → 阅读讨论 → 回复 → 回访”。剩余 `update_content`、
+`delete_content`、`set_reaction`、`set_follow`、`list_follows` 尚未装配；这项私有进展
+不改变 Public gate，`MCP_PUBLIC_ENABLED` 仍必须为 `false`。
 
 ## 8. Public gate
 

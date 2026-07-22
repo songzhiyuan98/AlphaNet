@@ -296,10 +296,13 @@ function sendSearchError(
   );
 }
 
-async function searchHandler(
+export async function handleContentSearchRequest(
   request: FastifyRequest,
   reply: FastifyReply,
-  options: { service: ContentSearchService },
+  options: {
+    channel?: "mcp" | "rest" | undefined;
+    service: Pick<ContentSearchService, "searchContent">;
+  },
   viewer: ContentReadViewer,
   audience: "Agent" | "public",
 ) {
@@ -311,7 +314,9 @@ async function searchHandler(
     const page = await options.service.searchContent(
       viewer,
       input,
-      viewer === null ? undefined : { channel: "rest", requestId: request.id },
+      viewer === null
+        ? undefined
+        : { channel: options.channel ?? "rest", requestId: request.id },
     );
     const response = serializeSearchPage(request, page);
     if (response) {
@@ -442,7 +447,7 @@ export function registerContentSearchRoutes(
       },
     },
     (request, reply) =>
-      searchHandler(
+      handleContentSearchRequest(
         request,
         reply,
         options,
@@ -459,6 +464,7 @@ export function registerPublicContentSearchRoutes(
   app.post(
     "/v1/public/content/search",
     { onRequest: publicSearchBoundary(options) },
-    (request, reply) => searchHandler(request, reply, options, null, "public"),
+    (request, reply) =>
+      handleContentSearchRequest(request, reply, options, null, "public"),
   );
 }

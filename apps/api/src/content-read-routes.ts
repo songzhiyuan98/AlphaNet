@@ -5,8 +5,10 @@ import {
   GetContentResponseSchema,
   GetDiscussionRequestSchema,
   GetDiscussionResponseSchema,
+  type BrowseContentRequest,
   type BrowseContentResponse,
   type GetContentResponse,
+  type GetDiscussionRequest,
   type GetDiscussionResponse,
 } from "@alphanet/contracts";
 import {
@@ -557,55 +559,56 @@ function browseInput(
   if (!parsed.success) {
     return { error: validationFailed(request, reply, audience) } as const;
   }
-  if (!isSupportedBrowseScope(parsed.data.scope, audience)) {
+  return browseInputFromContract(request, reply, parsed.data, audience);
+}
+
+function browseInputFromContract(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  input: BrowseContentRequest,
+  audience: "Agent" | "public",
+) {
+  if (!isSupportedBrowseScope(input.scope, audience)) {
     return {
-      error: capabilityUnavailable(request, reply, `Browse scope '${parsed.data.scope}'`),
+      error: capabilityUnavailable(request, reply, `Browse scope '${input.scope}'`),
     } as const;
   }
-  if (!isSupportedBrowseSort(parsed.data.sort)) {
+  if (!isSupportedBrowseSort(input.sort)) {
     return {
-      error: capabilityUnavailable(request, reply, `Browse sort '${parsed.data.sort}'`),
+      error: capabilityUnavailable(request, reply, `Browse sort '${input.sort}'`),
     } as const;
   }
-  if (parsed.data.snapshot_id !== undefined && parsed.data.snapshot_id !== null) {
+  if (input.snapshot_id !== undefined && input.snapshot_id !== null) {
     return {
       error: capabilityUnavailable(request, reply, "Explicit browse snapshots"),
     } as const;
   }
 
-  const input: ContentBrowseInput = {
-    scope: parsed.data.scope,
-    sort: parsed.data.sort,
-    ...(parsed.data.community_id === undefined
+  const domainInput: ContentBrowseInput = {
+    scope: input.scope,
+    sort: input.sort,
+    ...(input.community_id === undefined ? {} : { communityId: input.community_id }),
+    ...(input.author_actor_id === undefined
       ? {}
-      : { communityId: parsed.data.community_id }),
-    ...(parsed.data.author_actor_id === undefined
+      : { authorActorId: input.author_actor_id }),
+    ...(input.symbol === undefined ? {} : { symbol: input.symbol }),
+    ...(input.topic === undefined ? {} : { topic: input.topic }),
+    ...(input.content_types === undefined ? {} : { contentTypes: input.content_types }),
+    ...(input.symbols === undefined ? {} : { symbols: input.symbols }),
+    ...(input.topics === undefined ? {} : { topics: input.topics }),
+    ...(input.author_actor_ids === undefined
       ? {}
-      : { authorActorId: parsed.data.author_actor_id }),
-    ...(parsed.data.symbol === undefined ? {} : { symbol: parsed.data.symbol }),
-    ...(parsed.data.topic === undefined ? {} : { topic: parsed.data.topic }),
-    ...(parsed.data.content_types === undefined
+      : { authorActorIds: input.author_actor_ids }),
+    ...(input.top_metric === undefined ? {} : { topMetric: input.top_metric }),
+    ...(input.window === undefined ? {} : { window: input.window }),
+    ...(input.created_after === undefined ? {} : { createdAfter: input.created_after }),
+    ...(input.created_before === undefined
       ? {}
-      : { contentTypes: parsed.data.content_types }),
-    ...(parsed.data.symbols === undefined ? {} : { symbols: parsed.data.symbols }),
-    ...(parsed.data.topics === undefined ? {} : { topics: parsed.data.topics }),
-    ...(parsed.data.author_actor_ids === undefined
-      ? {}
-      : { authorActorIds: parsed.data.author_actor_ids }),
-    ...(parsed.data.top_metric === undefined
-      ? {}
-      : { topMetric: parsed.data.top_metric }),
-    ...(parsed.data.window === undefined ? {} : { window: parsed.data.window }),
-    ...(parsed.data.created_after === undefined
-      ? {}
-      : { createdAfter: parsed.data.created_after }),
-    ...(parsed.data.created_before === undefined
-      ? {}
-      : { createdBefore: parsed.data.created_before }),
-    ...(parsed.data.cursor === undefined ? {} : { cursor: parsed.data.cursor }),
-    ...(parsed.data.limit === undefined ? {} : { limit: parsed.data.limit }),
+      : { createdBefore: input.created_before }),
+    ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+    ...(input.limit === undefined ? {} : { limit: input.limit }),
   };
-  return { input } as const;
+  return { input: domainInput } as const;
 }
 
 function contentInput(
@@ -661,36 +664,38 @@ function discussionInput(
   if (!parsed.success) {
     return { error: validationFailed(request, reply, audience) } as const;
   }
-  if (parsed.data.sort !== undefined && !isSupportedDiscussionSort(parsed.data.sort)) {
+  return discussionInputFromContract(request, reply, parsed.data);
+}
+
+function discussionInputFromContract(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  input: GetDiscussionRequest,
+) {
+  if (input.sort !== undefined && !isSupportedDiscussionSort(input.sort)) {
     return {
-      error: capabilityUnavailable(
-        request,
-        reply,
-        `Discussion sort '${parsed.data.sort}'`,
-      ),
+      error: capabilityUnavailable(request, reply, `Discussion sort '${input.sort}'`),
     } as const;
   }
   return {
     input: {
-      contentId: parsed.data.content_id,
-      ...(parsed.data.sort === undefined ? {} : { sort: parsed.data.sort }),
-      ...(parsed.data.limit === undefined ? {} : { limit: parsed.data.limit }),
-      ...(parsed.data.cursor === undefined ? {} : { cursor: parsed.data.cursor }),
+      contentId: input.content_id,
+      ...(input.sort === undefined ? {} : { sort: input.sort }),
+      ...(input.limit === undefined ? {} : { limit: input.limit }),
+      ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
     },
   } as const;
 }
 
-async function browseHandler(
+async function executeBrowseContent(
   request: FastifyRequest,
   reply: FastifyReply,
-  options: { service: ContentReadService },
+  service: Pick<ContentReadService, "browseContent">,
   viewer: Parameters<ContentReadService["browseContent"]>[0],
-  audience: "Agent" | "public",
+  input: ContentBrowseInput,
 ) {
-  const parsed = browseInput(request, reply, audience);
-  if ("error" in parsed) return parsed.error;
   try {
-    const page = await options.service.browseContent(viewer, parsed.input);
+    const page = await service.browseContent(viewer, input);
     const response = serializeBrowsePage(request, page);
     if (!response) {
       request.log.error(
@@ -703,6 +708,30 @@ async function browseHandler(
   } catch (error) {
     return sendContentReadError(request, reply, error);
   }
+}
+
+async function browseHandler(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  options: { service: Pick<ContentReadService, "browseContent"> },
+  viewer: Parameters<ContentReadService["browseContent"]>[0],
+  audience: "Agent" | "public",
+) {
+  const parsed = browseInput(request, reply, audience);
+  if ("error" in parsed) return parsed.error;
+  return executeBrowseContent(request, reply, options.service, viewer, parsed.input);
+}
+
+export async function handleAgentBrowseContent(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  service: Pick<ContentReadService, "browseContent">,
+  viewer: Parameters<ContentReadService["browseContent"]>[0],
+  input: BrowseContentRequest,
+): Promise<unknown> {
+  const parsed = browseInputFromContract(request, reply, input, "Agent");
+  if ("error" in parsed) return parsed.error;
+  return executeBrowseContent(request, reply, service, viewer, parsed.input);
 }
 
 export async function handleGetContentRequest(
@@ -730,17 +759,15 @@ export async function handleGetContentRequest(
   }
 }
 
-async function getDiscussionHandler(
+async function executeGetDiscussion(
   request: FastifyRequest,
   reply: FastifyReply,
-  options: { service: ContentReadService },
+  service: Pick<ContentReadService, "getDiscussion">,
   viewer: Parameters<ContentReadService["getDiscussion"]>[0],
-  audience: "Agent" | "public",
+  input: Parameters<ContentReadService["getDiscussion"]>[1],
 ) {
-  const parsed = discussionInput(request, reply, audience);
-  if ("error" in parsed) return parsed.error;
   try {
-    const discussion = await options.service.getDiscussion(viewer, parsed.input);
+    const discussion = await service.getDiscussion(viewer, input);
     const response = serializeDiscussion(request, discussion);
     if (!response) {
       request.log.error(
@@ -753,6 +780,30 @@ async function getDiscussionHandler(
   } catch (error) {
     return sendContentReadError(request, reply, error);
   }
+}
+
+async function getDiscussionHandler(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  options: { service: Pick<ContentReadService, "getDiscussion"> },
+  viewer: Parameters<ContentReadService["getDiscussion"]>[0],
+  audience: "Agent" | "public",
+) {
+  const parsed = discussionInput(request, reply, audience);
+  if ("error" in parsed) return parsed.error;
+  return executeGetDiscussion(request, reply, options.service, viewer, parsed.input);
+}
+
+export async function handleAgentGetDiscussion(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  service: Pick<ContentReadService, "getDiscussion">,
+  viewer: Parameters<ContentReadService["getDiscussion"]>[0],
+  input: GetDiscussionRequest,
+): Promise<unknown> {
+  const parsed = discussionInputFromContract(request, reply, input);
+  if ("error" in parsed) return parsed.error;
+  return executeGetDiscussion(request, reply, service, viewer, parsed.input);
 }
 
 export function registerContentReadRoutes(

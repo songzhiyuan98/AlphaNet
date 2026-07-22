@@ -2,14 +2,22 @@ import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 
 import {
+  BrowseContentRequestSchema,
   CreatePostRequestSchema,
+  FindCommunitiesRequestSchema,
   GetActionStatusRequestSchema,
   GetCommunityRequestSchema,
+  GetDiscussionRequestSchema,
+  ListNotificationsRequestSchema,
+  ReplyToContentRequestSchema,
+  SearchContentRequestSchema,
 } from "@alphanet/contracts";
 import type {
   AgentOperation,
   CommunityDirectoryService,
   ContentReadService,
+  ContentSearchService,
+  NotificationService,
   PendingActionStatusService,
   ResearchWriteService,
 } from "@alphanet/domain";
@@ -30,15 +38,27 @@ import {
   type AgentRequestRateLimiter,
   type AuthorizedAgentRequest,
 } from "./agent-request.js";
-import { handleAgentGetCommunity } from "./community-routes.js";
-import { handleGetContentRequest } from "./content-read-routes.js";
+import {
+  handleAgentFindCommunities,
+  handleAgentGetCommunity,
+} from "./community-routes.js";
+import {
+  handleAgentBrowseContent,
+  handleAgentGetDiscussion,
+  handleGetContentRequest,
+} from "./content-read-routes.js";
+import { handleContentSearchRequest } from "./content-search-routes.js";
 import {
   createRemoteMcpActorAuthenticator,
   RemoteMcpActorAuthenticationError,
   type RemoteMcpActorAuthenticatorOptions,
 } from "./mcp-actor-authenticator.js";
 import { handleAgentGetActionStatus } from "./pending-action-routes.js";
-import { handleAgentCreatePost } from "./research-write-routes.js";
+import { handleAgentListNotifications } from "./notification-routes.js";
+import {
+  handleAgentCreatePost,
+  handleAgentReplyToContent,
+} from "./research-write-routes.js";
 import { v1Error } from "./v1-error.js";
 
 export const PRIVATE_MCP_API_PREFIX = "/internal/mcp/v1";
@@ -48,9 +68,20 @@ export const PRIVATE_MCP_COMMUNITY_BY_SLUG_PATH =
   `${PRIVATE_MCP_API_PREFIX}/communities/by-slug/:slug` as const;
 export const PRIVATE_MCP_COMMUNITY_PATH =
   `${PRIVATE_MCP_API_PREFIX}/communities/:communityId` as const;
+export const PRIVATE_MCP_COMMUNITY_SEARCH_PATH =
+  `${PRIVATE_MCP_API_PREFIX}/communities/search` as const;
+export const PRIVATE_MCP_CONTENT_BROWSE_PATH =
+  `${PRIVATE_MCP_API_PREFIX}/content/browse` as const;
+export const PRIVATE_MCP_CONTENT_SEARCH_PATH =
+  `${PRIVATE_MCP_API_PREFIX}/content/search` as const;
+export const PRIVATE_MCP_DISCUSSION_PATH =
+  `${PRIVATE_MCP_API_PREFIX}/content/discussion` as const;
 export const PRIVATE_MCP_CONTENT_PATH =
   `${PRIVATE_MCP_API_PREFIX}/content/:contentId` as const;
+export const PRIVATE_MCP_NOTIFICATIONS_PATH =
+  `${PRIVATE_MCP_API_PREFIX}/notifications/list` as const;
 export const PRIVATE_MCP_POSTS_PATH = `${PRIVATE_MCP_API_PREFIX}/posts` as const;
+export const PRIVATE_MCP_REPLIES_PATH = `${PRIVATE_MCP_API_PREFIX}/replies` as const;
 export const PRIVATE_MCP_ACTION_PATH =
   `${PRIVATE_MCP_API_PREFIX}/actions/:actionId` as const;
 
@@ -70,13 +101,21 @@ export type PrivateMcpTransportIdentityGuard = (
 
 export interface PrivateMcpAppOptions {
   actorAuthenticator: RemoteMcpActorAuthenticatorOptions;
-  communityDirectoryService: Pick<CommunityDirectoryService, "getCommunity">;
-  contentReadService: Pick<ContentReadService, "getContent">;
+  communityDirectoryService: Pick<
+    CommunityDirectoryService,
+    "getCommunity" | "searchCommunities"
+  >;
+  contentReadService: Pick<
+    ContentReadService,
+    "browseContent" | "getContent" | "getDiscussion"
+  >;
+  contentSearchService: Pick<ContentSearchService, "searchContent">;
   logger?: FastifyBaseLogger | undefined;
+  notificationService: Pick<NotificationService, "listAgentNotifications">;
   now?: (() => Date) | undefined;
   pendingActionStatusService: Pick<PendingActionStatusService, "getActionStatus">;
   rateLimiter: AgentRequestRateLimiter;
-  researchWriteService: Pick<ResearchWriteService, "createPost">;
+  researchWriteService: Pick<ResearchWriteService, "createPost" | "replyToContent">;
   /** Root runtime injection used to create the dedicated HTTPS/mTLS server. */
   serverFactory?: FastifyServerFactory | undefined;
   transportIdentityGuard: PrivateMcpTransportIdentityGuard;
@@ -190,6 +229,7 @@ function hasQueryParameters(request: FastifyRequest): boolean {
 
 function valueContainsIdentity(
   value: unknown,
+  allowedIdentityNames: ReadonlySet<string> = new Set(),
   seen = new Set<object>(),
   depth = 0,
 ): boolean {
@@ -204,12 +244,15 @@ function valueContainsIdentity(
   }
   seen.add(value);
   if (Array.isArray(value)) {
-    return value.some((entry) => valueContainsIdentity(entry, seen, depth + 1));
+    return value.some((entry) =>
+      valueContainsIdentity(entry, allowedIdentityNames, seen, depth + 1),
+    );
   }
   return Object.entries(value).some(
     ([name, entry]) =>
-      forbiddenIdentityNames.has(normalizedIdentityName(name)) ||
-      valueContainsIdentity(entry, seen, depth + 1),
+      (forbiddenIdentityNames.has(normalizedIdentityName(name)) &&
+        !allowedIdentityNames.has(normalizedIdentityName(name))) ||
+      valueContainsIdentity(entry, allowedIdentityNames, seen, depth + 1),
   );
 }
 
@@ -262,6 +305,7 @@ function validTransportIdentity(
 }
 
 interface PrivateAuthorizationOptions {
+  allowedBodyIdentityNames?: readonly string[] | undefined;
   allowBody?: boolean | undefined;
   operation: AgentOperation;
   policyEnforcement?: "boundary" | "domain" | undefined;
@@ -335,7 +379,13 @@ export async function createPrivateMcpApp(
         hasRawHeader(request, "cookie") ||
         (!authorizationOptions.allowBody && hasRequestBodySignal(request)) ||
         urlContainsIdentity(request) ||
-        valueContainsIdentity(request.body)
+        valueContainsIdentity(
+          request.body,
+          new Set(
+            authorizationOptions.allowedBodyIdentityNames?.map(normalizedIdentityName) ??
+              [],
+          ),
+        )
       ) {
         return sendPrivateAuthenticationFailure(request, reply);
       }
@@ -403,14 +453,47 @@ export async function createPrivateMcpApp(
       return projectAgentContext(authorization.context, {
         availableOperations: [
           "get_agent_context",
+          "find_communities",
           "get_community",
+          "browse_content",
+          "search_content",
+          "get_discussion",
+          "list_notifications",
           "create_post",
+          "reply_to_content",
           "get_action_status",
           "get_content",
         ],
         now,
         requestId: authorization.requestId,
       });
+    },
+  );
+
+  app.post(
+    PRIVATE_MCP_COMMUNITY_SEARCH_PATH,
+    {
+      preValidation: privateAuthorization({
+        allowBody: true,
+        operation: "find_communities",
+      }),
+    },
+    (request, reply) => {
+      if (hasQueryParameters(request)) {
+        return sendPrivateValidationFailure(request, reply);
+      }
+      const body = FindCommunitiesRequestSchema.safeParse(request.body);
+      if (!body.success) {
+        return sendPrivateValidationFailure(request, reply);
+      }
+      return handleAgentFindCommunities(
+        request,
+        reply,
+        options.communityDirectoryService,
+        authorizationFor(request).context,
+        body.data,
+        "Private MCP Community search",
+      );
     },
   );
 
@@ -478,6 +561,112 @@ export async function createPrivateMcpApp(
       ),
   );
 
+  app.post(
+    PRIVATE_MCP_CONTENT_BROWSE_PATH,
+    {
+      preValidation: privateAuthorization({
+        allowedBodyIdentityNames: ["author_actor_id", "author_actor_ids"],
+        allowBody: true,
+        operation: "browse_content",
+      }),
+    },
+    (request, reply) => {
+      if (hasQueryParameters(request)) {
+        return sendPrivateValidationFailure(request, reply);
+      }
+      const body = BrowseContentRequestSchema.safeParse(request.body);
+      if (!body.success) {
+        return sendPrivateValidationFailure(request, reply);
+      }
+      return handleAgentBrowseContent(
+        request,
+        reply,
+        options.contentReadService,
+        authorizationFor(request).context,
+        body.data,
+      );
+    },
+  );
+
+  app.post(
+    PRIVATE_MCP_CONTENT_SEARCH_PATH,
+    {
+      preValidation: privateAuthorization({
+        allowedBodyIdentityNames: ["author_actor_id", "author_actor_ids"],
+        allowBody: true,
+        operation: "search_content",
+      }),
+    },
+    (request, reply) => {
+      if (hasQueryParameters(request)) {
+        return sendPrivateValidationFailure(request, reply);
+      }
+      const body = SearchContentRequestSchema.safeParse(request.body);
+      if (!body.success) {
+        return sendPrivateValidationFailure(request, reply);
+      }
+      return handleContentSearchRequest(
+        request,
+        reply,
+        { channel: "mcp", service: options.contentSearchService },
+        authorizationFor(request).context,
+        "Agent",
+      );
+    },
+  );
+
+  app.post(
+    PRIVATE_MCP_DISCUSSION_PATH,
+    {
+      preValidation: privateAuthorization({
+        allowBody: true,
+        operation: "get_discussion",
+      }),
+    },
+    (request, reply) => {
+      if (hasQueryParameters(request)) {
+        return sendPrivateValidationFailure(request, reply);
+      }
+      const body = GetDiscussionRequestSchema.safeParse(request.body);
+      if (!body.success) {
+        return sendPrivateValidationFailure(request, reply);
+      }
+      return handleAgentGetDiscussion(
+        request,
+        reply,
+        options.contentReadService,
+        authorizationFor(request).context,
+        body.data,
+      );
+    },
+  );
+
+  app.post(
+    PRIVATE_MCP_NOTIFICATIONS_PATH,
+    {
+      preValidation: privateAuthorization({
+        allowBody: true,
+        operation: "list_notifications",
+      }),
+    },
+    (request, reply) => {
+      if (hasQueryParameters(request)) {
+        return sendPrivateValidationFailure(request, reply);
+      }
+      const body = ListNotificationsRequestSchema.safeParse(request.body);
+      if (!body.success) {
+        return sendPrivateValidationFailure(request, reply);
+      }
+      return handleAgentListNotifications(
+        request,
+        reply,
+        options.notificationService,
+        authorizationFor(request).context,
+        body.data,
+      );
+    },
+  );
+
   app.get(
     PRIVATE_MCP_ACTION_PATH,
     { preValidation: privateAuthorization({ operation: "get_action_status" }) },
@@ -526,6 +715,37 @@ export async function createPrivateMcpApp(
         return sendPrivateValidationFailure(request, reply, "VALIDATION_ERROR");
       }
       return handleAgentCreatePost(
+        request,
+        reply,
+        options.researchWriteService,
+        authorizationFor(request).context,
+        body.data,
+        "mcp",
+        `${PRIVATE_MCP_API_PREFIX}/actions`,
+      );
+    },
+  );
+
+  app.post(
+    PRIVATE_MCP_REPLIES_PATH,
+    {
+      bodyLimit: 1_024 * 1_024,
+      preValidation: privateAuthorization({
+        allowBody: true,
+        operation: "reply_to_content",
+        policyEnforcement: "domain",
+        rateLimitCategory: AGENT_WRITE_REQUEST_RATE_LIMIT_CATEGORY,
+      }),
+    },
+    (request, reply) => {
+      if (hasQueryParameters(request)) {
+        return sendPrivateValidationFailure(request, reply);
+      }
+      const body = ReplyToContentRequestSchema.safeParse(request.body);
+      if (!body.success) {
+        return sendPrivateValidationFailure(request, reply, "VALIDATION_ERROR");
+      }
+      return handleAgentReplyToContent(
         request,
         reply,
         options.researchWriteService,

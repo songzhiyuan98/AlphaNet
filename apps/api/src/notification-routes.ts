@@ -6,6 +6,7 @@ import {
   MarkAllNotificationsReadResponseSchema,
   MarkNotificationReadRequestSchema,
   MarkNotificationReadResponseSchema,
+  type ListNotificationsRequest,
   type ListNotificationsResponse,
   type MarkAllNotificationsReadResponse,
   type MarkNotificationReadResponse,
@@ -80,7 +81,7 @@ function booleanValue(value: string | undefined): boolean | undefined {
   return undefined;
 }
 
-function parseListRequest(request: FastifyRequest): NotificationListInput | null {
+function parseListRequest(request: FastifyRequest): ListNotificationsRequest | null {
   const parameters = new URL(request.url, "http://alphanet.invalid").searchParams;
   for (const name of parameters.keys()) {
     if (!LIST_QUERY_NAMES.has(name) || parameters.getAll(name).length !== 1) return null;
@@ -125,29 +126,25 @@ function parseListRequest(request: FastifyRequest): NotificationListInput | null
   };
   const parsed = ListNotificationsRequestSchema.safeParse(candidate);
   if (!parsed.success) return null;
+  return parsed.data;
+}
+
+function notificationListInput(input: ListNotificationsRequest): NotificationListInput {
   return {
-    ...(parsed.data.types === undefined ? {} : { types: parsed.data.types }),
-    ...(parsed.data.unread_only === undefined
+    ...(input.types === undefined ? {} : { types: input.types }),
+    ...(input.unread_only === undefined ? {} : { unreadOnly: input.unread_only }),
+    ...(input.symbols === undefined ? {} : { symbols: input.symbols }),
+    ...(input.community_ids === undefined ? {} : { communityIds: input.community_ids }),
+    ...(input.following_only === undefined
       ? {}
-      : { unreadOnly: parsed.data.unread_only }),
-    ...(parsed.data.symbols === undefined ? {} : { symbols: parsed.data.symbols }),
-    ...(parsed.data.community_ids === undefined
+      : { followingOnly: input.following_only }),
+    ...(input.created_after === undefined ? {} : { createdAfter: input.created_after }),
+    ...(input.created_before === undefined
       ? {}
-      : { communityIds: parsed.data.community_ids }),
-    ...(parsed.data.following_only === undefined
-      ? {}
-      : { followingOnly: parsed.data.following_only }),
-    ...(parsed.data.created_after === undefined
-      ? {}
-      : { createdAfter: parsed.data.created_after }),
-    ...(parsed.data.created_before === undefined
-      ? {}
-      : { createdBefore: parsed.data.created_before }),
-    ...(parsed.data.limit === undefined ? {} : { limit: parsed.data.limit }),
-    ...("cursor" in parsed.data && parsed.data.cursor !== undefined
-      ? { cursor: parsed.data.cursor }
-      : {}),
-    ...("poll_cursor" in parsed.data ? { pollCursor: parsed.data.poll_cursor } : {}),
+      : { createdBefore: input.created_before }),
+    ...(input.limit === undefined ? {} : { limit: input.limit }),
+    ...("cursor" in input && input.cursor !== undefined ? { cursor: input.cursor } : {}),
+    ...("poll_cursor" in input ? { pollCursor: input.poll_cursor } : {}),
   };
 }
 
@@ -335,6 +332,26 @@ function hasNoQueryParameters(request: FastifyRequest): boolean {
   return new URL(request.url, "http://alphanet.invalid").searchParams.size === 0;
 }
 
+export async function handleAgentListNotifications(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  service: Pick<NotificationService, "listAgentNotifications">,
+  context: Parameters<NotificationService["listAgentNotifications"]>[0],
+  input: ListNotificationsRequest,
+): Promise<unknown> {
+  try {
+    const page = await service.listAgentNotifications(
+      context,
+      notificationListInput(input),
+    );
+    const response = serializeListPage(request, page);
+    if (!response) throw new Error("Notification list response contract failed");
+    return response;
+  } catch (error) {
+    return sendNotificationError(request, reply, error);
+  }
+}
+
 export function registerAgentNotificationRoutes(
   app: FastifyInstance,
   options: AgentNotificationRouteOptions,
@@ -358,17 +375,13 @@ export function registerAgentNotificationRoutes(
     async (request, reply) => {
       const input = parseListRequest(request);
       if (!input) return validationFailed(request, reply);
-      try {
-        const page = await options.service.listAgentNotifications(
-          authorization.getAuthorization(request).context,
-          input,
-        );
-        const response = serializeListPage(request, page);
-        if (!response) throw new Error("Notification list response contract failed");
-        return response;
-      } catch (error) {
-        return sendNotificationError(request, reply, error);
-      }
+      return handleAgentListNotifications(
+        request,
+        reply,
+        options.service,
+        authorization.getAuthorization(request).context,
+        input,
+      );
     },
   );
 }
@@ -403,7 +416,7 @@ export function registerOwnerNotificationRoutes(
         const page = await options.service.listOwnerAgentNotifications(
           readAuthorization.getAuthorization(request).owner.id,
           agentId,
-          input,
+          notificationListInput(input),
         );
         const response = serializeListPage(request, page);
         if (!response) throw new Error("Owner Notification list contract failed");
