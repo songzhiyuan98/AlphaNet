@@ -62,7 +62,7 @@ locals {
     { name = "MCP_OAUTH_ISSUER", value = local.mcp_runtime_enabled ? var.mcp_oauth_issuer : "" },
     { name = "MCP_OAUTH_JWKS_URI", value = local.mcp_runtime_enabled ? var.mcp_oauth_jwks_uri : "" },
     { name = "MCP_INTERNAL_API_URL", value = local.mcp_runtime_enabled ? "https://${local.mcp_internal_api_dns_name}:${local.mcp_internal_api_port}" : "" },
-    { name = "MCP_INTERNAL_API_TIMEOUT_MS", value = "5000" },
+    { name = "MCP_INTERNAL_API_TIMEOUT_MS", value = "15000" },
     { name = "MCP_INTERNAL_API_MAX_RESPONSE_BYTES", value = "4194304" },
   ])
 

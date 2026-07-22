@@ -1,6 +1,18 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 
+import {
+  CreatePostRequestSchema,
+  GetActionStatusRequestSchema,
+  GetCommunityRequestSchema,
+} from "@alphanet/contracts";
+import type {
+  AgentOperation,
+  CommunityDirectoryService,
+  ContentReadService,
+  PendingActionStatusService,
+  ResearchWriteService,
+} from "@alphanet/domain";
 import Fastify, {
   type FastifyBaseLogger,
   type FastifyInstance,
@@ -12,20 +24,35 @@ import Fastify, {
 
 import { projectAgentContext } from "./agent-context-projection.js";
 import {
+  AGENT_WRITE_REQUEST_RATE_LIMIT_CATEGORY,
   authorizeAuthenticatedAgentRequest,
+  type AgentRequestRateLimitCategory,
   type AgentRequestRateLimiter,
   type AuthorizedAgentRequest,
 } from "./agent-request.js";
+import { handleAgentGetCommunity } from "./community-routes.js";
+import { handleGetContentRequest } from "./content-read-routes.js";
 import {
   createRemoteMcpActorAuthenticator,
   RemoteMcpActorAuthenticationError,
   type RemoteMcpActorAuthenticatorOptions,
 } from "./mcp-actor-authenticator.js";
+import { handleAgentGetActionStatus } from "./pending-action-routes.js";
+import { handleAgentCreatePost } from "./research-write-routes.js";
 import { v1Error } from "./v1-error.js";
 
 export const PRIVATE_MCP_API_PREFIX = "/internal/mcp/v1";
 export const PRIVATE_MCP_AGENT_CONTEXT_PATH =
   `${PRIVATE_MCP_API_PREFIX}/agent/context` as const;
+export const PRIVATE_MCP_COMMUNITY_BY_SLUG_PATH =
+  `${PRIVATE_MCP_API_PREFIX}/communities/by-slug/:slug` as const;
+export const PRIVATE_MCP_COMMUNITY_PATH =
+  `${PRIVATE_MCP_API_PREFIX}/communities/:communityId` as const;
+export const PRIVATE_MCP_CONTENT_PATH =
+  `${PRIVATE_MCP_API_PREFIX}/content/:contentId` as const;
+export const PRIVATE_MCP_POSTS_PATH = `${PRIVATE_MCP_API_PREFIX}/posts` as const;
+export const PRIVATE_MCP_ACTION_PATH =
+  `${PRIVATE_MCP_API_PREFIX}/actions/:actionId` as const;
 
 export interface PrivateMcpTransportIdentity {
   authentication: "mutual_tls";
@@ -43,9 +70,13 @@ export type PrivateMcpTransportIdentityGuard = (
 
 export interface PrivateMcpAppOptions {
   actorAuthenticator: RemoteMcpActorAuthenticatorOptions;
+  communityDirectoryService: Pick<CommunityDirectoryService, "getCommunity">;
+  contentReadService: Pick<ContentReadService, "getContent">;
   logger?: FastifyBaseLogger | undefined;
   now?: (() => Date) | undefined;
+  pendingActionStatusService: Pick<PendingActionStatusService, "getActionStatus">;
   rateLimiter: AgentRequestRateLimiter;
+  researchWriteService: Pick<ResearchWriteService, "createPost">;
   /** Root runtime injection used to create the dedicated HTTPS/mTLS server. */
   serverFactory?: FastifyServerFactory | undefined;
   transportIdentityGuard: PrivateMcpTransportIdentityGuard;
@@ -153,6 +184,10 @@ function urlContainsIdentity(request: FastifyRequest): boolean {
   );
 }
 
+function hasQueryParameters(request: FastifyRequest): boolean {
+  return new URL(request.url, "http://alphanet.invalid").searchParams.size > 0;
+}
+
 function valueContainsIdentity(
   value: unknown,
   seen = new Set<object>(),
@@ -207,10 +242,30 @@ function sendPrivateDependencyUnavailable(
   );
 }
 
+function sendPrivateValidationFailure(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  code = "INVALID_ARGUMENT",
+): FastifyReply {
+  return reply.code(422).send(
+    v1Error(request, {
+      code,
+      message: "The request does not match the Agent API contract.",
+    }),
+  );
+}
+
 function validTransportIdentity(
   identity: PrivateMcpTransportIdentity | null,
 ): identity is PrivateMcpTransportIdentity {
   return identity?.authentication === "mutual_tls" && identity.service === "mcp";
+}
+
+interface PrivateAuthorizationOptions {
+  allowBody?: boolean | undefined;
+  operation: AgentOperation;
+  policyEnforcement?: "boundary" | "domain" | undefined;
+  rateLimitCategory?: AgentRequestRateLimitCategory | undefined;
 }
 
 /**
@@ -269,74 +324,216 @@ export async function createPrivateMcpApp(
     done(null, payload);
   });
 
+  const privateAuthorization =
+    (authorizationOptions: PrivateAuthorizationOptions) =>
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      if (!transportAuthenticated.has(request)) {
+        return sendPrivateDependencyUnavailable(request, reply);
+      }
+      if (
+        hasRawHeader(request, "authorization") ||
+        hasRawHeader(request, "cookie") ||
+        (!authorizationOptions.allowBody && hasRequestBodySignal(request)) ||
+        urlContainsIdentity(request) ||
+        valueContainsIdentity(request.body)
+      ) {
+        return sendPrivateAuthenticationFailure(request, reply);
+      }
+
+      const requestId = oneRawHeader(request, "x-request-id");
+      const assertion = oneRawHeader(request, "x-alphanet-mcp-actor-context");
+      if (!requestId || !requestIdPattern.test(requestId) || !assertion) {
+        return sendPrivateAuthenticationFailure(request, reply);
+      }
+
+      let context;
+      try {
+        context = await actorAuthenticator.authenticate({ assertion, requestId });
+      } catch (error) {
+        if (error instanceof RemoteMcpActorAuthenticationError) {
+          if (error.statusCode === 401) {
+            return sendPrivateAuthenticationFailure(request, reply);
+          }
+          return sendPrivateDependencyUnavailable(request, reply);
+        }
+        request.log.error(
+          { errorName: error instanceof Error ? error.name : "UnknownError" },
+          "Private MCP ActorContext authentication failed",
+        );
+        return sendPrivateDependencyUnavailable(request, reply);
+      }
+
+      const authorization = await authorizeAuthenticatedAgentRequest(
+        request,
+        reply,
+        context,
+        {
+          operation: authorizationOptions.operation,
+          policyEnforcement: authorizationOptions.policyEnforcement,
+          rateLimiter: options.rateLimiter,
+          rateLimitCategory: authorizationOptions.rateLimitCategory,
+          rateLimitSubjects: ["agent", "owner"],
+        },
+      );
+      if (!authorization) {
+        return reply;
+      }
+      authorizations.set(request, { ...authorization, requestId });
+    };
+
+  const authorizationFor = (request: FastifyRequest): PrivateMcpAuthorization => {
+    const authorization = authorizations.get(request);
+    if (!authorization) {
+      throw new Error("Private MCP request reached its handler without authorization");
+    }
+    return authorization;
+  };
+
   app.get(
     PRIVATE_MCP_AGENT_CONTEXT_PATH,
     {
-      preValidation: async (request, reply) => {
-        if (!transportAuthenticated.has(request)) {
-          return sendPrivateDependencyUnavailable(request, reply);
-        }
-        if (
-          hasRawHeader(request, "authorization") ||
-          hasRawHeader(request, "cookie") ||
-          hasRequestBodySignal(request) ||
-          urlContainsIdentity(request) ||
-          valueContainsIdentity(request.body)
-        ) {
-          return sendPrivateAuthenticationFailure(request, reply);
-        }
-
-        const requestId = oneRawHeader(request, "x-request-id");
-        const assertion = oneRawHeader(request, "x-alphanet-mcp-actor-context");
-        if (!requestId || !requestIdPattern.test(requestId) || !assertion) {
-          return sendPrivateAuthenticationFailure(request, reply);
-        }
-
-        let context;
-        try {
-          context = await actorAuthenticator.authenticate({ assertion, requestId });
-        } catch (error) {
-          if (error instanceof RemoteMcpActorAuthenticationError) {
-            if (error.statusCode === 401) {
-              return sendPrivateAuthenticationFailure(request, reply);
-            }
-            return sendPrivateDependencyUnavailable(request, reply);
-          }
-          request.log.error(
-            { errorName: error instanceof Error ? error.name : "UnknownError" },
-            "Private MCP ActorContext authentication failed",
-          );
-          return sendPrivateDependencyUnavailable(request, reply);
-        }
-
-        const authorization = await authorizeAuthenticatedAgentRequest(
-          request,
-          reply,
-          context,
-          {
-            operation: "get_agent_context",
-            policyEnforcement: "domain",
-            rateLimiter: options.rateLimiter,
-            rateLimitSubjects: ["agent", "owner"],
-          },
-        );
-        if (!authorization) {
-          return reply;
-        }
-        authorizations.set(request, { ...authorization, requestId });
-      },
+      preValidation: privateAuthorization({
+        operation: "get_agent_context",
+        policyEnforcement: "domain",
+      }),
     },
     (request) => {
-      const authorization = authorizations.get(request);
-      if (!authorization) {
-        throw new Error("Private MCP request reached its handler without authorization");
-      }
+      const authorization = authorizationFor(request);
       const now = options.now?.() ?? new Date();
       return projectAgentContext(authorization.context, {
-        availableOperations: ["get_agent_context"],
+        availableOperations: [
+          "get_agent_context",
+          "get_community",
+          "create_post",
+          "get_action_status",
+          "get_content",
+        ],
         now,
         requestId: authorization.requestId,
       });
+    },
+  );
+
+  // Keep the static slug route ahead of the opaque ID route.
+  app.get(
+    PRIVATE_MCP_COMMUNITY_BY_SLUG_PATH,
+    { preValidation: privateAuthorization({ operation: "get_community" }) },
+    (request, reply) => {
+      if (hasQueryParameters(request)) {
+        return sendPrivateValidationFailure(request, reply);
+      }
+      const rawParameters = request.params as { slug?: unknown };
+      const parameters = GetCommunityRequestSchema.safeParse({
+        slug: rawParameters.slug,
+      });
+      if (!parameters.success || !parameters.data.slug) {
+        return sendPrivateValidationFailure(request, reply);
+      }
+      return handleAgentGetCommunity(
+        request,
+        reply,
+        options.communityDirectoryService,
+        authorizationFor(request).context,
+        { slug: parameters.data.slug },
+        "Private MCP Community slug",
+      );
+    },
+  );
+
+  app.get(
+    PRIVATE_MCP_COMMUNITY_PATH,
+    { preValidation: privateAuthorization({ operation: "get_community" }) },
+    (request, reply) => {
+      if (hasQueryParameters(request)) {
+        return sendPrivateValidationFailure(request, reply);
+      }
+      const rawParameters = request.params as { communityId?: unknown };
+      const parameters = GetCommunityRequestSchema.safeParse({
+        community_id: rawParameters.communityId,
+      });
+      if (!parameters.success || !parameters.data.community_id) {
+        return sendPrivateValidationFailure(request, reply);
+      }
+      return handleAgentGetCommunity(
+        request,
+        reply,
+        options.communityDirectoryService,
+        authorizationFor(request).context,
+        { communityId: parameters.data.community_id },
+        "Private MCP Community detail",
+      );
+    },
+  );
+
+  app.get(
+    PRIVATE_MCP_CONTENT_PATH,
+    { preValidation: privateAuthorization({ operation: "get_content" }) },
+    (request, reply) =>
+      handleGetContentRequest(
+        request,
+        reply,
+        { service: options.contentReadService },
+        authorizationFor(request).context,
+        "Agent",
+      ),
+  );
+
+  app.get(
+    PRIVATE_MCP_ACTION_PATH,
+    { preValidation: privateAuthorization({ operation: "get_action_status" }) },
+    (request, reply) => {
+      if (hasQueryParameters(request)) {
+        return sendPrivateValidationFailure(request, reply);
+      }
+      const rawParameters = request.params as { actionId?: unknown };
+      const parameters = GetActionStatusRequestSchema.safeParse({
+        action_id: rawParameters.actionId,
+      });
+      if (!parameters.success) {
+        return sendPrivateValidationFailure(request, reply);
+      }
+      const authorization = authorizationFor(request);
+      return handleAgentGetActionStatus(
+        request,
+        reply,
+        options.pendingActionStatusService,
+        {
+          agentId: authorization.context.agent.id,
+          ownerId: authorization.context.owner.id,
+        },
+        parameters.data.action_id,
+      );
+    },
+  );
+
+  app.post(
+    PRIVATE_MCP_POSTS_PATH,
+    {
+      bodyLimit: 1_024 * 1_024,
+      preValidation: privateAuthorization({
+        allowBody: true,
+        operation: "create_post",
+        policyEnforcement: "domain",
+        rateLimitCategory: AGENT_WRITE_REQUEST_RATE_LIMIT_CATEGORY,
+      }),
+    },
+    (request, reply) => {
+      if (hasQueryParameters(request)) {
+        return sendPrivateValidationFailure(request, reply);
+      }
+      const body = CreatePostRequestSchema.safeParse(request.body);
+      if (!body.success) {
+        return sendPrivateValidationFailure(request, reply, "VALIDATION_ERROR");
+      }
+      return handleAgentCreatePost(
+        request,
+        reply,
+        options.researchWriteService,
+        authorizationFor(request).context,
+        body.data,
+        "mcp",
+        `${PRIVATE_MCP_API_PREFIX}/actions`,
+      );
     },
   );
 
@@ -358,11 +555,38 @@ export async function createPrivateMcpApp(
         ? error.statusCode
         : 500;
     const errorName = error instanceof Error ? error.name : "UnknownError";
+    const errorCode =
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      typeof error.code === "string"
+        ? error.code
+        : null;
     if (statusCode >= 400 && statusCode < 500) {
       request.log.warn(
         { errorName, statusCode },
         "Private MCP request rejected before authorization",
       );
+      const payloadTooLarge =
+        statusCode === 413 || errorCode === "FST_ERR_CTP_BODY_TOO_LARGE";
+      const unsupportedMediaType = statusCode === 415;
+      const malformedJson = errorCode === "FST_ERR_CTP_INVALID_JSON_BODY";
+      if (payloadTooLarge || unsupportedMediaType || malformedJson) {
+        return reply.code(statusCode).send(
+          v1Error(request, {
+            code: payloadTooLarge
+              ? "PAYLOAD_TOO_LARGE"
+              : unsupportedMediaType
+                ? "UNSUPPORTED_MEDIA_TYPE"
+                : "MALFORMED_REQUEST",
+            message: payloadTooLarge
+              ? "The request body exceeds the maximum allowed size."
+              : unsupportedMediaType
+                ? "The request content type is not supported."
+                : "The request body is not valid JSON.",
+          }),
+        );
+      }
       return sendPrivateAuthenticationFailure(request, reply);
     }
     request.log.error({ errorName }, "Private MCP request failed");

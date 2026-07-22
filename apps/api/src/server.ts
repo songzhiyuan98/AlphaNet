@@ -334,8 +334,12 @@ async function start(): Promise<void> {
             digestKey: replayDigestKey,
           }),
         },
+        communityDirectoryService,
+        contentReadService,
         logger,
+        pendingActionStatusService,
         rateLimiter: agentRateLimiter,
+        researchWriteService,
         serverFactory: (handler) =>
           createHttpsServer(
             {

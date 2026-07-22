@@ -6,15 +6,18 @@ import {
 } from "@alphanet/contracts";
 import { z } from "zod";
 
-import {
-  InternalMcpApiClientError,
-  type InternalMcpApiClient,
-} from "./internal-api-client.js";
+import { type InternalMcpApiClient } from "./internal-api-client.js";
 import type {
   McpToolExecutionContext,
   McpToolExecutionResult,
   McpToolRegistration,
 } from "./protocol.js";
+import {
+  assertUpstreamRequestId,
+  invalidUpstreamResponse,
+  normalizeUpstreamV1Error,
+  PRIVATE_MCP_BOUNDARY_ERROR_STATUS,
+} from "./upstream-v1-error.js";
 
 export const GET_AGENT_CONTEXT_INTERNAL_API_PATH = "/internal/mcp/v1/agent/context";
 
@@ -49,27 +52,39 @@ function parseOutput(value: unknown): Record<string, unknown> {
   return asRecord(parseUpstreamResponse(value));
 }
 
-function invalidUpstreamResponse(): never {
-  throw new InternalMcpApiClientError("INVALID_RESPONSE");
+function sameScopes(actual: readonly string[], expected: readonly string[]): boolean {
+  if (actual.length !== expected.length) return false;
+  const actualSorted = [...actual].sort();
+  const expectedSorted = [...expected].sort();
+  return actualSorted.every((scope, index) => scope === expectedSorted[index]);
 }
 
 function normalizeExecutionResult(
   statusCode: number,
   payload: GetAgentContextUpstreamResponse,
+  context: McpToolExecutionContext,
 ): McpToolExecutionResult {
   if (statusCode === 200) {
     const success = AgentContextResponseSchema.safeParse(payload);
     if (!success.success) return invalidUpstreamResponse();
+    assertUpstreamRequestId(success.data.request_id, context.requestId);
+    if (
+      success.data.credential.id !== context.authorization.credentialId ||
+      success.data.credential.audience !== context.authorization.resource ||
+      !sameScopes(success.data.credential.scopes, context.authorization.scopes)
+    ) {
+      return invalidUpstreamResponse();
+    }
     return { payload: asRecord(success.data) };
   }
 
-  if (statusCode >= 400 && statusCode <= 599) {
-    const error = V1ErrorResponseSchema.safeParse(payload);
-    if (!error.success) return invalidUpstreamResponse();
-    return { isError: true, payload: asRecord(error.data) };
-  }
-
-  return invalidUpstreamResponse();
+  const error = normalizeUpstreamV1Error(
+    statusCode,
+    payload,
+    context.requestId,
+    PRIVATE_MCP_BOUNDARY_ERROR_STATUS,
+  );
+  return { isError: true, payload: asRecord(error) };
 }
 
 /**
@@ -111,7 +126,7 @@ export function createGetAgentContextTool(
         },
         context,
       );
-      return normalizeExecutionResult(response.statusCode, response.payload);
+      return normalizeExecutionResult(response.statusCode, response.payload, context);
     },
     parseArguments,
     parseOutput,

@@ -496,7 +496,7 @@ export function createProtocolServer(options: McpProtocolServerOptions): Server 
       ]);
 
       return createRegisteredToolResult(registration, executionResult.payload, {
-        isError: executionResult.isError,
+        isError: executionResult.isError === true,
         requestId: extra.requestId,
         serverRequestId,
       });

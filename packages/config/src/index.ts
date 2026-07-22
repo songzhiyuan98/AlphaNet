@@ -16,7 +16,9 @@ const LocalDevelopmentSsrInternalRequestSecret =
 const TitanTextEmbedV2ModelId = "amazon.titan-embed-text-v2:0";
 const SearchIndexDatabaseMarginMilliseconds = 5_000;
 const RemoteMcpInternalApiDefaultPort = 4_443;
-const RemoteMcpInternalApiDefaultTimeoutMilliseconds = 5_000;
+// Research writes may spend up to 10 seconds inside their database transaction;
+// keep a bounded transport margin while remaining below the 30-second MCP tool cap.
+const RemoteMcpInternalApiDefaultTimeoutMilliseconds = 15_000;
 const RemoteMcpInternalApiDefaultMaximumResponseBytes = 4 * 1_024 * 1_024;
 
 const CommonServiceEnvironmentSchema = z.object({

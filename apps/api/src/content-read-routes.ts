@@ -705,10 +705,10 @@ async function browseHandler(
   }
 }
 
-async function getContentHandler(
+export async function handleGetContentRequest(
   request: FastifyRequest,
   reply: FastifyReply,
-  options: { service: ContentReadService },
+  options: { service: Pick<ContentReadService, "getContent"> },
   viewer: Parameters<ContentReadService["getContent"]>[0],
   audience: "Agent" | "public",
 ) {
@@ -788,7 +788,7 @@ export function registerContentReadRoutes(
     "/v1/content/:contentId",
     { onRequest: contentAuthorization.onRequest },
     (request, reply) =>
-      getContentHandler(
+      handleGetContentRequest(
         request,
         reply,
         options,
@@ -810,6 +810,6 @@ export function registerPublicContentReadRoutes(
     getDiscussionHandler(request, reply, options, null, "public"),
   );
   app.get("/v1/public/content/:contentId", { onRequest }, (request, reply) =>
-    getContentHandler(request, reply, options, null, "public"),
+    handleGetContentRequest(request, reply, options, null, "public"),
   );
 }

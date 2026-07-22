@@ -301,10 +301,11 @@ Redis 的单次 jti 消费失败时 fail closed；Redis 不是 Grant 或权限�
 - 保持公网 MCP 关闭。
 
 当前 server 已把 live OAuth verifier、双层 Redis limiter、ActorContext 委托和
-首个真实工具装配为一个由 `MCP_RUNTIME_ENABLED` 控制的私有运行切片；
+Phase B 固定五工具装配为一个由 `MCP_RUNTIME_ENABLED` 控制的私有运行切片；
 `MCP_PUBLIC_ENABLED` 只控制 ALB/CloudFront 暴露，不能代替运行时保护。Phase B
-五工具、OAuth 签发闭环和下方 Public gate 的全部证据完成前，部署配置仍必须保持
-公网 MCP 关闭。配置字段或 schema 存在不等于公网运行时已经可用。
+五工具已经走同一私有 API、DTO、Policy、PendingAction 和幂等边界；OAuth 签发
+闭环和下方 Public gate 的全部证据完成前，部署配置仍必须保持公网 MCP 关闭。
+配置字段或 schema 存在不等于公网运行时已经可用。
 
 ### Phase B：五工具纵向切片
 
@@ -317,6 +318,10 @@ Redis 的单次 jti 消费失败时 fail closed；Redis 不是 Grant 或权限�
 五个工具必须真实调用内部 API，并通过 REST/MCP DTO、Policy、PendingAction、
 幂等和错误等价测试。`get_platform_status` 从 Tool discovery 删除，health 继续由
 `/health/*` 提供。
+
+MCP→API 默认调用上限为 15 秒：覆盖写事务最多 10 秒的数据库 statement timeout
+并保留有界传输余量，同时严格低于 30 秒 Tool 执行上限。`create_post` 超时后不得
+换用新幂等键自动重试；Host 只能使用原 `idempotency_key` 有界重试或查询既有动作。
 
 ### Phase C：Public MVP 固定 16 工具
 

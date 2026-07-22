@@ -547,9 +547,9 @@ describe("authorizeAgentRequest", () => {
 
     expect(result).toBeNull();
     expect(reply.statusCode()).toBe(403);
-    expect(reply.headers["www-authenticate"]).toContain('scope="research:read"');
+    expect(reply.headers["www-authenticate"]).toContain('scope="community:read"');
     expect(expectV1Error(reply.payload(), "SCOPE_REQUIRED").error.details).toEqual({
-      required_scope_any_of: ["research:read", "community:read"],
+      required_scope_any_of: ["community:read", "research:read"],
     });
   });
 

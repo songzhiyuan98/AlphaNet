@@ -7,6 +7,7 @@ import {
   ReplyToContentWriteResultSchema,
   UpdateContentRequestSchema,
   UpdateContentWriteResultSchema,
+  type CreatePostRequest,
   type CreatePostWriteResult,
   type DeleteContentWriteResult,
   type ReplyToContentWriteResult,
@@ -326,9 +327,10 @@ function sendOutcome(
     | ReplyToContentWriteResult
     | UpdateContentWriteResult
     | DeleteContentWriteResult,
+  actionLocationPrefix = "/v1/actions",
 ): FastifyReply {
   if (outcome.status === "pending_approval" && outcome.pendingAction) {
-    void reply.header("location", `/v1/actions/${outcome.pendingAction.id}`);
+    void reply.header("location", `${actionLocationPrefix}/${outcome.pendingAction.id}`);
     void reply.header("retry-after", "5");
     return reply.code(202).send(response);
   }
@@ -348,6 +350,48 @@ function sendOutcome(
     );
   }
   return reply.code(statusForOutcomeError(outcome.error?.code)).send(response);
+}
+
+export async function handleAgentCreatePost(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  service: Pick<ResearchWriteService, "createPost">,
+  context: Parameters<ResearchWriteService["createPost"]>[0],
+  input: CreatePostRequest,
+  channel: "mcp" | "rest",
+  actionLocationPrefix = "/v1/actions",
+): Promise<unknown> {
+  try {
+    const outcome = await service.createPost(
+      context,
+      {
+        title: input.title,
+        bodyMarkdown: input.body_markdown,
+        primaryCommunityId: input.primary_community_id,
+        additionalCommunityIds: input.additional_community_ids,
+        symbols: input.symbols,
+        topics: input.topics,
+        sourceLinks: input.source_links,
+        references: input.references?.map((reference) => ({
+          targetContentId: reference.target_content_id,
+          relationType: reference.relation_type,
+        })),
+        idempotencyKey: input.idempotency_key,
+      },
+      { channel, requestId: request.id },
+    );
+    const response = serializeCreatePost(request, outcome);
+    if (!response) {
+      request.log.error(
+        { operation: outcome.operation, status: outcome.status },
+        "Create-post result violated its Agent response contract",
+      );
+      return sendWriteError(request, reply, new Error("projection invalid"));
+    }
+    return sendOutcome(reply, outcome, response, actionLocationPrefix);
+  } catch (error) {
+    return sendWriteError(request, reply, error);
+  }
 }
 
 function statusForOutcomeError(code: ResearchWriteErrorCode | undefined): number {
@@ -430,37 +474,14 @@ export function registerResearchWriteRoutes(
       });
       if (!body.success) return validationFailed(request, reply);
 
-      try {
-        const outcome = await options.service.createPost(
-          authorization.context,
-          {
-            title: body.data.title,
-            bodyMarkdown: body.data.body_markdown,
-            primaryCommunityId: body.data.primary_community_id,
-            additionalCommunityIds: body.data.additional_community_ids,
-            symbols: body.data.symbols,
-            topics: body.data.topics,
-            sourceLinks: body.data.source_links,
-            references: body.data.references?.map((reference) => ({
-              targetContentId: reference.target_content_id,
-              relationType: reference.relation_type,
-            })),
-            idempotencyKey: body.data.idempotency_key,
-          },
-          { channel: "rest", requestId: request.id },
-        );
-        const response = serializeCreatePost(request, outcome);
-        if (!response) {
-          request.log.error(
-            { operation: outcome.operation, status: outcome.status },
-            "Create-post result violated its public response contract",
-          );
-          return sendWriteError(request, reply, new Error("projection invalid"));
-        }
-        return sendOutcome(reply, outcome, response);
-      } catch (error) {
-        return sendWriteError(request, reply, error);
-      }
+      return handleAgentCreatePost(
+        request,
+        reply,
+        options.service,
+        authorization.context,
+        body.data,
+        "rest",
+      );
     },
   );
 
