@@ -22,6 +22,7 @@
     "test:coverage": "pnpm --recursive --if-present test:coverage",
     "test:dev-seed:ui": "pnpm --dir packages/auth exec node --test scripts/ui-demo-fixture.test.mjs",
     "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:web:admin-e2e": "bash .github/scripts/test-admin-moderation-e2e.sh",
     "test:web:e2e": "bash .github/scripts/test-web-e2e.sh",
     "typecheck": "pnpm typecheck:root && pnpm --recursive --if-present typecheck",
     "typecheck:root": "tsc -p tsconfig.json --noEmit"
