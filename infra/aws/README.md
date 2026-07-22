@@ -14,6 +14,8 @@ server, the authenticated MCP runtime, and the public MCP edge have separate
 default-off deployment gates. This permits staged private verification without
 implicitly promoting another surface. The examples, including production,
 keep all four gates false; the public MCP edge remains deliberately disabled.
+The workforce Admin Web and its matching Admin API use another atomic,
+default-off gate; they are never part of Owner or Agent authentication.
 
 ## Architecture
 
@@ -25,7 +27,9 @@ CloudFront + CloudFront-scoped WAF
 public ALB (CloudFront prefix list + origin verification header)
    |--------------------|--------------------|
 private Web ECS     private API ECS <==== private MCP ECS
-                         |       private mTLS :4443
+      |                  |       private mTLS :4443
+Admin session DDB   workforce OIDC verification
+                         |
                    Aurora PostgreSQL 17 + pgvector
                          |
                    private Worker ECS
@@ -86,6 +90,14 @@ API / MCP ---------- ElastiCache Valkey (TLS, AUTH, cluster mode disabled)
   generates its AUTH token directly in Secrets Manager and resolves it inside
   the ElastiCache control plane, keeping that token out of Terraform state. Its
   at-rest data shares the environment customer KMS key; traffic requires TLS.
+- `admin_web_enabled=false` creates no Admin session table or dedicated Web
+  role and injects no workforce tuple or secrets. When enabled, the Web task
+  role is limited to ECS Exec plus Get/Put/Delete on one KMS-encrypted,
+  TTL-backed DynamoDB table; Production also enables deletion protection and
+  PITR. Web and API share one exact workforce issuer and audience, require MFA
+  evidence, and obtain their three secret fields only from the application
+  secret. See the
+  [Admin deployment runbook](../../docs/operations/admin-web-deployment.md).
 - CloudWatch retains application, Valkey, VPC flow, and production PostgreSQL
   logs, publishes per-environment alarms to SNS, and creates a service
   dashboard. Staging deliberately omits the PostgreSQL export for scale-to-zero.
@@ -123,12 +135,16 @@ credentials from the operator's machine:
 ./scripts/terraform.sh fmt -check -recursive
 ./scripts/terraform.sh validate
 ./scripts/terraform.sh test -filter=tests/valkey_template.tftest.hcl
+./scripts/terraform.sh test -filter=tests/admin_web.tftest.hcl
 ```
 
 The mocked test needs no AWS credentials. It renders the single-node staging
 CloudFormation island and guards the three first-deploy invariants that are
 easy to regress: omit `NumCacheClusters` when there is no replica, retain the
 customer KMS key, and never resolve a replica-only reader endpoint.
+The Admin test separately proves default-off inertness, the enabled ECS/IAM/
+DynamoDB contract, Production recovery protection, and rejection of missing
+WAF/domain/tuple/MFA, unsafe URLs, in-memory sessions, or an audience mismatch.
 
 From `bootstrap/` or `shared/`, use `../scripts/terraform.sh` because the helper
 mounts the current directory as its Terraform workspace.
@@ -350,6 +366,25 @@ candidate with an `AWSCURRENT` compare-and-swap; a concurrent update therefore
 leaves the current Secret untouched. If all fields already exist, it exits
 without creating a version. This is not a rotation command. Coordinated rotation
 must keep old key rings/readers available until every task is updated.
+
+The initial seed intentionally does not require a workforce client to exist.
+Before turning on `admin_web_enabled`, stage its confidential client secret and
+generate the two independent Admin keys with the same compare-and-swap safety:
+
+```bash
+read -r -s ADMIN_WEB_OIDC_CLIENT_SECRET
+export ADMIN_WEB_OIDC_CLIENT_SECRET
+./scripts/seed-application-secret.sh --augment-admin-web \
+  "$(./scripts/terraform.sh output -raw application_secret_arn)" \
+  us-west-2
+unset ADMIN_WEB_OIDC_CLIENT_SECRET
+```
+
+Then follow the complete
+[workforce Admin Web deployment runbook](../../docs/operations/admin-web-deployment.md).
+The gate rejects an incomplete tuple, a non-HTTPS workforce endpoint, an
+in-memory AWS session store, an audience mismatch, missing WAF/fixed domain, or
+a configuration without accepted MFA evidence.
 
 ## 6. Bootstrap and verify database identities
 

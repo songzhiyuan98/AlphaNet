@@ -352,9 +352,9 @@ describe("Admin content-moderation routes", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.headers["cache-control"]).toBe("no-store, private");
-    expect(
-      AdminModerationCaseListResponseSchema.parse(response.json()).items,
-    ).toHaveLength(1);
+    const parsed = AdminModerationCaseListResponseSchema.parse(response.json());
+    expect(parsed.items).toHaveLength(1);
+    expect(parsed.capabilities).toEqual({ can_decide: true });
     expect(verify).toHaveBeenCalledExactlyOnceWith(token);
     expect(resolveActiveAuthorization).toHaveBeenCalledExactlyOnceWith({
       issuer: identity.issuer,
@@ -406,6 +406,7 @@ describe("Admin content-moderation routes", () => {
     expect(response.statusCode).toBe(200);
     expect(response.headers.etag).toBe('"2"');
     const parsed = AdminModerationCaseDetailResponseSchema.parse(response.json());
+    expect(parsed.capabilities).toEqual({ can_decide: true });
     expect(parsed.reports[0]).toMatchObject({
       reporter_actor_id: ids.reporterActor,
       reporter_owner_id: ids.reporterOwner,
@@ -515,7 +516,7 @@ describe("Admin content-moderation routes", () => {
   });
 
   it("enforces atomic moderation permissions independently per endpoint", async () => {
-    const { app, decideCase } = createAdminApp({
+    const { app, decideCase, resolveActiveAuthorization } = createAdminApp({
       authorization: {
         adminId: ids.admin,
         permissions: ["moderation:read"],
@@ -528,6 +529,19 @@ describe("Admin content-moderation routes", () => {
       url: "/v1/admin/moderation/cases",
     });
     expect(read.statusCode).toBe(200);
+    expect(AdminModerationCaseListResponseSchema.parse(read.json()).capabilities).toEqual(
+      { can_decide: false },
+    );
+
+    const detail = await app.inject({
+      headers: adminHeaders(),
+      method: "GET",
+      url: `/v1/admin/moderation/cases/${ids.case}`,
+    });
+    expect(detail.statusCode).toBe(200);
+    expect(
+      AdminModerationCaseDetailResponseSchema.parse(detail.json()).capabilities,
+    ).toEqual({ can_decide: false });
 
     const write = await app.inject({
       headers: {
@@ -543,6 +557,49 @@ describe("Admin content-moderation routes", () => {
     expect(V1ErrorResponseSchema.parse(write.json()).error.code).toBe(
       "ADMIN_PERMISSION_REQUIRED",
     );
+    expect(resolveActiveAuthorization).toHaveBeenCalledTimes(3);
+    expect(decideCase).not.toHaveBeenCalled();
+  });
+
+  it("rechecks moderation:decide after advertising the current read capability", async () => {
+    const { app, decideCase, resolveActiveAuthorization } = createAdminApp();
+    resolveActiveAuthorization
+      .mockResolvedValueOnce({
+        adminId: ids.admin,
+        permissions: ["moderation:read", "moderation:decide"],
+        roles: ["moderator"],
+      })
+      .mockResolvedValueOnce({
+        adminId: ids.admin,
+        permissions: ["moderation:read"],
+        roles: ["reviewer"],
+      });
+
+    const read = await app.inject({
+      headers: adminHeaders(),
+      method: "GET",
+      url: "/v1/admin/moderation/cases",
+    });
+    expect(read.statusCode).toBe(200);
+    expect(AdminModerationCaseListResponseSchema.parse(read.json()).capabilities).toEqual(
+      { can_decide: true },
+    );
+
+    const write = await app.inject({
+      headers: {
+        ...adminHeaders(),
+        "idempotency-key": "key-after-revocation",
+        "if-match": '"1"',
+      },
+      method: "POST",
+      payload: { action: "dismiss", reason_code: "no_rule_violation" },
+      url: `/v1/admin/moderation/cases/${ids.case}/actions`,
+    });
+    expect(write.statusCode).toBe(403);
+    expect(V1ErrorResponseSchema.parse(write.json()).error.code).toBe(
+      "ADMIN_PERMISSION_REQUIRED",
+    );
+    expect(resolveActiveAuthorization).toHaveBeenCalledTimes(2);
     expect(decideCase).not.toHaveBeenCalled();
   });
 

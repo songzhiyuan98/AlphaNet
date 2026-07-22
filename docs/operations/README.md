@@ -6,6 +6,7 @@ This directory defines AlphaNet's delivery and recovery baseline.
 - [Deployment and rollback runbook](./deployment-and-rollback.md)
 - [AWS database identities and release gate](./aws-database-access.md)
 - [AWS Valkey TLS contract](./aws-valkey-tls.md)
+- [Workforce Admin Web deployment](./admin-web-deployment.md)
 - [AWS infrastructure bootstrap](../../infra/aws/README.md)
 
 ## Current delivery state

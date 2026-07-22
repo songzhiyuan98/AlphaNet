@@ -312,12 +312,20 @@ function pageProjection<T>(page: CursorPage<T>) {
   };
 }
 
+function moderationCapabilities(authorization: AuthorizedAdminRequest) {
+  return {
+    can_decide: authorization.permissions.includes("moderation:decide"),
+  };
+}
+
 function listResponse(
   request: FastifyRequest,
   page: CursorPage<ModerationCaseQueueItem>,
+  authorization: AuthorizedAdminRequest,
 ): AdminModerationCaseListResponse | null {
   const metadata = pageProjection(page);
   const parsed = AdminModerationCaseListResponseSchema.safeParse({
+    capabilities: moderationCapabilities(authorization),
     items: page.items.map((item) => ({
       ...caseSummary(item),
       queue_rank: item.queueRank,
@@ -333,10 +341,12 @@ function listResponse(
 function detailResponse(
   request: FastifyRequest,
   view: ModerationCaseDetailView,
+  authorization: AuthorizedAdminRequest,
 ): AdminModerationCaseDetailResponse | null {
   const reportMetadata = pageProjection(view.reports);
   const actionMetadata = pageProjection(view.actions);
   const parsed = AdminModerationCaseDetailResponseSchema.safeParse({
+    capabilities: moderationCapabilities(authorization),
     case: caseSummary(view.case),
     content: contentSnapshot(view.content),
     reports: view.reports.items.map(report),
@@ -526,7 +536,7 @@ export function registerAdminContentModerationRoutes(
             ...(query.statuses === undefined ? {} : { statuses: query.statuses }),
           },
         );
-        const response = listResponse(request, page);
+        const response = listResponse(request, page, authorization);
         return response ?? projectionFailed(request, reply);
       } catch (error) {
         return sendModerationError(request, reply, error);
@@ -563,7 +573,7 @@ export function registerAdminContentModerationRoutes(
               : { actionCursor: query.action_cursor }),
           },
         );
-        const response = detailResponse(request, detail);
+        const response = detailResponse(request, detail, authorization);
         if (!response) return projectionFailed(request, reply);
         void reply.header("etag", `"${response.case.case_version}"`);
         return response;

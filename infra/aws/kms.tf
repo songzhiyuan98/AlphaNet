@@ -1,5 +1,5 @@
 resource "aws_kms_key" "data" {
-  description             = "AlphaNet ${var.environment} Aurora and Valkey data encryption"
+  description             = "AlphaNet ${var.environment} Aurora, Valkey, and session-state data encryption"
   deletion_window_in_days = 30
   enable_key_rotation     = true
 

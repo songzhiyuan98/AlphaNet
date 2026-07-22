@@ -164,6 +164,16 @@ output "application_secret_arn" {
   value = aws_secretsmanager_secret.application.arn
 }
 
+output "admin_web_session_table_name" {
+  description = "DynamoDB session table used only by the enabled workforce Admin Web; null while the gate is disabled."
+  value       = try(aws_dynamodb_table.admin_web_session[0].name, null)
+}
+
+output "admin_web_session_table_arn" {
+  description = "Exact table ARN granted to the dedicated Admin Web task role; null while the gate is disabled."
+  value       = try(aws_dynamodb_table.admin_web_session[0].arn, null)
+}
+
 output "valkey_primary_endpoint" {
   value = aws_cloudformation_stack.valkey.outputs["PrimaryEndpointAddress"]
 }

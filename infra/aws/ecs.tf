@@ -47,7 +47,17 @@ locals {
       { name = "MCP_INTERNAL_API_PORT", value = tostring(local.mcp_internal_api_port) },
       { name = "MCP_OAUTH_OWNER_CONSENT_ENABLED", value = tostring(var.mcp_oauth_owner_consent_enabled) },
       { name = "MCP_OAUTH_SERVER_ENABLED", value = tostring(var.mcp_oauth_server_enabled) },
+      { name = "ADMIN_API_ENABLED", value = tostring(var.admin_web_enabled) },
     ],
+    var.admin_web_enabled ? [
+      { name = "ADMIN_OIDC_ISSUER", value = var.admin_oidc_issuer },
+      { name = "ADMIN_OIDC_AUDIENCE", value = var.admin_oidc_audience },
+      { name = "ADMIN_OIDC_JWKS_URI", value = var.admin_oidc_jwks_uri },
+      { name = "ADMIN_OIDC_ALLOWED_ALGORITHMS", value = join(",", var.admin_oidc_allowed_algorithms) },
+      { name = "ADMIN_OIDC_ALLOWED_ACR_VALUES", value = join(",", var.admin_oidc_allowed_acr_values) },
+      { name = "ADMIN_OIDC_ALLOW_AMR_MFA", value = tostring(var.admin_oidc_allow_amr_mfa) },
+      { name = "ADMIN_OIDC_CLOCK_TOLERANCE_SECONDS", value = tostring(var.admin_oidc_clock_tolerance_seconds) },
+    ] : [],
     var.mcp_oauth_server_enabled ? [
       { name = "MCP_OAUTH_ISSUER", value = var.mcp_oauth_issuer },
       { name = "MCP_OAUTH_JWKS_URI", value = var.mcp_oauth_jwks_uri },
@@ -57,16 +67,31 @@ locals {
     ] : [],
   )
 
-  web_environment = concat(local.common_service_environment, [
-    { name = "PORT", value = "3000" },
-    { name = "API_INTERNAL_URL", value = "http://api.${aws_service_discovery_private_dns_namespace.main.name}:4000" },
-    { name = "SSR_ALLOW_MISSING_CLIENT_IP", value = "false" },
-    { name = "GOOGLE_AUTH_ENABLED", value = tostring(var.google_oauth_enabled) },
-    { name = "MCP_OAUTH_OWNER_CONSENT_ENABLED", value = tostring(var.mcp_oauth_owner_consent_enabled) },
-    # The Web image is built with an empty public API URL so browser calls stay
-    # on the CloudFront cookie origin. This runtime value documents that contract.
-    { name = "NEXT_PUBLIC_API_URL", value = "" },
-  ])
+  web_environment = concat(
+    local.common_service_environment,
+    [
+      { name = "PORT", value = "3000" },
+      { name = "API_INTERNAL_URL", value = "http://api.${aws_service_discovery_private_dns_namespace.main.name}:4000" },
+      { name = "SSR_ALLOW_MISSING_CLIENT_IP", value = "false" },
+      { name = "GOOGLE_AUTH_ENABLED", value = tostring(var.google_oauth_enabled) },
+      { name = "MCP_OAUTH_OWNER_CONSENT_ENABLED", value = tostring(var.mcp_oauth_owner_consent_enabled) },
+      { name = "ADMIN_WEB_ENABLED", value = tostring(var.admin_web_enabled) },
+      # The Web image is built with an empty public API URL so browser calls stay
+      # on the CloudFront cookie origin. This runtime value documents that contract.
+      { name = "NEXT_PUBLIC_API_URL", value = "" },
+    ],
+    var.admin_web_enabled ? [
+      { name = "ADMIN_WEB_PUBLIC_ORIGIN", value = local.public_origin },
+      { name = "ADMIN_WEB_OIDC_ISSUER", value = var.admin_oidc_issuer },
+      { name = "ADMIN_WEB_OIDC_CLIENT_ID", value = var.admin_web_oidc_client_id },
+      { name = "ADMIN_WEB_OIDC_SCOPES", value = join(" ", var.admin_web_oidc_scopes) },
+      { name = "ADMIN_WEB_OIDC_RESOURCE", value = var.admin_web_oidc_resource },
+      { name = "ADMIN_WEB_SESSION_STORE", value = var.admin_web_session_store },
+      { name = "ADMIN_WEB_SESSION_TABLE", value = aws_dynamodb_table.admin_web_session[0].name },
+      { name = "ADMIN_WEB_SESSION_TTL_SECONDS", value = tostring(var.admin_web_session_ttl_seconds) },
+      { name = "ADMIN_WEB_LOGIN_TTL_SECONDS", value = tostring(var.admin_web_login_ttl_seconds) },
+    ] : [],
+  )
 
   mcp_environment = concat(local.common_service_environment, [
     { name = "HOST", value = "0.0.0.0" },
@@ -144,6 +169,9 @@ locals {
       { name = "AUTH_GOOGLE_CLIENT_ID", valueFrom = "${local.application_secret_arn}:AUTH_GOOGLE_CLIENT_ID::" },
       { name = "AUTH_GOOGLE_CLIENT_SECRET", valueFrom = "${local.application_secret_arn}:AUTH_GOOGLE_CLIENT_SECRET::" },
     ] : [],
+    var.admin_web_enabled ? [
+      { name = "ADMIN_AUDIT_SUBJECT_DIGEST_KEY", valueFrom = "${local.application_secret_arn}:ADMIN_AUDIT_SUBJECT_DIGEST_KEY::" },
+    ] : [],
   )
 
   task_secrets = {
@@ -162,9 +190,15 @@ locals {
         { name = "MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64", valueFrom = "${local.application_secret_arn}:MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64::" },
       ] : [],
     )
-    web = [
-      { name = "SSR_INTERNAL_REQUEST_SECRET", valueFrom = "${local.application_secret_arn}:SSR_INTERNAL_REQUEST_SECRET::" },
-    ]
+    web = concat(
+      [
+        { name = "SSR_INTERNAL_REQUEST_SECRET", valueFrom = "${local.application_secret_arn}:SSR_INTERNAL_REQUEST_SECRET::" },
+      ],
+      var.admin_web_enabled ? [
+        { name = "ADMIN_WEB_OIDC_CLIENT_SECRET", valueFrom = "${local.application_secret_arn}:ADMIN_WEB_OIDC_CLIENT_SECRET::" },
+        { name = "ADMIN_WEB_SESSION_ENCRYPTION_KEY_BASE64", valueFrom = "${local.application_secret_arn}:ADMIN_WEB_SESSION_ENCRYPTION_KEY_BASE64::" },
+      ] : [],
+    )
     worker = [
       { name = "DATABASE_URL", valueFrom = "${local.application_secret_arn}:DATABASE_URL::" },
       { name = "PENDING_ACTION_ENCRYPTION_KEY", valueFrom = "${local.application_secret_arn}:PENDING_ACTION_ENCRYPTION_KEY::" },
@@ -323,7 +357,11 @@ resource "aws_ecs_task_definition" "service" {
   cpu                      = tostring(var.task_cpu[each.key])
   memory                   = tostring(var.task_memory[each.key])
   execution_role_arn       = aws_iam_role.task_execution.arn
-  task_role_arn            = contains(["api", "worker"], each.key) ? aws_iam_role.search_task.arn : aws_iam_role.task.arn
+  task_role_arn = (
+    each.key == "web" && var.admin_web_enabled ? aws_iam_role.web_admin_task[0].arn :
+    contains(["api", "worker"], each.key) ? aws_iam_role.search_task.arn :
+    aws_iam_role.task.arn
+  )
 
   runtime_platform {
     cpu_architecture        = var.cpu_architecture
@@ -459,9 +497,88 @@ resource "aws_ecs_task_definition" "service" {
       )
       error_message = "An enabled OAuth server requires a fixed custom domain and the exact public /api/auth issuer and /api/auth/jwks URI."
     }
+
+    precondition {
+      condition = (
+        each.key != "web" ||
+        !var.admin_web_enabled ||
+        (
+          var.domain_name != "" &&
+          var.admin_oidc_issuer != "" &&
+          var.admin_oidc_audience != "" &&
+          var.admin_oidc_jwks_uri != "" &&
+          var.admin_web_oidc_client_id != "" &&
+          var.admin_web_oidc_resource != "" &&
+          length(var.admin_web_oidc_scopes) > 0 &&
+          contains(var.admin_web_oidc_scopes, "openid")
+        )
+      )
+      error_message = "admin_web_enabled requires a fixed custom domain and the complete workforce issuer, API audience/JWKS, browser client ID/resource, and openid scope tuple."
+    }
+
+    precondition {
+      condition = (
+        each.key != "web" ||
+        !var.admin_web_enabled ||
+        (
+          startswith(var.admin_oidc_issuer, "https://") &&
+          startswith(var.admin_oidc_jwks_uri, "https://") &&
+          startswith(var.admin_web_oidc_resource, "https://") &&
+          local.public_origin == "https://${var.domain_name}"
+        )
+      )
+      error_message = "admin_web_enabled requires HTTPS workforce endpoints and the fixed HTTPS AlphaNet public origin."
+    }
+
+    precondition {
+      condition = (
+        each.key != "web" ||
+        !var.admin_web_enabled ||
+        var.admin_web_oidc_resource == var.admin_oidc_audience
+      )
+      error_message = "Admin Web resource and Admin API audience must be identical."
+    }
+
+    precondition {
+      condition = (
+        each.key != "web" ||
+        !var.admin_web_enabled ||
+        var.admin_web_login_ttl_seconds < var.admin_web_session_ttl_seconds
+      )
+      error_message = "Admin Web login transactions must expire before authenticated sessions."
+    }
+
+    precondition {
+      condition = (
+        each.key != "web" ||
+        !var.admin_web_enabled ||
+        var.admin_oidc_allow_amr_mfa ||
+        length(var.admin_oidc_allowed_acr_values) > 0
+      )
+      error_message = "admin_web_enabled requires at least one strong workforce MFA mechanism: amr=mfa or an exact allowed acr value."
+    }
+
+    precondition {
+      condition = (
+        each.key != "web" ||
+        !var.admin_web_enabled ||
+        var.enable_waf
+      )
+      error_message = "admin_web_enabled requires the CloudFront WAF."
+    }
+
+    precondition {
+      condition = (
+        each.key != "web" ||
+        !var.admin_web_enabled ||
+        var.admin_web_session_store == "dynamodb"
+      )
+      error_message = "AWS Admin Web sessions must use DynamoDB; the in-memory store is forbidden."
+    }
   }
 
   depends_on = [
+    aws_iam_role_policy.web_admin_task,
     aws_iam_role_policy.search_embedding,
     aws_iam_role_policy.search_task_exec,
     aws_iam_role_policy.task_execution,

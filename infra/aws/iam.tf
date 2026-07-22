@@ -265,6 +265,17 @@ resource "aws_iam_role" "github_deploy" {
   max_session_duration = 7200
 }
 
+locals {
+  github_deploy_pass_role_arns = concat(
+    [
+      aws_iam_role.search_task.arn,
+      aws_iam_role.task.arn,
+      aws_iam_role.task_execution.arn,
+    ],
+    var.admin_web_enabled ? [aws_iam_role.web_admin_task[0].arn] : [],
+  )
+}
+
 data "aws_iam_policy_document" "github_deploy" {
   statement {
     sid    = "ReadDeploymentState"
@@ -351,14 +362,10 @@ data "aws_iam_policy_document" "github_deploy" {
   }
 
   statement {
-    sid     = "PassOnlyAlphaNetTaskRoles"
-    effect  = "Allow"
-    actions = ["iam:PassRole"]
-    resources = [
-      aws_iam_role.search_task.arn,
-      aws_iam_role.task.arn,
-      aws_iam_role.task_execution.arn,
-    ]
+    sid       = "PassOnlyAlphaNetTaskRoles"
+    effect    = "Allow"
+    actions   = ["iam:PassRole"]
+    resources = local.github_deploy_pass_role_arns
 
     condition {
       test     = "StringEquals"

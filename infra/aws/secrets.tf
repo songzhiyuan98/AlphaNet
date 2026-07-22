@@ -17,7 +17,11 @@ resource "aws_secretsmanager_secret" "application" {
 # COMMUNITY_CURSOR_SIGNING_KEY, RESEND_API_KEY, optional Google OAuth keys,
 # private MCP server/client certificate bundles and keys, the pinned client
 # fingerprint, the ActorContext key version/ring, and independent replay/JTI
-# digest keys.
+# digest keys. Before admin_web_enabled is turned on, the same secret must also
+# contain ADMIN_WEB_OIDC_CLIENT_SECRET,
+# ADMIN_WEB_SESSION_ENCRYPTION_KEY_BASE64, and the API-only
+# ADMIN_AUDIT_SUBJECT_DIGEST_KEY. Terraform injects these values by JSON key;
+# it never stores their plaintext in configuration or state.
 
 data "aws_iam_policy_document" "application_secret" {
   statement {
