@@ -838,14 +838,76 @@ export const ApiEnvironmentSchema = CommonServiceEnvironmentSchema.extend({
 });
 export type ApiEnvironment = z.infer<typeof ApiEnvironmentSchema>;
 
+function isCanonicalMcpResource(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.username === "" &&
+      url.password === "" &&
+      url.search === "" &&
+      url.hash === "" &&
+      url.pathname === "/mcp" &&
+      url.toString() === value &&
+      (url.protocol === "https:" ||
+        (url.protocol === "http:" && isLoopbackHostname(url.hostname)))
+    );
+  } catch {
+    return false;
+  }
+}
+
+const OptionalMcpResourceSchema = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  z
+    .string()
+    .min(1)
+    .max(500)
+    .refine(
+      isCanonicalMcpResource,
+      "must be a canonical https /mcp resource URL (or loopback http URL)",
+    )
+    .optional(),
+);
+
 export const McpEnvironmentSchema = CommonServiceEnvironmentSchema.extend({
   PORT: PortSchema.default(4100),
-  DATABASE_URL: UrlSchema,
   REDIS_URL: UrlSchema,
   MCP_ALLOWED_HOSTS: z.string().default("localhost,127.0.0.1,mcp"),
+  MCP_PUBLIC_ENABLED: BooleanStringSchema.default(false),
+  MCP_RESOURCE: OptionalMcpResourceSchema,
+  MCP_TRUSTED_PROXY_CIDRS: TrustedProxyListSchema,
 }).superRefine((value, context) => {
-  validateProductionPostgresTransport(value, context);
   validateProductionRedisTransport(value, context);
+  if (value.MCP_PUBLIC_ENABLED && !value.MCP_RESOURCE) {
+    context.addIssue({
+      code: "custom",
+      message: "is required when MCP_PUBLIC_ENABLED=true",
+      path: ["MCP_RESOURCE"],
+    });
+  }
+  if (
+    value.NODE_ENV === "production" &&
+    value.MCP_RESOURCE &&
+    !value.MCP_RESOURCE.startsWith("https://")
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "must use https in production",
+      path: ["MCP_RESOURCE"],
+    });
+  }
+  if (
+    value.NODE_ENV === "production" &&
+    value.MCP_PUBLIC_ENABLED &&
+    value.MCP_TRUSTED_PROXY_CIDRS.length < 1
+  ) {
+    context.addIssue({
+      code: "custom",
+      message:
+        "must name at least one trusted ingress IP or CIDR when public MCP access is enabled",
+      path: ["MCP_TRUSTED_PROXY_CIDRS"],
+    });
+  }
 });
 export type McpEnvironment = z.infer<typeof McpEnvironmentSchema>;
 

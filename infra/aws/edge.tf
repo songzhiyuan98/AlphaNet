@@ -13,9 +13,9 @@ resource "aws_lb" "main" {
   desync_mitigation_mode     = "strictest"
   idle_timeout               = 65
 
-  # CloudFront appends the actual viewer IP to any supplied chain. Preserve
-  # that chain so AlphaNet's right-to-left resolver sees the viewer as the first
-  # untrusted hop, instead of rate-limiting the CloudFront edge address.
+  # The viewer-request function removes caller-supplied XFF before CloudFront
+  # appends the actual viewer IP. Preserve that sanitized value so AlphaNet does
+  # not rate-limit the CloudFront edge address.
   xff_header_processing_mode = "preserve"
 
   tags = {
@@ -114,7 +114,11 @@ resource "aws_lb_listener_rule" "mcp" {
 
   condition {
     path_pattern {
-      values = ["/mcp", "/mcp/*"]
+      values = [
+        "/.well-known/oauth-protected-resource/mcp",
+        "/mcp",
+        "/mcp/*",
+      ]
     }
   }
 
@@ -122,6 +126,13 @@ resource "aws_lb_listener_rule" "mcp" {
     http_header {
       http_header_name = "X-AlphaNet-Origin-Verify"
       values           = [random_password.cloudfront_origin.result]
+    }
+  }
+
+  lifecycle {
+    precondition {
+      condition     = !var.mcp_public_enabled || var.domain_name != ""
+      error_message = "mcp_public_enabled requires a fixed custom domain_name; the generated CloudFront hostname must never become the immutable OAuth resource audience."
     }
   }
 }
@@ -241,6 +252,7 @@ resource "aws_cloudfront_function" "sanitize_forwarding_headers" {
     function handler(event) {
       var request = event.request;
       delete request.headers['forwarded'];
+      delete request.headers['x-forwarded-for'];
       delete request.headers['x-forwarded-host'];
       delete request.headers['x-forwarded-port'];
       delete request.headers['x-forwarded-proto'];

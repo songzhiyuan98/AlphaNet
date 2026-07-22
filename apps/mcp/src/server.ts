@@ -3,13 +3,14 @@ import { createServer } from "node:http";
 import { loadMcpEnvironment, parseCommaSeparated } from "@alphanet/config";
 import {
   closeDependencies,
-  createPostgresDependency,
   createRedisDependency,
   type HealthDependency,
 } from "@alphanet/database";
 import { createLogger } from "@alphanet/observability";
 
 import { createMcpApp } from "./app.js";
+import { createMcpClientIpResolver } from "./client-ip.js";
+import { configureMcpHttpServer, shutdownMcpHttpServer } from "./lifecycle.js";
 
 async function start(): Promise<void> {
   const environment = loadMcpEnvironment();
@@ -18,24 +19,27 @@ async function start(): Promise<void> {
     environment: environment.NODE_ENV,
     level: environment.LOG_LEVEL,
   });
-  const postgres = createPostgresDependency(environment.DATABASE_URL);
-  const dependencies: HealthDependency[] = [
-    postgres,
-    createRedisDependency(environment.REDIS_URL),
-  ];
+  const dependencies: HealthDependency[] = [createRedisDependency(environment.REDIS_URL)];
   let mcp: ReturnType<typeof createMcpApp> | undefined;
   let httpServer: ReturnType<typeof createServer> | undefined;
   try {
-    // Refuse traffic when the database can retain sensitive bind parameters.
-    await postgres.check();
+    if (environment.MCP_PUBLIC_ENABLED) {
+      throw new Error(
+        "Public MCP cannot start until OAuth verification, rate limits, and real tools are wired",
+      );
+    }
     mcp = createMcpApp({
       allowedHosts: parseCommaSeparated(environment.MCP_ALLOWED_HOSTS),
       dependencies,
       host: environment.HOST,
       logger,
+      publicEnabled: environment.MCP_PUBLIC_ENABLED,
+      resolveClientIp: createMcpClientIpResolver(environment.MCP_TRUSTED_PROXY_CIDRS),
+      ...(environment.MCP_RESOURCE ? { resource: environment.MCP_RESOURCE } : {}),
       version: environment.APP_VERSION,
     });
     httpServer = createServer(mcp.app);
+    configureMcpHttpServer(httpServer);
 
     await new Promise<void>((resolve, reject) => {
       httpServer?.once("error", reject);
@@ -57,23 +61,28 @@ async function start(): Promise<void> {
       }
       closing = true;
       logger.info({ signal }, "shutting down");
-      await new Promise<void>((resolve, reject) => {
-        httpServer?.close((error) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          resolve();
-        });
-      });
-      await mcp.close();
+      await shutdownMcpHttpServer(httpServer, mcp);
     };
 
     process.once("SIGINT", () => {
-      void shutdown("SIGINT");
+      void shutdown("SIGINT").catch((error: unknown) => {
+        logger.error(
+          { errorName: error instanceof Error ? error.name : "UnknownError" },
+          "shutdown failed",
+        );
+        httpServer?.closeAllConnections();
+        process.exitCode = 1;
+      });
     });
     process.once("SIGTERM", () => {
-      void shutdown("SIGTERM");
+      void shutdown("SIGTERM").catch((error: unknown) => {
+        logger.error(
+          { errorName: error instanceof Error ? error.name : "UnknownError" },
+          "shutdown failed",
+        );
+        httpServer?.closeAllConnections();
+        process.exitCode = 1;
+      });
     });
   } catch (error) {
     if (httpServer?.listening) {
@@ -91,8 +100,7 @@ async function start(): Promise<void> {
 }
 
 start().catch((error: unknown) => {
-  process.stderr.write(
-    `${error instanceof Error ? error.message : "MCP service failed to start"}\n`,
-  );
+  void error;
+  process.stderr.write("MCP service failed to start\n");
   process.exitCode = 1;
 });

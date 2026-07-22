@@ -170,7 +170,6 @@ locals {
   database_clients = merge(
     {
       api     = aws_security_group.service["api"].id
-      mcp     = aws_security_group.service["mcp"].id
       worker  = aws_security_group.service["worker"].id
       migrate = aws_security_group.migration.id
     },
@@ -189,7 +188,7 @@ resource "aws_vpc_security_group_ingress_rule" "database_client" {
 }
 
 resource "aws_vpc_security_group_egress_rule" "service_to_database" {
-  for_each = toset(["api", "mcp", "worker"])
+  for_each = toset(["api", "worker"])
 
   security_group_id            = aws_security_group.service[each.key].id
   referenced_security_group_id = aws_security_group.database.id

@@ -54,8 +54,9 @@ Route 53 / CloudFront / WAF
         +------------------------- default ----> Web ECS service
 
 ECS Worker service ---------------------------> PostgreSQL Outbox
-Web/API/MCP/Worker ---> Aurora PostgreSQL 17 + pgvector
+Web/API/Worker -------> Aurora PostgreSQL 17 + pgvector
 API/MCP -------------> ElastiCache Valkey
+MCP -----------------> internal API (mTLS + ActorContext assertion)
 GitHub Actions --OIDC--> ECR / ECS one-shot migration / ECS services
 ```
 
@@ -90,11 +91,15 @@ services leave that as an AWS configuration change rather than a hosting
 platform migration.
 
 The MCP process is part of the release artifact and can be health-checked
-inside the VPC, but `mcp_public_enabled` defaults to `false`. The current
-operational status tool is not the Remote MCP product surface. The public
-listener rule may be enabled only after OAuth 2.1 resource-server validation,
-real REST-equivalent tools, revocation, rate-limit, and host-interoperability
-gates pass.
+inside the VPC, but `mcp_public_enabled` defaults to `false`. The current MCP
+service is a private health-only scaffold, not the Remote MCP product surface.
+The public listener rule may be enabled only after OAuth 2.1 resource-server
+validation, real REST-equivalent tools, revocation, rate-limit, and
+host-interoperability gates pass.
+
+MCP does not receive `DATABASE_URL` and has no PostgreSQL network or IAM
+authority. It terminates the external OAuth token, then calls the internal API;
+Redis is limited to replay protection and reconstructable request controls.
 
 ## First-quarter capacity and cost posture
 

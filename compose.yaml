@@ -264,9 +264,12 @@ services:
       migrate:
         condition: service_completed_successfully
     environment:
-      <<: *data-service-environment
+      <<: *runtime-environment
+      REDIS_URL: redis://:${REDIS_PASSWORD:-alphanet_local_only}@redis:6379/0
       PORT: 4100
       MCP_ALLOWED_HOSTS: localhost,127.0.0.1,mcp
+      MCP_PUBLIC_ENABLED: "false"
+      MCP_TRUSTED_PROXY_CIDRS: ""
     ports:
       - "127.0.0.1:${MCP_PORT:-4100}:4100"
 

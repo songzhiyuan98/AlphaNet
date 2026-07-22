@@ -202,4 +202,89 @@ run "single_node_valkey_template" {
     )
     error_message = "Private-by-default MCP must remain off the ALB and its target-health alarms until mcp_public_enabled is explicitly true."
   }
+
+  assert {
+    condition = contains(
+      flatten([
+        for condition in aws_lb_listener_rule.mcp.condition :
+        try(condition.path_pattern[0].values, [])
+      ]),
+      "/.well-known/oauth-protected-resource/mcp"
+    )
+    error_message = "The MCP listener boundary must reserve the standard protected-resource metadata path before public exposure is enabled."
+  }
+}
+
+run "reject_public_mcp_without_fixed_domain" {
+  command = plan
+
+  variables {
+    environment                     = "staging"
+    app_version                     = "0123456789abcdef0123456789abcdef01234567"
+    alb_origin_domain_name          = "origin-staging.alphanet.example"
+    alb_origin_certificate_arn      = "arn:aws:acm:us-west-2:123456789012:certificate/00000000-0000-0000-0000-000000000000"
+    auth_email_from                 = "AlphaNet <no-reply@alphanet.example>"
+    github_oidc_provider_arn        = "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
+    github_oidc_subjects            = ["repo:songzhiyuan98@123667992/AlphaNet@1306225890:ref:refs/heads/main"]
+    mcp_public_enabled              = true
+    valkey_multi_az                 = false
+    database_deletion_protection    = false
+    database_skip_final_snapshot    = true
+    database_cloudwatch_log_exports = []
+
+    image_overrides = {
+      web     = "123456789012.dkr.ecr.us-west-2.amazonaws.com/alphanet-web@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      api     = "123456789012.dkr.ecr.us-west-2.amazonaws.com/alphanet-api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      mcp     = "123456789012.dkr.ecr.us-west-2.amazonaws.com/alphanet-mcp@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      worker  = "123456789012.dkr.ecr.us-west-2.amazonaws.com/alphanet-worker@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      migrate = "123456789012.dkr.ecr.us-west-2.amazonaws.com/alphanet-migrate@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
+  }
+
+  override_data {
+    target = data.aws_ecr_repository.service["web"]
+    values = {
+      arn            = "arn:aws:ecr:us-west-2:123456789012:repository/alphanet-web"
+      name           = "alphanet-web"
+      repository_url = "123456789012.dkr.ecr.us-west-2.amazonaws.com/alphanet-web"
+    }
+  }
+
+  override_data {
+    target = data.aws_ecr_repository.service["api"]
+    values = {
+      arn            = "arn:aws:ecr:us-west-2:123456789012:repository/alphanet-api"
+      name           = "alphanet-api"
+      repository_url = "123456789012.dkr.ecr.us-west-2.amazonaws.com/alphanet-api"
+    }
+  }
+
+  override_data {
+    target = data.aws_ecr_repository.service["mcp"]
+    values = {
+      arn            = "arn:aws:ecr:us-west-2:123456789012:repository/alphanet-mcp"
+      name           = "alphanet-mcp"
+      repository_url = "123456789012.dkr.ecr.us-west-2.amazonaws.com/alphanet-mcp"
+    }
+  }
+
+  override_data {
+    target = data.aws_ecr_repository.service["worker"]
+    values = {
+      arn            = "arn:aws:ecr:us-west-2:123456789012:repository/alphanet-worker"
+      name           = "alphanet-worker"
+      repository_url = "123456789012.dkr.ecr.us-west-2.amazonaws.com/alphanet-worker"
+    }
+  }
+
+  override_data {
+    target = data.aws_ecr_repository.service["migrate"]
+    values = {
+      arn            = "arn:aws:ecr:us-west-2:123456789012:repository/alphanet-migrate"
+      name           = "alphanet-migrate"
+      repository_url = "123456789012.dkr.ecr.us-west-2.amazonaws.com/alphanet-migrate"
+    }
+  }
+
+  expect_failures = [aws_lb_listener_rule.mcp]
 }

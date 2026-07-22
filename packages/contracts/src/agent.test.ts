@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   AGENT_SCOPES,
   AGENT_TOOL_NAMES,
+  AGENT_TOOL_SCOPE_POLICIES,
   AgentContextResponseSchema,
   AgentCredentialSummarySchema,
   AgentEffectiveCapabilitiesSchema,
@@ -343,6 +344,25 @@ describe("Agent response envelopes", () => {
         publish_without_review: readCapability,
       }).success,
     ).toBe(false);
+  });
+
+  it("locks every tool to its canonical dispatch-boundary scope policy", () => {
+    expect(Object.keys(AGENT_TOOL_SCOPE_POLICIES).sort()).toEqual(
+      [...AGENT_TOOL_NAMES].sort(),
+    );
+    expect(AGENT_TOOL_SCOPE_POLICIES.get_agent_context).toEqual({
+      kind: "authenticated",
+    });
+    expect(AGENT_TOOL_SCOPE_POLICIES.get_community).toEqual({
+      challengeScope: "community:read",
+      kind: "any_of",
+      requiredScopesAnyOf: ["community:read", "research:read"],
+    });
+    expect(AGENT_TOOL_SCOPE_POLICIES.create_post).toEqual({
+      challengeScope: "content:write",
+      kind: "any_of",
+      requiredScopesAnyOf: ["content:write"],
+    });
   });
 
   it("validates the full snake_case Agent context envelope", () => {

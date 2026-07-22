@@ -53,6 +53,9 @@ locals {
     { name = "HOST", value = "0.0.0.0" },
     { name = "PORT", value = "4100" },
     { name = "MCP_ALLOWED_HOSTS", value = local.mcp_allowed_hosts },
+    { name = "MCP_PUBLIC_ENABLED", value = tostring(var.mcp_public_enabled) },
+    { name = "MCP_RESOURCE", value = var.mcp_public_enabled ? "${local.public_origin}/mcp" : "" },
+    { name = "MCP_TRUSTED_PROXY_CIDRS", value = join(",", values(local.public_subnet_cidrs)) },
   ])
 
   worker_environment = concat(local.common_service_environment, [
@@ -96,7 +99,6 @@ locals {
   task_secrets = {
     api = local.api_secrets
     mcp = [
-      { name = "DATABASE_URL", valueFrom = "${local.application_secret_arn}:DATABASE_URL::" },
       { name = "REDIS_URL", valueFrom = "${local.application_secret_arn}:REDIS_URL::" },
     ]
     web = [

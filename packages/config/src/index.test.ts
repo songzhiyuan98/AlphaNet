@@ -542,19 +542,63 @@ describe("Owner authentication environment parsing", () => {
   it("requires TLS for API and MCP Redis connections in production", () => {
     expect(() =>
       loadMcpEnvironment({
-        DATABASE_URL: baseEnvironment.DATABASE_URL,
         NODE_ENV: "production",
         REDIS_URL: "redis://cache.example.com:6379/0",
       }),
     ).toThrow(EnvironmentValidationError);
 
     const mcp = loadMcpEnvironment({
-      DATABASE_URL:
-        "postgresql://alphanet:secret@db.example.com:5432/alphanet?sslmode=verify-full",
       NODE_ENV: "production",
       REDIS_URL: "rediss://alphanet-runtime:secret@cache.example.com:6379/0",
     });
     expect(mcp.REDIS_URL).toMatch(/^rediss:/);
+    expect(mcp.MCP_PUBLIC_ENABLED).toBe(false);
+    expect(mcp.MCP_RESOURCE).toBeUndefined();
+  });
+
+  it("requires a canonical fixed MCP resource before public access can be enabled", () => {
+    expect(() =>
+      loadMcpEnvironment({
+        MCP_PUBLIC_ENABLED: "true",
+        REDIS_URL: baseEnvironment.REDIS_URL,
+      }),
+    ).toThrow(EnvironmentValidationError);
+
+    const local = loadMcpEnvironment({
+      MCP_PUBLIC_ENABLED: "true",
+      MCP_RESOURCE: "http://127.0.0.1:4100/mcp",
+      REDIS_URL: baseEnvironment.REDIS_URL,
+    });
+    expect(local.MCP_RESOURCE).toBe("http://127.0.0.1:4100/mcp");
+
+    expect(() =>
+      loadMcpEnvironment({
+        MCP_PUBLIC_ENABLED: "true",
+        MCP_RESOURCE: "https://MCP.alphanet.example/mcp",
+        REDIS_URL: baseEnvironment.REDIS_URL,
+      }),
+    ).toThrow(EnvironmentValidationError);
+
+    expect(() =>
+      loadMcpEnvironment({
+        MCP_PUBLIC_ENABLED: "true",
+        MCP_RESOURCE: "https://mcp.alphanet.example/mcp",
+        NODE_ENV: "production",
+        REDIS_URL: "rediss://alphanet-runtime:secret@cache.example.com:6379/0",
+      }),
+    ).toThrow(EnvironmentValidationError);
+
+    const production = loadMcpEnvironment({
+      MCP_PUBLIC_ENABLED: "true",
+      MCP_RESOURCE: "https://mcp.alphanet.example/mcp",
+      MCP_TRUSTED_PROXY_CIDRS: "10.20.0.0/16,fd00:1234::/48",
+      NODE_ENV: "production",
+      REDIS_URL: "rediss://alphanet-runtime:secret@cache.example.com:6379/0",
+    });
+    expect(production.MCP_TRUSTED_PROXY_CIDRS).toEqual([
+      "10.20.0.0/16",
+      "fd00:1234::/48",
+    ]);
   });
 
   it("requires PostgreSQL certificate and endpoint verification in production", () => {

@@ -127,14 +127,35 @@ ORDER BY namespace.nspname, routine.proname, routine.oid, privilege.grantee
 GRANT USAGE, CREATE ON SCHEMA auth, platform, system TO :"migration_role";
 GRANT USAGE ON SCHEMA auth, platform, system TO :"runtime_role";
 
--- Better Auth owns the lifecycle of these four tables and requires all row
--- operations. It receives no TRUNCATE, REFERENCES, TRIGGER, schema CREATE, or
+-- Better Auth owns the lifecycle of the core identity tables and requires all
+-- row operations. Remote MCP OAuth narrows each Provider table to the exact
+-- operations used by the pinned Provider/JWT adapters: Clients are
+-- pre-registered and read-only at runtime; JWKS rows are read/created; token
+-- and Consent rows retain only their protocol lifecycle operations. None of
+-- these grants includes TRUNCATE, REFERENCES, TRIGGER, schema CREATE, or
 -- database CREATE/TEMPORARY capability.
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
   auth.users,
   auth.sessions,
   auth.accounts,
   auth.verifications
+TO :"runtime_role";
+
+GRANT SELECT ON TABLE
+  auth.oauth_clients
+TO :"runtime_role";
+
+GRANT SELECT, INSERT ON TABLE
+  auth.oauth_jwks
+TO :"runtime_role";
+
+GRANT SELECT, INSERT, DELETE ON TABLE
+  auth.oauth_access_tokens
+TO :"runtime_role";
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
+  auth.oauth_consents,
+  auth.oauth_refresh_tokens
 TO :"runtime_role";
 
 -- Every currently classified platform table can participate in authorization,
@@ -169,6 +190,10 @@ GRANT SELECT ON TABLE
   platform.moderation_case_items,
   platform.moderation_cases,
   platform.notifications,
+  platform.oauth_access_token_jtis,
+  platform.oauth_authorization_requests,
+  platform.oauth_grants,
+  platform.oauth_resource_configuration,
   platform.owners,
   platform.pending_action_attempts,
   platform.pending_actions,
@@ -263,6 +288,9 @@ GRANT INSERT ON TABLE
   platform.credentials,
   platform.idempotency_records,
   platform.mentions,
+  platform.oauth_access_token_jtis,
+  platform.oauth_authorization_requests,
+  platform.oauth_grants,
   platform.pending_actions,
   platform.reactions,
   platform.source_links
@@ -328,6 +356,9 @@ GRANT UPDATE ON TABLE
   platform.agents,
   platform.credentials,
   platform.idempotency_records,
+  platform.oauth_access_token_jtis,
+  platform.oauth_authorization_requests,
+  platform.oauth_grants,
   platform.pending_action_attempts,
   platform.pending_actions
 TO :"runtime_role";
@@ -429,6 +460,11 @@ GRANT EXECUTE ON FUNCTION
   platform.canonical_discovery_tags_are_valid(text[]),
   platform.community_posting_rules_are_valid(jsonb),
   platform.discovery_tags_are_valid(text[]),
+  platform.oauth_provider_scopes_are_valid(jsonb),
+  platform.oauth_redirect_uris_are_valid(jsonb),
+  platform.oauth_requested_scopes_are_valid(text[]),
+  platform.oauth_resource_is_valid(text),
+  platform.oauth_text_arrays_are_same_set(text[], text[]),
   platform.purge_expired_agent_search_activity_events(integer),
   platform.text_array_has_unique_values(text[]),
   system.claim_content_embedding_jobs(text, bytea, integer, integer),

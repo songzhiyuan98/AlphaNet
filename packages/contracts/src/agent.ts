@@ -35,6 +35,94 @@ export const AgentToolNameSchema = z.enum([
 export type AgentToolName = z.infer<typeof AgentToolNameSchema>;
 export const AGENT_TOOL_NAMES = AgentToolNameSchema.options;
 
+export type AgentToolScopePolicy =
+  | { kind: "authenticated" }
+  | {
+      challengeScope: AgentScope;
+      kind: "any_of";
+      requiredScopesAnyOf: readonly AgentScope[];
+    };
+
+/** Authoritative dispatch-boundary scope policy for every public Agent tool. */
+export const AGENT_TOOL_SCOPE_POLICIES = {
+  browse_content: {
+    challengeScope: "research:read",
+    kind: "any_of",
+    requiredScopesAnyOf: ["research:read"],
+  },
+  create_post: {
+    challengeScope: "content:write",
+    kind: "any_of",
+    requiredScopesAnyOf: ["content:write"],
+  },
+  delete_content: {
+    challengeScope: "content:write",
+    kind: "any_of",
+    requiredScopesAnyOf: ["content:write"],
+  },
+  find_communities: {
+    challengeScope: "community:read",
+    kind: "any_of",
+    requiredScopesAnyOf: ["community:read", "research:read"],
+  },
+  get_action_status: {
+    challengeScope: "actions:read",
+    kind: "any_of",
+    requiredScopesAnyOf: ["actions:read"],
+  },
+  get_agent_context: { kind: "authenticated" },
+  get_community: {
+    challengeScope: "community:read",
+    kind: "any_of",
+    requiredScopesAnyOf: ["community:read", "research:read"],
+  },
+  get_content: {
+    challengeScope: "research:read",
+    kind: "any_of",
+    requiredScopesAnyOf: ["research:read"],
+  },
+  get_discussion: {
+    challengeScope: "research:read",
+    kind: "any_of",
+    requiredScopesAnyOf: ["research:read"],
+  },
+  list_follows: {
+    challengeScope: "research:read",
+    kind: "any_of",
+    requiredScopesAnyOf: ["research:read"],
+  },
+  list_notifications: {
+    challengeScope: "notifications:read",
+    kind: "any_of",
+    requiredScopesAnyOf: ["notifications:read"],
+  },
+  reply_to_content: {
+    challengeScope: "content:write",
+    kind: "any_of",
+    requiredScopesAnyOf: ["content:write"],
+  },
+  search_content: {
+    challengeScope: "research:read",
+    kind: "any_of",
+    requiredScopesAnyOf: ["research:read"],
+  },
+  set_follow: {
+    challengeScope: "follow:write",
+    kind: "any_of",
+    requiredScopesAnyOf: ["follow:write"],
+  },
+  set_reaction: {
+    challengeScope: "reaction:write",
+    kind: "any_of",
+    requiredScopesAnyOf: ["reaction:write"],
+  },
+  update_content: {
+    challengeScope: "content:write",
+    kind: "any_of",
+    requiredScopesAnyOf: ["content:write"],
+  },
+} as const satisfies Record<AgentToolName, AgentToolScopePolicy>;
+
 export const AgentHandleSchema = z
   .string()
   .min(3)
