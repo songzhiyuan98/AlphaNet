@@ -1,5 +1,15 @@
 locals {
   deployment_environment_prefix = upper(var.environment)
+  deployment_smoke_paths = concat(
+    [
+      "/health/ready",
+      "/v1/public/communities?limit=1",
+      "/v1/public/content?scope=global&sort=latest&limit=1",
+    ],
+    var.mcp_oauth_server_enabled ? [
+      "/.well-known/oauth-authorization-server/api/auth",
+    ] : [],
+  )
   deployment_github_variables = {
     AWS_ECR_PUBLISH_ENABLED                                                                 = "true"
     AWS_DEPLOY_ENABLED                                                                      = "false"
@@ -30,7 +40,7 @@ locals {
     "${local.deployment_environment_prefix}_ECS_SUBNET_IDS"                                 = join(",", [for subnet in aws_subnet.private : subnet.id])
     "${local.deployment_environment_prefix}_ECS_SECURITY_GROUP_IDS"                         = aws_security_group.migration.id
     "${local.deployment_environment_prefix}_PUBLIC_BASE_URL"                                = local.public_origin
-    "${local.deployment_environment_prefix}_SMOKE_PATHS"                                    = "/health/ready,/v1/public/communities?limit=1,/v1/public/content?scope=global&sort=latest&limit=1"
+    "${local.deployment_environment_prefix}_SMOKE_PATHS"                                    = join(",", local.deployment_smoke_paths)
   }
 }
 
@@ -111,6 +121,21 @@ output "bootstrap_task_definition_arn" {
 
 output "runtime_smoke_task_definition_arn" {
   value = aws_ecs_task_definition.database_job["runtime-smoke"].arn
+}
+
+output "oauth_provisioning_task_definition_arn" {
+  description = "Exact immutable task revision used only by the trusted OAuth provisioning state machine; null while mcp_oauth_provisioning_enabled is false."
+  value       = try(aws_ecs_task_definition.database_job["oauth-provision"].arn, null)
+}
+
+output "oauth_provisioning_state_machine_arn" {
+  description = "Trusted operator entrypoint that accepts only an expected approved manifest digest; null while mcp_oauth_provisioning_enabled is false."
+  value       = try(aws_sfn_state_machine.oauth_provision[0].arn, null)
+}
+
+output "oauth_client_provisioning_secret_arn" {
+  description = "Dedicated out-of-state manifest secret container; null while mcp_oauth_provisioning_enabled is false."
+  value       = try(aws_secretsmanager_secret.oauth_client_provisioning[0].arn, null)
 }
 
 output "private_subnet_ids" {

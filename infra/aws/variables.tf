@@ -155,6 +155,17 @@ variable "waf_rate_limit" {
   }
 }
 
+variable "waf_oauth_jwks_rate_limit" {
+  description = "Maximum public OAuth JWKS requests per source IP in a five-minute WAF window. CloudFront normally serves these from its dedicated cache."
+  type        = number
+  default     = 600
+
+  validation {
+    condition     = var.waf_oauth_jwks_rate_limit >= 100 && var.waf_oauth_jwks_rate_limit <= 10000
+    error_message = "waf_oauth_jwks_rate_limit must be between 100 and 10,000."
+  }
+}
+
 variable "allow_direct_alb_cidrs" {
   description = "At most five temporary IPv4 operator CIDRs for origin diagnostics. Empty keeps the IPv4 ALB reachable only from CloudFront."
   type        = list(string)
@@ -180,8 +191,26 @@ variable "mcp_runtime_enabled" {
   default     = false
 }
 
+variable "mcp_oauth_owner_consent_enabled" {
+  description = "Enable the API/Web Owner-consent flow without enabling the live OAuth server, MCP runtime, or public MCP edge."
+  type        = bool
+  default     = false
+}
+
+variable "mcp_oauth_server_enabled" {
+  description = "Enable the live Remote MCP OAuth authorization server in API. Requires Owner consent, but does not enable the MCP runtime or public MCP edge."
+  type        = bool
+  default     = false
+}
+
+variable "mcp_oauth_provisioning_enabled" {
+  description = "Create the inert, operator-only Remote MCP OAuth provisioning task and dedicated manifest secret. The task is never run by CD."
+  type        = bool
+  default     = false
+}
+
 variable "mcp_oauth_issuer" {
-  description = "Exact HTTPS issuer expected in Remote MCP access tokens. Required when the MCP runtime is enabled."
+  description = "Exact HTTPS issuer used by the API OAuth server and expected in Remote MCP access tokens. Required when the OAuth server or MCP runtime is enabled."
   type        = string
   default     = ""
 
@@ -192,7 +221,7 @@ variable "mcp_oauth_issuer" {
 }
 
 variable "mcp_oauth_jwks_uri" {
-  description = "Exact HTTPS JWKS endpoint used by the Remote MCP access-token verifier. Required when the MCP runtime is enabled."
+  description = "Exact HTTPS JWKS endpoint published by API and used by the Remote MCP access-token verifier. Required when the OAuth server or MCP runtime is enabled."
   type        = string
   default     = ""
 

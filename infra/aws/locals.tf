@@ -43,10 +43,10 @@ locals {
     for service, config in local.load_balanced_services : service => config
     if contains(local.alb_attached_services, service)
   }
-  # Public exposure is a one-way promotion of the already-proven private
-  # runtime. Setting mcp_public_enabled can therefore never leave the runtime
-  # itself disabled.
-  mcp_runtime_enabled   = var.mcp_runtime_enabled || var.mcp_public_enabled
+  # Runtime and public exposure are deliberately independent release gates.
+  # The public gate must never silently enable a runtime that was not promoted
+  # and verified explicitly; edge.tf rejects every incomplete public tuple.
+  mcp_runtime_enabled   = var.mcp_runtime_enabled
   mcp_internal_api_port = 4443
 
   ecr_repository_prefix = var.ecr_repository_prefix
@@ -73,6 +73,7 @@ locals {
   ]))
   mcp_internal_api_dns_name = "api.${aws_service_discovery_private_dns_namespace.main.name}"
   mcp_resource              = local.mcp_runtime_enabled ? "${local.public_origin}/mcp" : ""
+  mcp_oauth_resource        = var.mcp_oauth_owner_consent_enabled || var.mcp_oauth_server_enabled ? "${local.public_origin}/mcp" : ""
 
   github_oidc_subjects = var.github_oidc_subjects
 

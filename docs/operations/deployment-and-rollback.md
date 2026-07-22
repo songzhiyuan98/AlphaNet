@@ -91,6 +91,38 @@ executes in this order:
 
 Container start or an accepted ECS update is not deployment success.
 
+The release migration task deliberately does not invent or automatically
+enable Remote MCP OAuth clients. Before enabling the dark OAuth runtime in an
+environment, provision its reviewed immutable Resource and public-client
+allowlist through the separate
+[`remote-mcp-oauth-client-provisioning.md`](./remote-mcp-oauth-client-provisioning.md)
+operator workflow. Public MCP exposure remains a later gate.
+The provisioning baseline has no ECS Service or manifest reference, and the
+GitHub deploy role cannot run its family or pass its dedicated roles. Enabling
+the Terraform provisioning flag therefore creates an inert manual path; it does
+not add client reconciliation to release deployment.
+
+The normal Worker owns Remote MCP OAuth lifecycle maintenance after migration
+`000020`. Its independent supervised loop runs at most every 30 seconds and
+fairly drains 250-row `SKIP LOCKED` batches, bounded by 25 seconds and 1000 rows
+per stage. Each cycle expires stale pending/selected Authorization Request
+Envelopes, reconciles the closed bootstrap queue fail closed, then purges only
+denied/expired Envelopes that are older than seven days and have no Grant
+reference. A Grant-linked Envelope and its immutable bootstrap reconciliation
+record are never retention candidates. Terraform rejects an enabled API OAuth
+server with zero desired Worker tasks.
+
+The success log contains only aggregate counts, capped backlog/oldest-age
+gauges, batch count, elapsed time, and row/time-bound flags. Failure logs contain
+only the error class. CloudWatch alarms on a sustained shared-policy backlog,
+any failed run, or two missing one-minute heartbeat periods. Grant,
+Owner, Agent, Credential, Client, token, code, PKCE, redirect, session, and UGC
+values must not be added. Before public enablement, exercise a killed process
+after code claim and after JTI creation, wait one maintenance grace interval,
+and verify the Grant/Credential/JTI/Provider family is terminal while a complete
+control Grant receives one immutable coherent record. `MCP_PUBLIC_ENABLED`
+remains `false` regardless of this Worker result until every Public gate passes.
+
 The runtime SQL smoke is deliberately a database privilege/trigger/schema
 probe. It does **not** prove that a generic Outbox handler consumed an event:
 the current Worker ships the real PendingAction executor, while its generic
@@ -175,6 +207,11 @@ Public MCP requires a fixed custom `domain_name`; Terraform must reject
 The MCP listener rule reserves both `/mcp` and the standard
 `/.well-known/oauth-protected-resource/mcp` metadata path. While the public gate
 is false, both return an explicit 404 instead of falling through to Web.
+The API listener separately routes the exact issuer-relative RFC 8414 path
+`/.well-known/oauth-authorization-server/api/auth` ahead of the Web catch-all.
+When the OAuth server gate is enabled, Terraform adds this route to the
+generated deployment smoke paths, and CD validates its issuer and endpoint
+contract through the public CloudFront origin before accepting the rollout.
 
 The CloudFront viewer-request function removes caller-supplied
 `X-Forwarded-For`, CloudFront appends the actual viewer address, and the ALB

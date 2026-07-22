@@ -22,7 +22,10 @@ CREATE TEMPORARY TABLE expected_closed_tables (
 ) ON COMMIT DROP;
 
 INSERT INTO expected_closed_tables (schema_name, table_name)
-VALUES ('platform', 'notification_aggregate_actors');
+VALUES
+  ('platform', 'notification_aggregate_actors'),
+  ('platform', 'oauth_grant_bootstrap_reconciliations'),
+  ('system', 'oauth_grant_bootstrap_queue');
 
 INSERT INTO expected_table_privileges (schema_name, table_name, privilege)
 SELECT 'auth', table_name, privilege
@@ -442,12 +445,16 @@ VALUES
   ('system', 'claim_content_embedding_jobs', 'candidate_lease_owner text, candidate_lease_token_digest bytea, candidate_batch_size integer, candidate_lease_seconds integer'),
   ('system', 'complete_content_embedding_job', 'candidate_job_id uuid, candidate_lease_owner text, candidate_lease_token_digest bytea'),
   ('system', 'enqueue_content_embedding_job', 'candidate_revision_id uuid, candidate_embedding_model text, candidate_priority smallint'),
+  ('system', 'expire_remote_mcp_oauth_authorization_requests', 'candidate_batch_size integer'),
+  ('system', 'inspect_remote_mcp_oauth_lifecycle_backlog', 'candidate_grace_seconds integer, candidate_retention_seconds integer, candidate_count_cap integer'),
   ('system', 'mark_all_notifications_read', 'candidate_recipient_actor_id uuid'),
   ('system', 'project_notification', 'candidate_notification_id uuid, candidate_recipient_actor_id uuid, candidate_type text, candidate_trigger_actor_id uuid, candidate_object_type text, candidate_object_id uuid, candidate_symbol_ids text[], candidate_community_ids uuid[], candidate_matched_follow_target_type text, candidate_matched_follow_target_id text, candidate_matched_follow_notification_level text, candidate_context jsonb, candidate_summary_template_key text, candidate_occurred_at timestamp with time zone, candidate_dedupe_key text'),
   ('system', 'project_reaction_notification', 'candidate_notification_id uuid, candidate_recipient_actor_id uuid, candidate_content_id uuid, candidate_reaction_type text, candidate_bucket_start timestamp with time zone, candidate_trigger_actor_id uuid, candidate_active boolean, candidate_event_occurred_at timestamp with time zone, candidate_event_sequence bigint'),
   ('system', 'purge_expired_content_ranking_candidate_snapshots', 'candidate_batch_size integer'),
   ('system', 'purge_expired_content_search_candidate_snapshots', 'candidate_batch_size integer'),
   ('system', 'purge_expired_notifications', 'candidate_batch_size integer'),
+  ('system', 'purge_terminal_remote_mcp_oauth_authorization_requests', 'candidate_batch_size integer, candidate_retention_seconds integer'),
+  ('system', 'reconcile_remote_mcp_oauth_grant_bootstraps', 'candidate_batch_size integer, candidate_grace_seconds integer'),
   ('system', 'renew_content_embedding_job_lease', 'candidate_job_id uuid, candidate_lease_owner text, candidate_lease_token_digest bytea, candidate_lease_seconds integer'),
   ('system', 'retry_content_embedding_job', 'candidate_job_id uuid, candidate_lease_owner text, candidate_lease_token_digest bytea, candidate_error_code text, candidate_retry_seconds integer'),
   ('system', 'set_notification_read_state', 'candidate_notification_id uuid, candidate_recipient_actor_id uuid, candidate_is_read boolean'),
@@ -1253,6 +1260,25 @@ BEGIN
   ) THEN
     RAISE EXCEPTION
       'Notification runtime entry points are missing or not hardened SECURITY DEFINER functions';
+  END IF;
+
+  IF (
+    SELECT count(*) <> 4
+    FROM pg_catalog.pg_proc AS routine
+    JOIN pg_catalog.pg_namespace AS namespace
+      ON namespace.oid = routine.pronamespace
+    WHERE namespace.nspname = 'system'
+      AND routine.proname IN (
+        'expire_remote_mcp_oauth_authorization_requests',
+        'inspect_remote_mcp_oauth_lifecycle_backlog',
+        'purge_terminal_remote_mcp_oauth_authorization_requests',
+        'reconcile_remote_mcp_oauth_grant_bootstraps'
+      )
+      AND routine.prosecdef
+      AND 'search_path=pg_catalog' = ANY (routine.proconfig)
+  ) THEN
+    RAISE EXCEPTION
+      'Remote MCP OAuth maintenance entry points are missing or not hardened SECURITY DEFINER functions';
   END IF;
 
   IF NOT EXISTS (

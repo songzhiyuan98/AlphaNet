@@ -23,6 +23,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@alphanet/config": "workspace:*",
     "@alphanet/contracts": "workspace:*",
     "@better-auth/oauth-provider": "1.6.23",
     "better-auth": "1.6.23",

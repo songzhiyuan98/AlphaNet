@@ -127,7 +127,9 @@ Each target environment also supplies its own deploy role, ECS cluster,
 service names, task-definition families, private subnet IDs, migration security
 group, public base URL, and smoke paths. Terraform emits the complete
 `deployment_github_variables` map; do not transcribe resource identifiers from
-memory.
+memory. When the Remote MCP OAuth server gate is enabled, that generated smoke
+set includes the issuer-relative RFC 8414 discovery path; deployment validates
+its exact public issuer and endpoints before promotion.
 
 Activation order is intentional:
 

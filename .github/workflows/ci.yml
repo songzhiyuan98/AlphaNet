@@ -153,6 +153,7 @@ jobs:
         run: |
           bash .github/scripts/test-aws-ecs-deploy.sh
           bash .github/scripts/test-resolve-manual-release.sh
+          bash infra/aws/scripts/test-oauth-provisioning-job.sh
 
   integration:
     name: Integration

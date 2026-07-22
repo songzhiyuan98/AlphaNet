@@ -53,6 +53,13 @@ export function LoginForm({
         return;
       }
 
+      // The official OAuth Provider client preserves only the server-signed
+      // authorization query. When login resumes such a flow, Better Auth
+      // returns the next OAuth URL and its redirect plugin owns navigation.
+      if (result.data.redirect && result.data.url) {
+        return;
+      }
+
       router.replace(nextPath);
       router.refresh();
     } catch {

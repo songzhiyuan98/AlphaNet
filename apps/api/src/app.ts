@@ -102,6 +102,28 @@ export interface ApiAppOptions {
 }
 
 const dependencyTimeoutMilliseconds = 2_000;
+const remoteMcpActorContextHeader = "x-alphanet-mcp-actor-context";
+const remoteMcpOAuthFormBodyMaxBytes = 16 * 1_024;
+const remoteMcpOAuthExternalMetadataPath =
+  "/.well-known/oauth-authorization-server/api/auth";
+const remoteMcpOAuthIssuerMetadataPaths = new Set([
+  remoteMcpOAuthExternalMetadataPath,
+  "/api/auth/.well-known/oauth-authorization-server",
+  "/api/auth/.well-known/openid-configuration",
+]);
+const remoteMcpOAuthGetPaths = new Set(["/api/auth/oauth2/authorize"]);
+const remoteMcpOAuthPostPaths = new Set([
+  "/api/auth/oauth2/consent",
+  "/api/auth/oauth2/continue",
+  "/api/auth/oauth2/delete-consent",
+  "/api/auth/oauth2/revoke",
+  "/api/auth/oauth2/token",
+  "/api/auth/oauth2/update-consent",
+]);
+const remoteMcpOAuthFormPaths = new Set([
+  "/api/auth/oauth2/revoke",
+  "/api/auth/oauth2/token",
+]);
 type ReadinessDependency = Pick<HealthDependency, "check" | "critical" | "name">;
 const allowedAuthPostPaths = new Set([
   "/api/auth/request-password-reset",
@@ -114,6 +136,7 @@ const allowedAuthPostPaths = new Set([
 const allowedGoogleSocialBodyKeys = new Set([
   "callbackURL",
   "errorCallbackURL",
+  "oauth_query",
   "provider",
 ]);
 const alphanetRequestIdPattern = /^req[-_][A-Za-z0-9][A-Za-z0-9_-]{0,59}$/;
@@ -126,11 +149,14 @@ function isAllowedAuthRequest(
   method: string,
   pathname: string,
   googleEnabled: boolean,
+  remoteMcpOAuthEnabled: boolean,
+  remoteMcpOAuthJwksPath: string | undefined,
 ): boolean {
   if (method === "POST") {
     return (
       allowedAuthPostPaths.has(pathname) ||
-      (googleEnabled && pathname === "/api/auth/sign-in/social")
+      (googleEnabled && pathname === "/api/auth/sign-in/social") ||
+      (remoteMcpOAuthEnabled && remoteMcpOAuthPostPaths.has(pathname))
     );
   }
   if (method !== "GET") {
@@ -138,8 +164,73 @@ function isAllowedAuthRequest(
   }
   return (
     pathname === "/api/auth/verify-email" ||
-    (googleEnabled && pathname === "/api/auth/callback/google")
+    (googleEnabled && pathname === "/api/auth/callback/google") ||
+    (remoteMcpOAuthEnabled &&
+      (remoteMcpOAuthGetPaths.has(pathname) ||
+        remoteMcpOAuthIssuerMetadataPaths.has(pathname) ||
+        pathname === remoteMcpOAuthJwksPath))
   );
+}
+
+interface RemoteMcpOAuthTransportSnapshot {
+  authorizationHeaders: readonly string[];
+  continuationHeaders: readonly string[];
+}
+
+type AuthRuntimeWithRemoteMcpOAuth = AlphaNetAuthRuntime & {
+  remoteMcpOAuthEnabled?: boolean;
+  remoteMcpOAuthJwksPath?: string;
+};
+
+type AuthRuntimeHandler = (
+  request: Request,
+  transport: RemoteMcpOAuthTransportSnapshot,
+) => Promise<Response>;
+
+function configuredRemoteMcpOAuthJwksPath(
+  authRuntime: AuthRuntimeWithRemoteMcpOAuth,
+): string | undefined {
+  const value = authRuntime.remoteMcpOAuthJwksPath;
+  if (
+    typeof value !== "string" ||
+    !value.startsWith("/") ||
+    value.startsWith("//") ||
+    value.includes("?") ||
+    value.includes("#") ||
+    value.includes("\\")
+  ) {
+    return undefined;
+  }
+  return value;
+}
+
+function rawHeaderValues(request: FastifyRequest, headerName: string): string[] {
+  const values: string[] = [];
+  const normalizedHeaderName = headerName.toLowerCase();
+  const rawHeaders = request.raw.rawHeaders;
+  for (let index = 0; index + 1 < rawHeaders.length; index += 2) {
+    const name = rawHeaders[index];
+    const value = rawHeaders[index + 1];
+    if (name?.toLowerCase() === normalizedHeaderName && value !== undefined) {
+      values.push(value);
+    }
+  }
+  return values;
+}
+
+function stripPublicMcpActorContextHeader(request: FastifyRequest): void {
+  for (const name of Object.keys(request.headers)) {
+    if (name.toLowerCase() === remoteMcpActorContextHeader) {
+      delete request.headers[name];
+    }
+  }
+
+  const rawHeaders = request.raw.rawHeaders;
+  for (let index = rawHeaders.length - 2; index >= 0; index -= 2) {
+    if (rawHeaders[index]?.toLowerCase() === remoteMcpActorContextHeader) {
+      rawHeaders.splice(index, 2);
+    }
+  }
 }
 
 function isConstrainedGoogleSocialRequest(body: unknown): boolean {
@@ -280,6 +371,7 @@ function toAuthHeaders(
     const normalizedName = name.toLowerCase();
     if (
       value === undefined ||
+      normalizedName === remoteMcpActorContextHeader ||
       normalizedName === "x-alphanet-client-ip" ||
       Object.values(ssrClientIpHeaders).includes(
         normalizedName as (typeof ssrClientIpHeaders)[keyof typeof ssrClientIpHeaders],
@@ -316,11 +408,42 @@ function sanitizeAuthResponseBody(
   pathname: string,
   response: Response,
   responseBody: string | null,
+  allowedOrigins: ReadonlySet<string>,
 ): string | null {
-  if (
-    response.ok &&
-    (pathname === "/api/auth/sign-in/email" || pathname === "/api/auth/sign-up/email")
-  ) {
+  if (!response.ok) {
+    return responseBody;
+  }
+  if (pathname === "/api/auth/sign-in/email") {
+    if (responseBody !== null) {
+      try {
+        const candidate: unknown = JSON.parse(responseBody);
+        if (
+          typeof candidate === "object" &&
+          candidate !== null &&
+          !Array.isArray(candidate) &&
+          (candidate as Record<string, unknown>)["redirect"] === true &&
+          typeof (candidate as Record<string, unknown>)["url"] === "string"
+        ) {
+          const url = new URL((candidate as Record<string, unknown>)["url"] as string);
+          if (
+            url.username === "" &&
+            url.password === "" &&
+            url.hash === "" &&
+            allowedOrigins.has(url.origin) &&
+            url.pathname === "/oauth/consent" &&
+            url.searchParams.getAll("sig").length === 1
+          ) {
+            return JSON.stringify({ redirect: true, url: url.toString() });
+          }
+        }
+      } catch {
+        // Ordinary sign-in responses and malformed OAuth recovery responses are
+        // reduced to the same secret-free success shape.
+      }
+    }
+    return JSON.stringify({ status: true });
+  }
+  if (pathname === "/api/auth/sign-up/email") {
     return JSON.stringify({ status: true });
   }
   return responseBody;
@@ -351,6 +474,11 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
   }
   const dependencies = options.dependencies ?? [];
   const authRuntime = options.authRuntime;
+  const publicRemoteMcpOAuthJwksPath =
+    authRuntime &&
+    (authRuntime as AuthRuntimeWithRemoteMcpOAuth).remoteMcpOAuthEnabled === true
+      ? configuredRemoteMcpOAuthJwksPath(authRuntime as AuthRuntimeWithRemoteMcpOAuth)
+      : undefined;
   const readinessDependencies: ReadinessDependency[] = [
     ...dependencies,
     ...(authRuntime
@@ -494,6 +622,19 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
         ? [...options.trustedProxyCidrs]
         : false,
   });
+  // ARCH-0015 reserves this header for the separate private mTLS listener.
+  // The public listener strips it itself instead of trusting edge sanitization.
+  app.addHook("onRequest", (request, _reply, done) => {
+    stripPublicMcpActorContextHeader(request);
+    done();
+  });
+  app.addContentTypeParser(
+    "application/x-www-form-urlencoded",
+    { bodyLimit: remoteMcpOAuthFormBodyMaxBytes, parseAs: "buffer" },
+    (_request, body, done) => {
+      done(null, body);
+    },
+  );
 
   await app.register(helmet, {
     contentSecurityPolicy: false,
@@ -508,12 +649,16 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
   app.addHook("onSend", (request, reply, payload, done) => {
     void reply.header("x-request-id", request.id);
     const routeUrl = request.routeOptions.url ?? "";
+    const requestPathname = new URL(request.url, "http://alphanet.invalid").pathname;
+    const isPublicRemoteMcpOAuthJwks =
+      request.method === "GET" && requestPathname === publicRemoteMcpOAuthJwksPath;
     if (
-      routeUrl === "/api/auth/*" ||
-      routeUrl === "/v1/owner/session" ||
-      routeUrl.startsWith("/v1/owner/") ||
-      routeUrl.startsWith("/v1/admin/") ||
-      routeUrl === "/v1/agent/context"
+      !isPublicRemoteMcpOAuthJwks &&
+      (routeUrl === "/api/auth/*" ||
+        routeUrl === "/v1/owner/session" ||
+        routeUrl.startsWith("/v1/owner/") ||
+        routeUrl.startsWith("/v1/admin/") ||
+        routeUrl === "/v1/agent/context")
     ) {
       void reply.header("cache-control", "no-store, private");
       void reply.header("pragma", "no-cache");
@@ -580,87 +725,126 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
   });
 
   if (authRuntime) {
+    const remoteMcpOAuthRuntime = authRuntime as AuthRuntimeWithRemoteMcpOAuth;
+    const remoteMcpOAuthEnabled = remoteMcpOAuthRuntime.remoteMcpOAuthEnabled === true;
+    const remoteMcpOAuthJwksPath =
+      configuredRemoteMcpOAuthJwksPath(remoteMcpOAuthRuntime);
+    const allowedAuthRedirectOrigins = new Set(options.allowedOrigins);
+    const handleAuthRuntime = authRuntime.handle as AuthRuntimeHandler;
+    const handleAuthRequest = async (request: FastifyRequest, reply: FastifyReply) => {
+      const url = new URL(request.url, authRuntime.baseUrl);
+      if (
+        !isAllowedAuthRequest(
+          request.method,
+          url.pathname,
+          authRuntime.googleEnabled,
+          remoteMcpOAuthEnabled,
+          remoteMcpOAuthJwksPath,
+        )
+      ) {
+        return reply.code(404).send(routeNotFound(request));
+      }
+      if (
+        url.pathname === "/api/auth/sign-in/social" &&
+        !isConstrainedGoogleSocialRequest(request.body)
+      ) {
+        const payload: ApiError = {
+          error: {
+            code: "invalid_auth_request",
+            message: "The social sign-in request is not allowed.",
+            requestId: request.id,
+          },
+        };
+        return reply.code(400).send(payload);
+      }
+      if (url.pathname === "/api/auth/reset-password" && url.search.length > 0) {
+        const payload: ApiError = {
+          error: {
+            code: "invalid_auth_request",
+            message: "Password reset tokens are accepted only in the request body.",
+            requestId: request.id,
+          },
+        };
+        return reply.code(400).send(payload);
+      }
+      const headers = toAuthHeaders(request, resolveClientIp);
+      const body =
+        request.method === "GET" || request.body === undefined
+          ? undefined
+          : Buffer.isBuffer(request.body) && remoteMcpOAuthFormPaths.has(url.pathname)
+            ? Uint8Array.from(request.body)
+            : JSON.stringify(request.body);
+
+      let response: Response;
+      try {
+        response = await handleAuthRuntime(
+          new Request(url, {
+            ...(body === undefined ? {} : { body }),
+            headers,
+            method: request.method,
+          }),
+          {
+            authorizationHeaders: rawHeaderValues(request, "authorization"),
+            continuationHeaders: rawHeaderValues(
+              request,
+              "x-alphanet-oauth-continuation",
+            ),
+          },
+        );
+      } catch (error) {
+        request.log.error(
+          {
+            errorName: error instanceof Error ? error.name : "UnknownError",
+          },
+          "authentication handler failed",
+        );
+        const payload: ApiError = {
+          error: {
+            code: "auth_unavailable",
+            message: "Authentication is temporarily unavailable.",
+            requestId: request.id,
+          },
+        };
+        return reply.code(503).send(payload);
+      }
+
+      reply.code(response.status);
+      response.headers.forEach((value, name) => {
+        const normalizedName = name.toLowerCase();
+        if (normalizedName !== "set-cookie" && normalizedName !== "content-length") {
+          void reply.header(name, value);
+        }
+      });
+      const cookies = response.headers.getSetCookie();
+      if (cookies.length > 0) {
+        void reply.header("set-cookie", cookies);
+      }
+
+      const responseBody = response.body ? await response.text() : null;
+      if (responseBody === null) return reply.send();
+      return reply.send(
+        sanitizeAuthResponseBody(
+          url.pathname,
+          response,
+          responseBody,
+          allowedAuthRedirectOrigins,
+        ),
+      );
+    };
+
     app.route({
       method: ["GET", "POST"],
       url: "/api/auth/*",
-      async handler(request, reply) {
-        const url = new URL(request.url, authRuntime.baseUrl);
-        if (
-          !isAllowedAuthRequest(request.method, url.pathname, authRuntime.googleEnabled)
-        ) {
-          return reply.code(404).send(routeNotFound(request));
-        }
-        if (
-          url.pathname === "/api/auth/sign-in/social" &&
-          !isConstrainedGoogleSocialRequest(request.body)
-        ) {
-          const payload: ApiError = {
-            error: {
-              code: "invalid_auth_request",
-              message: "The social sign-in request is not allowed.",
-              requestId: request.id,
-            },
-          };
-          return reply.code(400).send(payload);
-        }
-        if (url.pathname === "/api/auth/reset-password" && url.search.length > 0) {
-          const payload: ApiError = {
-            error: {
-              code: "invalid_auth_request",
-              message: "Password reset tokens are accepted only in the request body.",
-              requestId: request.id,
-            },
-          };
-          return reply.code(400).send(payload);
-        }
-        const headers = toAuthHeaders(request, resolveClientIp);
-        const body =
-          request.method === "GET" || request.body === undefined
-            ? undefined
-            : JSON.stringify(request.body);
-
-        let response: Response;
-        try {
-          response = await authRuntime.handle(
-            new Request(url, {
-              ...(body === undefined ? {} : { body }),
-              headers,
-              method: request.method,
-            }),
-          );
-        } catch (error) {
-          request.log.error(
-            {
-              errorName: error instanceof Error ? error.name : "UnknownError",
-            },
-            "authentication handler failed",
-          );
-          const payload: ApiError = {
-            error: {
-              code: "auth_unavailable",
-              message: "Authentication is temporarily unavailable.",
-              requestId: request.id,
-            },
-          };
-          return reply.code(503).send(payload);
-        }
-
-        reply.code(response.status);
-        response.headers.forEach((value, name) => {
-          const normalizedName = name.toLowerCase();
-          if (normalizedName !== "set-cookie" && normalizedName !== "content-length") {
-            void reply.header(name, value);
-          }
-        });
-        const cookies = response.headers.getSetCookie();
-        if (cookies.length > 0) {
-          void reply.header("set-cookie", cookies);
-        }
-
-        const responseBody = response.body ? await response.text() : null;
-        return reply.send(sanitizeAuthResponseBody(url.pathname, response, responseBody));
-      },
+      handler: handleAuthRequest,
     });
+    app.get(remoteMcpOAuthExternalMetadataPath, handleAuthRequest);
+    if (
+      remoteMcpOAuthJwksPath &&
+      !remoteMcpOAuthJwksPath.startsWith("/api/auth/") &&
+      remoteMcpOAuthJwksPath !== remoteMcpOAuthExternalMetadataPath
+    ) {
+      app.get(remoteMcpOAuthJwksPath, handleAuthRequest);
+    }
 
     app.get("/v1/owner/session", async (request, reply) => {
       if (

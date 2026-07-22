@@ -114,6 +114,24 @@ const actorReplayDigestKeyBase64 = independentKeyBase64(3);
 const accessTokenJtiDigestKeyBase64 = independentKeyBase64(4);
 const oauthAuthorizationBindingKeyBase64 = independentKeyBase64(5);
 const oauthContinuationKeyBase64 = independentKeyBase64(6);
+const oauthTokenStorageKeyBase64 = independentKeyBase64(7);
+const oauthJwkEncryptionKeyBase64 = independentKeyBase64(8);
+
+function validRemoteMcpOAuthServerEnvironment() {
+  return {
+    ...baseEnvironment,
+    MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64: accessTokenJtiDigestKeyBase64,
+    MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64: oauthAuthorizationBindingKeyBase64,
+    MCP_OAUTH_CONTINUATION_KEY_BASE64: oauthContinuationKeyBase64,
+    MCP_OAUTH_ISSUER: "http://localhost:4000/api/auth",
+    MCP_OAUTH_JWKS_URI: "http://localhost:4000/api/auth/jwks",
+    MCP_OAUTH_JWK_ENCRYPTION_KEY_BASE64: oauthJwkEncryptionKeyBase64,
+    MCP_OAUTH_OWNER_CONSENT_ENABLED: "true",
+    MCP_OAUTH_RESOURCE: "http://127.0.0.1:4100/mcp",
+    MCP_OAUTH_SERVER_ENABLED: "true",
+    MCP_OAUTH_TOKEN_STORAGE_KEY_BASE64: oauthTokenStorageKeyBase64,
+  } as const;
+}
 
 function validActorAssertionEnvironment() {
   return {
@@ -282,9 +300,14 @@ describe("environment parsing", () => {
     expect(result.SEARCH_EMBEDDING_TIMEOUT_MS).toBe(5_000);
     expect(result.MCP_INTERNAL_API_ENABLED).toBe(false);
     expect(result.MCP_OAUTH_OWNER_CONSENT_ENABLED).toBe(false);
+    expect(result.MCP_OAUTH_SERVER_ENABLED).toBe(false);
     expect(result.MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64).toBeUndefined();
     expect(result.MCP_OAUTH_CONTINUATION_KEY_BASE64).toBeUndefined();
+    expect(result.MCP_OAUTH_ISSUER).toBeUndefined();
+    expect(result.MCP_OAUTH_JWKS_URI).toBeUndefined();
+    expect(result.MCP_OAUTH_JWK_ENCRYPTION_KEY_BASE64).toBeUndefined();
     expect(result.MCP_OAUTH_RESOURCE).toBeUndefined();
+    expect(result.MCP_OAUTH_TOKEN_STORAGE_KEY_BASE64).toBeUndefined();
     expect(result.MCP_INTERNAL_API_PORT).toBe(4_443);
     expect(result.MCP_ACTOR_ASSERTION_CURRENT_KEY_BASE64).toBeUndefined();
     expect(result.MCP_ACTOR_ASSERTION_PREVIOUS_KEYS).toEqual({});
@@ -307,6 +330,62 @@ describe("environment parsing", () => {
       Buffer.from(oauthContinuationKeyBase64, "base64"),
     );
     expect(result.MCP_OAUTH_RESOURCE).toBe("http://127.0.0.1:4100/mcp");
+  });
+
+  it("loads the live Remote MCP OAuth server only as one independent tuple", () => {
+    const result = loadApiEnvironment(validRemoteMcpOAuthServerEnvironment());
+
+    expect(result.MCP_OAUTH_SERVER_ENABLED).toBe(true);
+    expect(result.MCP_OAUTH_OWNER_CONSENT_ENABLED).toBe(true);
+    expect(result.MCP_OAUTH_ISSUER).toBe("http://localhost:4000/api/auth");
+    expect(result.MCP_OAUTH_JWKS_URI).toBe("http://localhost:4000/api/auth/jwks");
+    expect(result.MCP_OAUTH_TOKEN_STORAGE_KEY_BASE64).toEqual(
+      Buffer.from(oauthTokenStorageKeyBase64, "base64"),
+    );
+    expect(result.MCP_OAUTH_JWK_ENCRYPTION_KEY_BASE64).toEqual(
+      Buffer.from(oauthJwkEncryptionKeyBase64, "base64"),
+    );
+    expect(result.MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64).toEqual(
+      Buffer.from(accessTokenJtiDigestKeyBase64, "base64"),
+    );
+    expect(result.MCP_INTERNAL_API_ENABLED).toBe(false);
+  });
+
+  it("rejects partial, misbound, or key-reusing live Remote MCP OAuth configuration", () => {
+    expect(() =>
+      loadApiEnvironment({
+        ...baseEnvironment,
+        MCP_OAUTH_SERVER_ENABLED: "true",
+      }),
+    ).toThrow(EnvironmentValidationError);
+
+    expect(() =>
+      loadApiEnvironment({
+        ...validRemoteMcpOAuthServerEnvironment(),
+        MCP_OAUTH_OWNER_CONSENT_ENABLED: "false",
+      }),
+    ).toThrow(EnvironmentValidationError);
+
+    expect(() =>
+      loadApiEnvironment({
+        ...validRemoteMcpOAuthServerEnvironment(),
+        MCP_OAUTH_ISSUER: "http://localhost:4000/oauth",
+      }),
+    ).toThrow(EnvironmentValidationError);
+
+    expect(() =>
+      loadApiEnvironment({
+        ...validRemoteMcpOAuthServerEnvironment(),
+        MCP_OAUTH_JWKS_URI: "http://localhost:4000/api/auth/other-jwks",
+      }),
+    ).toThrow(EnvironmentValidationError);
+
+    expect(() =>
+      loadApiEnvironment({
+        ...validRemoteMcpOAuthServerEnvironment(),
+        MCP_OAUTH_TOKEN_STORAGE_KEY_BASE64: oauthContinuationKeyBase64,
+      }),
+    ).toThrow(EnvironmentValidationError);
   });
 
   it("rejects partial, reused, or non-canonical Remote MCP Owner consent configuration", () => {

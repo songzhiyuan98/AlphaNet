@@ -1,4 +1,4 @@
-import { createHash, createHmac } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 
 import { betterAuth, type BetterAuthOptions } from "better-auth";
 import { APIError } from "better-auth/api";
@@ -15,7 +15,21 @@ import {
   type AuthEmailSender,
 } from "./email.js";
 import { RedisRateLimitStorage } from "./rate-limit.js";
-import { createAlphaNetRemoteMcpOAuthSchemaOnlyPlugins } from "./remote-mcp-oauth-provider.js";
+import { createRemoteMcpOAuthAuthorizeRateLimiter } from "./remote-mcp-oauth-authorize-rate-limit.js";
+import { createRemoteMcpOAuthConsentService } from "./remote-mcp-oauth-consent.js";
+import { createAlphaNetRemoteMcpOAuthPostLogin } from "./remote-mcp-oauth-post-login.js";
+import {
+  createAlphaNetRemoteMcpOAuthLiveBoundary,
+  createAlphaNetRemoteMcpOAuthSchemaOnlyPlugins,
+  type AlphaNetRemoteMcpOAuthLiveBoundary,
+} from "./remote-mcp-oauth-provider.js";
+import { createAlphaNetRemoteMcpOAuthRevocationAccessTokenVerifier } from "./remote-mcp-oauth-revocation-verifier.js";
+import { createAlphaNetRemoteMcpOAuthRevocationService } from "./remote-mcp-oauth-revocation.js";
+import {
+  createAlphaNetRemoteMcpOAuthSigningService,
+  type AlphaNetRemoteMcpOAuthSigningService,
+} from "./remote-mcp-oauth-signing.js";
+import { createAlphaNetRemoteMcpOAuthSecurityStore } from "./remote-mcp-oauth-store.js";
 
 export interface AlphaNetGoogleAuthConfig {
   clientId: string;
@@ -33,6 +47,17 @@ export type AlphaNetEmailDeliveryConfig =
       replyTo?: string;
     };
 
+export interface AlphaNetRemoteMcpOAuthRuntimeConfig {
+  authorizationBindingKey: Uint8Array;
+  continuationKey: Uint8Array;
+  issuer: string;
+  jwksUrl: string;
+  jwkEncryptionKey: Uint8Array;
+  resource: string;
+  tokenJtiDigestKey: Uint8Array;
+  tokenStorageKey: Uint8Array;
+}
+
 export interface AlphaNetAuthConfig {
   baseUrl: string;
   databasePoolMax?: number;
@@ -41,6 +66,8 @@ export interface AlphaNetAuthConfig {
   emailDailyGlobalLimit?: number;
   google?: AlphaNetGoogleAuthConfig;
   redisUrl: string;
+  /** Atomic: omit the object to disable every live Remote MCP OAuth surface. */
+  remoteMcpOAuth?: AlphaNetRemoteMcpOAuthRuntimeConfig;
   secret: string;
   secureCookies: boolean;
   trustedOrigins: string[];
@@ -84,6 +111,22 @@ interface OwnerRow {
   status: OwnerSession["owner"]["status"];
 }
 
+interface RemoteMcpRevocationOwnerRow {
+  email_verified_at: Date | null;
+  id: string;
+  status: OwnerSession["owner"]["status"];
+}
+
+interface RemoteMcpOAuthTransportSnapshot {
+  authorizationHeaders: readonly string[];
+  continuationHeaders: readonly string[];
+}
+
+interface DeferredBetterAuthSession {
+  session: { id: string };
+  user: { emailVerified: boolean; id: string };
+}
+
 function createPool(config: AlphaNetAuthConfig): Pool {
   const pool = new Pool({
     application_name: "alphanet-auth",
@@ -114,6 +157,119 @@ function createCredentialLockPool(config: AlphaNetAuthConfig): Pool {
     // operation must establish a healthy connection before it can continue.
   });
   return pool;
+}
+
+function createRemoteMcpOAuthLockPool(config: AlphaNetAuthConfig): Pool {
+  const pool = new Pool({
+    application_name: "alphanet-auth-remote-mcp-oauth-lock",
+    connectionString: config.databaseUrl,
+    connectionTimeoutMillis: 3_000,
+    idleTimeoutMillis: 20_000,
+    max: Math.max(1, Math.min(2, config.databasePoolMax ?? 5)),
+    options: "-c search_path=auth,pg_catalog",
+  });
+  pool.on("error", () => {
+    // A failed lock connection is discarded. OAuth exchanges fail closed until
+    // this identity-distinct pool establishes another healthy connection.
+  });
+  return pool;
+}
+
+function assertRemoteMcpOAuthKeysAreIndependent(
+  config: AlphaNetRemoteMcpOAuthRuntimeConfig,
+): void {
+  const keys = [
+    config.authorizationBindingKey,
+    config.continuationKey,
+    config.jwkEncryptionKey,
+    config.tokenJtiDigestKey,
+    config.tokenStorageKey,
+  ];
+  if (keys.some((key) => !(key instanceof Uint8Array) || key.byteLength !== 32)) {
+    throw new TypeError("Remote MCP OAuth key configuration is invalid");
+  }
+  const copies = keys.map((key) => Buffer.from(key));
+  for (let left = 0; left < copies.length; left += 1) {
+    for (let right = left + 1; right < copies.length; right += 1) {
+      const leftKey = copies[left];
+      const rightKey = copies[right];
+      if (
+        leftKey &&
+        rightKey &&
+        leftKey.byteLength === rightKey.byteLength &&
+        timingSafeEqual(leftKey, rightKey)
+      ) {
+        throw new TypeError("Remote MCP OAuth keys must be pairwise independent");
+      }
+    }
+  }
+}
+
+export async function checkRemoteMcpOAuthResourceReady(
+  pool: Pick<Pool, "query">,
+  resource: string,
+): Promise<void> {
+  const result = await pool.query<{ ready: boolean }>(
+    `select exists (
+       select 1
+       from platform.oauth_resource_configuration
+       where id = true and resource = $1::text
+     ) as ready`,
+    [resource],
+  );
+  if (result.rows[0]?.ready !== true) {
+    throw new Error("Remote MCP OAuth resource is not ready");
+  }
+}
+
+export async function checkRemoteMcpOAuthSchemaReady(
+  pool: Pick<Pool, "query">,
+): Promise<void> {
+  const result = await pool.query<{ ready: boolean }>(
+    `select
+       to_regclass('auth.oauth_jwks') is not null
+       and to_regclass('auth.oauth_clients') is not null
+       and to_regclass('auth.oauth_refresh_tokens') is not null
+       and to_regclass('auth.oauth_access_tokens') is not null
+       and to_regclass('auth.oauth_consents') is not null
+       and to_regclass('platform.oauth_resource_configuration') is not null
+       and to_regclass('platform.oauth_authorization_requests') is not null
+       and to_regclass('platform.oauth_grants') is not null
+       and to_regclass('platform.oauth_access_token_jtis') is not null
+       and to_regclass('platform.oauth_grant_bootstrap_reconciliations') is not null
+       and to_regclass('system.oauth_grant_bootstrap_queue') is not null
+       and to_regprocedure('platform.prevent_oauth_grant_bootstrap_reconciliation_mutation()') is not null
+       and to_regprocedure('platform.maintain_oauth_grant_bootstrap_queue()') is not null
+       and to_regprocedure('system.inspect_remote_mcp_oauth_lifecycle_backlog(integer,integer,integer)') is not null
+       and to_regprocedure('system.expire_remote_mcp_oauth_authorization_requests(integer)') is not null
+       and to_regprocedure('system.reconcile_remote_mcp_oauth_grant_bootstraps(integer,integer)') is not null
+       and to_regprocedure('system.purge_terminal_remote_mcp_oauth_authorization_requests(integer,integer)') is not null
+       and (
+         select count(*) = 3
+         from system.schema_migrations
+         where (version, name) in (
+           ('000018', 'remote_mcp_oauth_v1'),
+           ('000019', 'remote_mcp_oauth_hardening_v1'),
+           ('000020', 'remote_mcp_oauth_lifecycle_maintenance_v1')
+         )
+       ) as ready`,
+  );
+  if (result.rows[0]?.ready !== true) {
+    throw new Error("Remote MCP OAuth schema is not ready");
+  }
+}
+
+function isRemoteMcpOAuthTransportSnapshot(
+  value: unknown,
+): value is RemoteMcpOAuthTransportSnapshot {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<RemoteMcpOAuthTransportSnapshot>;
+  return (
+    Array.isArray(candidate.authorizationHeaders) &&
+    candidate.authorizationHeaders.every((header) => typeof header === "string") &&
+    Array.isArray(candidate.continuationHeaders) &&
+    candidate.continuationHeaders.every((header) => typeof header === "string")
+  );
 }
 
 function createRedis(config: AlphaNetAuthConfig): Redis {
@@ -210,11 +366,126 @@ export function createAlphaNetAuthRuntime(
 ) {
   const pool = createPool(config);
   const credentialLockPool = createCredentialLockPool(config);
+  const remoteMcpOAuthLockPool = config.remoteMcpOAuth
+    ? createRemoteMcpOAuthLockPool(config)
+    : undefined;
   const redis = dependencies.redis ?? createRedis(config);
   const emailSender = createEmailSender(config, dependencies, redis);
   const tasks = new BackgroundTaskSupervisor(dependencies.logger);
   const rateLimitStorage = new RedisRateLimitStorage(redis);
   const schema = authSchemaOptions();
+  const deferredBetterAuthSession: {
+    get?: (headers: Headers) => Promise<DeferredBetterAuthSession | null>;
+  } = {};
+
+  let remoteMcpOAuth:
+    | {
+        boundary: AlphaNetRemoteMcpOAuthLiveBoundary;
+        jwksPath: string;
+        jwksUrl: string;
+        resource: string;
+        signing: AlphaNetRemoteMcpOAuthSigningService;
+      }
+    | undefined;
+  if (config.remoteMcpOAuth) {
+    if (!remoteMcpOAuthLockPool || remoteMcpOAuthLockPool === pool) {
+      throw new Error("Remote MCP OAuth lock pool is unavailable");
+    }
+    const remoteConfig = config.remoteMcpOAuth;
+    assertRemoteMcpOAuthKeysAreIndependent(remoteConfig);
+    const authorizeRateLimiter = createRemoteMcpOAuthAuthorizeRateLimiter(
+      new RedisRateLimitStorage(redis, "alphanet:remote-mcp-oauth:authorize:rate-limit:"),
+    );
+    const consentService = createRemoteMcpOAuthConsentService(pool, {
+      authorizationBindingKey: remoteConfig.authorizationBindingKey,
+      continuationKey: remoteConfig.continuationKey,
+    });
+    const signing = createAlphaNetRemoteMcpOAuthSigningService({
+      jwkEncryptionKey: remoteConfig.jwkEncryptionKey,
+      pool,
+    });
+    const postLogin = createAlphaNetRemoteMcpOAuthPostLogin({
+      consentPage: new URL(
+        "/oauth/consent",
+        config.trustedOrigins[0] ?? config.baseUrl,
+      ).toString(),
+      consentService,
+    });
+    const securityStore = createAlphaNetRemoteMcpOAuthSecurityStore({
+      authorizationBindingKey: remoteConfig.authorizationBindingKey,
+      lockPool: remoteMcpOAuthLockPool,
+      pool,
+      refreshTokenStorageKey: remoteConfig.tokenStorageKey,
+      tokenJtiDigestKey: remoteConfig.tokenJtiDigestKey,
+    });
+    const verifyAccessTokenForRevocation =
+      createAlphaNetRemoteMcpOAuthRevocationAccessTokenVerifier({
+        getPublicJwks: () => signing.getPublicJwks(),
+        issuer: remoteConfig.issuer,
+        resource: remoteConfig.resource,
+        tokenJtiDigestKey: remoteConfig.tokenJtiDigestKey,
+      });
+    const revocation = createAlphaNetRemoteMcpOAuthRevocationService({
+      async authenticateOwner(request) {
+        const getSession = deferredBetterAuthSession.get;
+        if (!getSession) {
+          throw new Error("Remote MCP OAuth Owner authentication is unavailable");
+        }
+        const session = await getSession(request.headers);
+        if (!session) return null;
+        const result = await pool.query<RemoteMcpRevocationOwnerRow>(
+          `select id::text, status, email_verified_at
+             from platform.owners
+            where auth_user_id = $1::uuid
+              and deleted_at is null
+            limit 1`,
+          [session.user.id],
+        );
+        const owner = result.rows[0];
+        if (
+          !owner ||
+          owner.status !== "active" ||
+          !session.user.emailVerified ||
+          owner.email_verified_at === null
+        ) {
+          return null;
+        }
+        return {
+          authUserId: session.user.id,
+          ownerId: owner.id,
+          sessionId: session.session.id,
+        };
+      },
+      issuer: remoteConfig.issuer,
+      pool,
+      refreshTokenStorageKey: remoteConfig.tokenStorageKey,
+      resource: remoteConfig.resource,
+      tokenJtiDigestKey: remoteConfig.tokenJtiDigestKey,
+      verifyAccessTokenForRevocation,
+    });
+    const boundary = createAlphaNetRemoteMcpOAuthLiveBoundary({
+      consentPage: postLogin.page,
+      issuer: remoteConfig.issuer,
+      jwksUrl: remoteConfig.jwksUrl,
+      loginPage: new URL("/login", config.trustedOrigins[0] ?? config.baseUrl).toString(),
+      resource: remoteConfig.resource,
+      security: {
+        ...securityStore,
+        ...revocation,
+        admitAuthorizationRequest: authorizeRateLimiter,
+        postLogin,
+        signAccessToken: (payload) => signing.signAccessToken(payload),
+      },
+      tokenStorageKey: remoteConfig.tokenStorageKey,
+    });
+    remoteMcpOAuth = {
+      boundary,
+      jwksPath: new URL(remoteConfig.jwksUrl).pathname,
+      jwksUrl: remoteConfig.jwksUrl,
+      resource: remoteConfig.resource,
+      signing,
+    };
+  }
   const socialProviders = config.google
     ? {
         google: {
@@ -356,6 +627,7 @@ export function createAlphaNetAuthRuntime(
         });
       },
     },
+    ...(remoteMcpOAuth ? { plugins: [...remoteMcpOAuth.boundary.plugins] } : {}),
     rateLimit: {
       customRules: {
         "/callback/*": { max: 20, window: 60 },
@@ -404,15 +676,69 @@ export function createAlphaNetAuthRuntime(
   } satisfies BetterAuthOptions;
 
   const auth = betterAuth(options);
+  deferredBetterAuthSession.get = async (headers) => {
+    const session = await auth.api.getSession({
+      headers,
+      query: {
+        disableCookieCache: true,
+      },
+    });
+    return session
+      ? {
+          session: { id: session.session.id },
+          user: {
+            emailVerified: session.user.emailVerified,
+            id: session.user.id,
+          },
+        }
+      : null;
+  };
+  const wrappedProviderHandler = remoteMcpOAuth?.boundary.wrapProviderHandler((request) =>
+    auth.handler(request),
+  );
 
-  async function handle(request: Request): Promise<Response> {
+  async function dispatchAuthHandler(
+    request: Request,
+    transport: RemoteMcpOAuthTransportSnapshot | undefined,
+  ): Promise<Response> {
+    if (!wrappedProviderHandler) return auth.handler(request);
+    if (!isRemoteMcpOAuthTransportSnapshot(transport)) {
+      throw new Error("Remote MCP OAuth raw transport metadata is unavailable");
+    }
+    return wrappedProviderHandler({
+      authorizationHeaders: transport.authorizationHeaders,
+      continuationHeaders: transport.continuationHeaders,
+      request,
+    });
+  }
+
+  async function handle(
+    request: Request,
+    transport?: RemoteMcpOAuthTransportSnapshot,
+  ): Promise<Response> {
     const url = new URL(request.url);
+    if (remoteMcpOAuth) {
+      if (!isRemoteMcpOAuthTransportSnapshot(transport)) {
+        throw new Error("Remote MCP OAuth raw transport metadata is unavailable");
+      }
+      if (request.method === "GET" && url.toString() === remoteMcpOAuth.jwksUrl) {
+        const jwks = await remoteMcpOAuth.signing.getPublicJwks();
+        return new Response(JSON.stringify(jwks.document), {
+          headers: {
+            "cache-control": jwks.cacheControl,
+            "content-type": "application/json; charset=utf-8",
+            "x-content-type-options": "nosniff",
+          },
+          status: 200,
+        });
+      }
+    }
     const isPasswordReset =
       request.method === "POST" && url.pathname === "/api/auth/reset-password";
     const isPasswordSignIn =
       request.method === "POST" && url.pathname === "/api/auth/sign-in/email";
     if (!isPasswordReset && !isPasswordSignIn) {
-      return auth.handler(request);
+      return dispatchAuthHandler(request, transport);
     }
 
     let body: Record<string, unknown> | undefined;
@@ -472,7 +798,7 @@ export function createAlphaNetAuthRuntime(
       }
     }
     if (!credentialLockSubject) {
-      return auth.handler(request);
+      return dispatchAuthHandler(request, transport);
     }
 
     // Keep password verification + session creation and reset token consumption
@@ -494,7 +820,7 @@ export function createAlphaNetAuthRuntime(
         [`alphanet:credential:${credentialLockSubject}`],
       );
       await client.query("set local statement_timeout = '0'");
-      return await auth.handler(request);
+      return await dispatchAuthHandler(request, transport);
     } catch (error) {
       releaseError = error instanceof Error ? error : new Error("Credential lock failed");
       throw error;
@@ -515,6 +841,8 @@ export function createAlphaNetAuthRuntime(
     auth,
     baseUrl: config.baseUrl,
     googleEnabled: Boolean(config.google),
+    remoteMcpOAuthEnabled: Boolean(remoteMcpOAuth),
+    remoteMcpOAuthJwksPath: remoteMcpOAuth?.jwksPath,
     async checkReady(): Promise<void> {
       const result = await pool.query<{ ready: boolean }>(
         `select
@@ -536,10 +864,16 @@ export function createAlphaNetAuthRuntime(
       if (result.rows[0]?.ready !== true) {
         throw new Error("Owner authentication schema is not ready");
       }
+      if (remoteMcpOAuth) {
+        await checkRemoteMcpOAuthSchemaReady(pool);
+        await checkRemoteMcpOAuthResourceReady(pool, remoteMcpOAuth.resource);
+        await remoteMcpOAuthLockPool?.query("select 1 as ready");
+        await remoteMcpOAuth.signing.checkReady();
+      }
     },
     async close(): Promise<void> {
       await tasks.drain();
-      await Promise.allSettled([
+      const closures: Promise<unknown>[] = [
         pool.end(),
         credentialLockPool.end(),
         (async () => {
@@ -549,7 +883,9 @@ export function createAlphaNetAuthRuntime(
           }
           redis.disconnect();
         })(),
-      ]);
+      ];
+      if (remoteMcpOAuthLockPool) closures.push(remoteMcpOAuthLockPool.end());
+      await Promise.allSettled(closures);
     },
     handle,
     async getOwnerSession(headers: Headers): Promise<OwnerSession | null> {

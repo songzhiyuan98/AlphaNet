@@ -76,6 +76,27 @@ describe("parseRemoteMcpOAuthConsentQuery", () => {
     });
   });
 
+  it("reconstructs only the configured singleton resource when Provider 1.6.23 omits it", () => {
+    const query = signedConsentQuery();
+    query.delete("resource");
+    const declared = query.getAll("ba_param");
+    query.delete("ba_param");
+    for (const name of declared.filter((name) => name !== "resource")) {
+      query.append("ba_param", name);
+    }
+
+    expect(parseRemoteMcpOAuthConsentQuery(query.toString(), { resource })).toEqual({
+      clientId: "alphanet-research-client",
+      codeChallenge,
+      codeChallengeMethod: "S256",
+      canonicalScope: "research:read offline_access",
+      redirectUri: "https://client.example/callback",
+      requestedScopes: ["research:read", "offline_access"],
+      resource,
+      responseType: "code",
+    });
+  });
+
   it.each(["sig", "exp", "ba_iat", "ba_param"] as const)(
     "requires the %s signed-transport parameter",
     (name) => {

@@ -60,6 +60,25 @@ privilege reconciliation and verification in one PostgreSQL transaction; a
 stale inventory must fail without changing the privileges used by the currently
 running application.
 
+Remote MCP OAuth's immutable Resource and pre-registered public clients use a
+separate operator-controlled reconciliation step after migrations. Follow
+[`docs/operations/remote-mcp-oauth-client-provisioning.md`](../docs/operations/remote-mcp-oauth-client-provisioning.md);
+the application runtime remains read-only on the Client registry and dynamic
+registration remains disabled.
+
+Migration `000020_remote_mcp_oauth_lifecycle_maintenance_v1` adds four
+closed-inventory `SECURITY DEFINER` Worker entry points for bounded OAuth
+lifecycle maintenance and observation. The runtime role can execute those
+functions but has no direct access to either the immutable reconciliation ledger
+or the identifier-only bootstrap queue. A Grant trigger owns queue admission and
+terminal removal; successful coherent reconciliation removes the marker in the
+same transaction as its ledger record. Candidate discovery therefore never
+anti-joins the historical active-Grant population. Envelope expiry uses the
+existing live-expiry partial index, terminal orphan retention uses a separate
+partial index, and Provider family cleanup is indexed by Grant reference. Keep
+the function signatures and both closed tables in the AWS ACL inventory; a stale
+inventory must continue to fail the release gate.
+
 CI exercises legacy explicit ACLs and inbound/outbound memberships against a
 disposable PostgreSQL 17 database with
 `db/scripts/aws-test-runtime-acl-reconciliation.sh`. The script is destructive,

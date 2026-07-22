@@ -9,11 +9,11 @@ and replica counts all scale in place.
 The design keeps the product boundary intact: AlphaNet is an Agent-first
 investment research social network. Web, REST, Worker, and the currently
 non-public Remote MCP service use the same application and data model. Its
-private fixed 16-tool surface is complete. `mcp_runtime_enabled` can exercise
-the authenticated VPC path while `mcp_public_enabled` stays false until that
-interface is ready to be a supported product entry point: live Remote MCP
-OAuth issuance and client interoperability gates must still pass. The public
-MCP/OAuth edge remains deliberately disabled and is not deployed.
+private fixed 16-tool surface is complete. Owner consent, the live API OAuth
+server, the authenticated MCP runtime, and the public MCP edge have separate
+default-off deployment gates. This permits staged private verification without
+implicitly promoting another surface. The examples, including production,
+keep all four gates false; the public MCP edge remains deliberately disabled.
 
 ## Architecture
 
@@ -49,8 +49,9 @@ API / MCP ---------- ElastiCache Valkey (TLS, AUTH, cluster mode disabled)
   CloudFront reaches a dedicated `alb_origin_domain_name` using a valid
   us-west-2 ACM certificate. A generated origin header is required by every
   forwarding rule; the default response is `403`.
-- `/api/*`, `/v1/*`, and the exact `/health/ready` route go to API. Everything
-  else, including Web `/health`, routes to Web. `/mcp`, `/mcp/*`, and the
+- `/api/*`, `/v1/*`, the exact `/health/ready` route, and the issuer-relative
+  RFC 8414 path `/.well-known/oauth-authorization-server/api/auth` go to API.
+  Everything else, including Web `/health`, routes to Web. `/mcp`, `/mcp/*`, and the
   standard `/.well-known/oauth-protected-resource/mcp` discovery route are
   reserved for MCP. They forward only when `mcp_public_enabled=true`; while
   false, the same higher-priority rule returns `404` instead of allowing the
@@ -63,6 +64,14 @@ API / MCP ---------- ElastiCache Valkey (TLS, AUTH, cluster mode disabled)
   current/previous client certificate fingerprints, and then verifies the
   short-lived request-bound ActorContext assertion. MCP receives no database
   credential and cannot reach PostgreSQL.
+- `mcp_oauth_owner_consent_enabled` controls only the API/Web consent flow.
+  `mcp_oauth_server_enabled` is a distinct API gate and requires consent plus a
+  fixed custom domain and the exact `/api/auth` issuer and `/api/auth/jwks`
+  endpoint. Consent itself also requires that fixed domain because the MCP
+  resource becomes immutable as soon as the first flow is provisioned. Neither
+  gate enables the MCP runtime or edge. API receives OAuth URLs and secret
+  references only for the enabled phase; no OAuth key is embedded in a task
+  definition, Terraform plan, or state.
 - The same five immutable ECR repositories serve staging and production. A
   release is promoted by digest; it is never copied into an environment-specific
   repository or rebuilt between environments. Untagged upload artifacts expire
@@ -303,12 +312,15 @@ The resulting Secret JSON contains:
 - independent migration/runtime database passwords;
 - Better Auth, SSR signing, Agent API pepper, PendingAction encryption, and
   Community cursor keys;
+- independent OAuth authorization-binding, consent-continuation, Provider token
+  storage, and JWK-at-rest encryption keys;
 - a private Remote MCP CA, server/client identities, pinned client fingerprint,
-  shared short-lived ActorContext signing key, and independent replay/JTI
-  digest keys;
+  shared short-lived ActorContext signing key, independent replay digest key,
+  and the OAuth issuer/MCP-verifier shared JTI digest key;
 - Resend and optional Google OAuth credentials.
 
-The helper builds the initial Remote MCP PKI entirely in process and writes
+The helper builds the initial Remote MCP PKI and all five independent OAuth key
+domains entirely in process and writes
 only the leaf identities and trust bundles to Secrets Manager; the CA signing
 key is never persisted. The API server certificate contains the exact Cloud Map
 DNS output as its SAN. A coordinated rotation replaces CA, both leaf
@@ -320,10 +332,24 @@ The RDS regional CA bundle is baked into the migrate and Node images. PostgreSQL
 jobs use `PGSSLMODE=verify-full` plus the bundled CA; the URL itself must retain
 `sslmode=verify-full` because `PGSSLMODE` does not configure the Node driver.
 
-The helper is deliberately marked `--initial` and fails closed if the Secret has
-any existing version, including `AWSCURRENT`; it cannot be used to overwrite or
-rotate live credentials. Use a separate coordinated rotation runbook that keeps
-old key rings/readers available until every task is updated.
+The `--initial` mode fails closed if the Secret has any existing version. For an
+environment seeded before these OAuth fields existed, use the bounded
+augmentation mode:
+
+```bash
+./scripts/seed-application-secret.sh --augment-mcp-oauth \
+  "$(./scripts/terraform.sh output -raw application_secret_arn)" \
+  us-west-2
+```
+
+Augmentation reads the existing JSON only into process memory, generates only
+independent random OAuth material, and writes a candidate through stdin as
+`AWSPENDING`. It preserves every existing key and value. It refuses a concurrent
+rotation, refuses to replace any OAuth field already present, and promotes the
+candidate with an `AWSCURRENT` compare-and-swap; a concurrent update therefore
+leaves the current Secret untouched. If all fields already exist, it exits
+without creating a version. This is not a rotation command. Coordinated rotation
+must keep old key rings/readers available until every task is updated.
 
 ## 6. Bootstrap and verify database identities
 
@@ -357,6 +383,43 @@ Bootstrap and migrate default to a 30-minute deadline; runtime-smoke defaults to
 `ALPHANET_JOB_TIMEOUT_SECONDS` when a reviewed migration needs a different
 bound. Timeout, SIGINT, and SIGTERM request `StopTask`, wait a bounded interval
 for lock-releasing shutdown, and print the task ARN plus final observed result.
+
+Remote MCP OAuth client provisioning is a separate, operator-only database
+job. `mcp_oauth_provisioning_enabled` defaults to `false`; enabling it creates
+an exact `oauth-provision` task, a versionless dedicated secret, and a trusted
+Step Functions launcher, but does not run a task. The task has no ECS Service or
+schedule; its manifest selectors can resolve only the unique
+`ALPHANET_OAUTH_APPROVED` stage. An authenticated operator stages an exact
+reviewed digest and starts the trusted launcher:
+
+```bash
+OAUTH_LAUNCHER="$(./scripts/terraform.sh output -raw oauth_provisioning_state_machine_arn)"
+OAUTH_SECRET="$(./scripts/terraform.sh output -raw oauth_client_provisioning_secret_arn)"
+OAUTH_SHA256="$(shasum -a 256 /secure/reviewed/oauth-clients.json | awk '{print $1}')"
+
+ALPHANET_OAUTH_MANIFEST_SHA256="$OAUTH_SHA256" \
+  ./scripts/stage-oauth-client-manifest.sh \
+    /secure/reviewed/oauth-clients.json "$OAUTH_SECRET" us-west-2
+
+./scripts/run-oauth-provisioning-job.sh \
+  "$OAUTH_LAUNCHER" "$OAUTH_SECRET" "$OAUTH_SHA256" us-west-2
+```
+
+The launcher requires the SHA-256-addressed version to carry the unique
+`ALPHANET_OAUTH_APPROVED` stage, then starts only the exact Terraform-managed
+state machine and waits for its result. The state machine fixes the task
+revision, image, command, roles, private networking, and secret selectors; it
+passes only the expected non-secret digest so a stage change during launch
+fails closed. The operator has no `ecs:RunTask`, task-registration, or
+`iam:PassRole` authority, and the GitHub deploy role cannot invoke this path. See the
+[Remote MCP OAuth provisioning runbook](../../docs/operations/remote-mcp-oauth-client-provisioning.md)
+for manifest review, IAM, disable-all, and rollback procedures.
+
+The dedicated path is isolated from routine deployment controls, but the
+protected deploy environment remains part of the production trusted computing
+base: it intentionally executes reviewed forward migrations as the schema
+owner. Branch protection, environment approval, and release-artifact review
+must therefore be enforced with the same care as operator provisioning.
 
 The roles are intentionally separate:
 
@@ -407,6 +470,10 @@ Wait for all target groups and the Worker process to stabilize. Verify at least:
   valid empty list while still validating the response schema;
 - public API `GET /v1/public/content?scope=global&sort=latest&limit=1`, likewise
   accepting an empty page only when the complete public response schema holds;
+- when `mcp_oauth_server_enabled=true`, public API
+  `GET /.well-known/oauth-authorization-server/api/auth`, requiring the exact
+  configured `/api/auth` issuer, authorize/token/JWKS/revocation endpoints, and
+  no advertised dynamic-registration or introspection endpoint;
 - API and MCP private readiness;
 - one controlled staging write/read;
 - Worker outbox progress;
@@ -486,6 +553,11 @@ relies on service readiness, public reads, and exact digest verification.
   receives the mTLS client key. The independent access-token JTI digest key is
   shared by the API OAuth issuer and MCP verifier so both bind the same token
   identifier. MCP never receives `DATABASE_URL`.
+- The API OAuth server receives four independent server/consent key references
+  only across its enabled gates. The access-token JTI digest is a fifth,
+  independent value shared with MCP only when the corresponding issuer/verifier
+  runtime is enabled. Secret JSON values never enter Terraform state or ECS
+  plaintext environment arrays.
 - Secrets Manager contains three secret containers: RDS manages the Aurora
   administrator secret, CloudFormation creates the Valkey AUTH secret, and the
   seed helper writes one multi-key application JSON secret. Application values
@@ -505,6 +577,11 @@ relies on service readiness, public reads, and exact digest verification.
   CloudFront 5xx alarm covers origin DNS/TLS/502 failures that ALB target metrics
   cannot see; regional alarms separately cover ALB-generated and target 5xx,
   unhealthy targets, missing Worker tasks, Aurora, and primary Valkey pressure.
+- Enabling the API OAuth server (independent of MCP runtime/public exposure)
+  also creates lifecycle backlog, failure, and missing-30-second-heartbeat
+  metrics and alarms from the Worker's aggregate-only maintenance logs. The
+  threshold decision comes from the same application capacity policy as OAuth
+  authorize admission; Terraform does not duplicate the numeric ceiling.
 - The only high-severity IaC scanner exceptions are attached to their exact
   resources and expire on 2026-10-31: CloudFront requires an internet-facing
   custom-origin ALB, and Fargate requires outbound TCP 443 for ECR/AWS and the

@@ -235,6 +235,41 @@ async function start(): Promise<void> {
       redis.check(),
       notificationService.checkReady(),
     ]);
+    const remoteMcpOAuth = environment.MCP_OAUTH_SERVER_ENABLED
+      ? (() => {
+          const authorizationBindingKey =
+            environment.MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64;
+          const continuationKey = environment.MCP_OAUTH_CONTINUATION_KEY_BASE64;
+          const issuer = environment.MCP_OAUTH_ISSUER;
+          const jwksUrl = environment.MCP_OAUTH_JWKS_URI;
+          const jwkEncryptionKey = environment.MCP_OAUTH_JWK_ENCRYPTION_KEY_BASE64;
+          const resource = environment.MCP_OAUTH_RESOURCE;
+          const tokenJtiDigestKey = environment.MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64;
+          const tokenStorageKey = environment.MCP_OAUTH_TOKEN_STORAGE_KEY_BASE64;
+          if (
+            !authorizationBindingKey ||
+            !continuationKey ||
+            !issuer ||
+            !jwksUrl ||
+            !jwkEncryptionKey ||
+            !resource ||
+            !tokenJtiDigestKey ||
+            !tokenStorageKey
+          ) {
+            throw new Error("Remote MCP OAuth server configuration is incomplete");
+          }
+          return {
+            authorizationBindingKey,
+            continuationKey,
+            issuer,
+            jwkEncryptionKey,
+            jwksUrl,
+            resource,
+            tokenJtiDigestKey,
+            tokenStorageKey,
+          };
+        })()
+      : undefined;
     authRuntime = createAlphaNetAuthRuntime(
       {
         baseUrl: environment.BETTER_AUTH_URL,
@@ -251,6 +286,7 @@ async function start(): Promise<void> {
             }
           : {}),
         redisUrl: environment.REDIS_URL,
+        ...(remoteMcpOAuth ? { remoteMcpOAuth } : {}),
         secret: environment.BETTER_AUTH_SECRET,
         secureCookies: environment.AUTH_SECURE_COOKIES,
         trustedOrigins: environment.AUTH_TRUSTED_ORIGINS,

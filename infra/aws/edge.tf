@@ -82,7 +82,12 @@ resource "aws_lb_listener_rule" "api" {
 
   condition {
     path_pattern {
-      values = ["/api/*", "/v1/*", "/health/ready"]
+      values = [
+        "/.well-known/oauth-authorization-server/api/auth",
+        "/api/*",
+        "/v1/*",
+        "/health/ready",
+      ]
     }
   }
 
@@ -131,8 +136,18 @@ resource "aws_lb_listener_rule" "mcp" {
 
   lifecycle {
     precondition {
-      condition     = !var.mcp_public_enabled || var.domain_name != ""
-      error_message = "mcp_public_enabled requires a fixed custom domain_name; the generated CloudFront hostname must never become the immutable OAuth resource audience."
+      condition = (
+        !var.mcp_public_enabled ||
+        (
+          var.mcp_runtime_enabled &&
+          var.mcp_oauth_server_enabled &&
+          var.mcp_oauth_owner_consent_enabled &&
+          var.domain_name != "" &&
+          var.mcp_oauth_issuer == "${local.public_origin}/api/auth" &&
+          var.mcp_oauth_jwks_uri == "${local.public_origin}/api/auth/jwks"
+        )
+      )
+      error_message = "mcp_public_enabled requires explicit runtime, OAuth server, Owner consent, a fixed custom domain, and the exact public /api/auth issuer and /api/auth/jwks URI."
     }
   }
 }
@@ -206,6 +221,44 @@ resource "aws_wafv2_web_acl" "edge" {
     visibility_config {
       cloudwatch_metrics_enabled = true
       metric_name                = "${local.name}-known-bad"
+      sampled_requests_enabled   = false
+    }
+  }
+
+  rule {
+    name     = "oauth-jwks-per-ip-rate-limit"
+    priority = 25
+
+    action {
+      block {}
+    }
+
+    statement {
+      rate_based_statement {
+        aggregate_key_type = "IP"
+        limit              = var.waf_oauth_jwks_rate_limit
+
+        scope_down_statement {
+          byte_match_statement {
+            positional_constraint = "EXACTLY"
+            search_string         = "/api/auth/jwks"
+
+            field_to_match {
+              uri_path {}
+            }
+
+            text_transformation {
+              priority = 0
+              type     = "NONE"
+            }
+          }
+        }
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "${local.name}-oauth-jwks-rate-limit"
       sampled_requests_enabled   = false
     }
   }
@@ -308,6 +361,18 @@ resource "aws_cloudfront_distribution" "main" {
       event_type   = "viewer-request"
       function_arn = aws_cloudfront_function.sanitize_forwarding_headers.arn
     }
+  }
+
+  ordered_cache_behavior {
+    path_pattern           = "/api/auth/jwks"
+    target_origin_id       = "alb-${local.name}"
+    viewer_protocol_policy = "redirect-to-https"
+    allowed_methods        = ["GET", "HEAD", "OPTIONS"]
+    cached_methods         = ["GET", "HEAD"]
+    compress               = true
+
+    cache_policy_id            = data.aws_cloudfront_cache_policy.caching_optimized.id
+    response_headers_policy_id = data.aws_cloudfront_response_headers_policy.security_headers.id
   }
 
   ordered_cache_behavior {

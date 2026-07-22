@@ -300,9 +300,12 @@ describeRemoteMcpOAuthStore("Remote MCP OAuth PostgreSQL security store", () => 
     );
 
     const authorizationCode = randomUUID().replaceAll("-", "");
-    const authorizationCodeDigest = createHmac("sha256", refreshTokenStorageKey)
+    const providerAuthorizationCodeDigest = createHmac("sha256", refreshTokenStorageKey)
       .update("alphanet:authorization_code:v1\0", "utf8")
       .update(authorizationCode, "utf8")
+      .digest("base64url");
+    const authorizationCodeDigest = createHash("sha256")
+      .update(providerAuthorizationCodeDigest, "utf8")
       .digest("base64url");
     await pool.query(
       `insert into auth.verifications (identifier, value, expires_at)

@@ -22,6 +22,7 @@ import { ContentRankingSnapshotMaintenance } from "./content-ranking-snapshot-ma
 import { ContentSearchSnapshotMaintenance } from "./content-search-snapshot-maintenance.js";
 import { NotificationRetentionMaintenance } from "./notification-retention-maintenance.js";
 import { PendingActionWorker } from "./pending-action-worker.js";
+import { RemoteMcpOAuthLifecycleMaintenance } from "./remote-mcp-oauth-lifecycle-maintenance.js";
 import {
   runSupervisedWorkerLoops,
   type SupervisedWorkerLoop,
@@ -167,6 +168,10 @@ async function start(): Promise<void> {
       logger,
       sql: postgres.sql,
     });
+    const remoteMcpOAuthLifecycleMaintenance = new RemoteMcpOAuthLifecycleMaintenance({
+      logger,
+      sql: postgres.sql,
+    });
     const abortController = new AbortController();
     let nextSearchQueueObservationAt = 0;
 
@@ -234,6 +239,14 @@ async function start(): Promise<void> {
     };
 
     const loops: SupervisedWorkerLoop[] = [{ name: "core", runOnce: runCoreOnce }];
+    loops.push({
+      name: "remote-mcp-oauth-lifecycle",
+      runOnce: async () => {
+        await postgres.check();
+        const result = await remoteMcpOAuthLifecycleMaintenance.runIfDue();
+        return result.expiredEnvelopes + result.inspectedGrants + result.purgedEnvelopes;
+      },
+    });
     loops.push({
       name: "notifications",
       runOnce: async () => {
@@ -337,8 +350,7 @@ async function start(): Promise<void> {
 }
 
 start().catch((error: unknown) => {
-  process.stderr.write(
-    `${error instanceof Error ? error.message : "Worker failed to start"}\n`,
-  );
+  const errorName = error instanceof Error ? error.name : "UnknownError";
+  process.stderr.write(`Worker failed to start (${errorName})\n`);
   process.exitCode = 1;
 });

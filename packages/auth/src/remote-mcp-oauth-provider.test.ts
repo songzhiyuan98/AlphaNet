@@ -18,6 +18,7 @@ const CREDENTIAL_ID = "30000000-0000-4000-8000-000000000003";
 const OWNER_SESSION_ID = "40000000-0000-4000-8000-000000000004";
 const TOKEN_JTI_DIGEST = "A".repeat(43);
 const CODE_CHALLENGE = "abcdefghijklmnopqrstuvwxyz0123456789_-ABCDE";
+const CONTINUATION_HANDLE = "consent-continuation-v1";
 
 function fakeEs256Token(payload: Record<string, unknown>): string {
   return [
@@ -27,6 +28,42 @@ function fakeEs256Token(payload: Record<string, unknown>): string {
     Buffer.from(JSON.stringify(payload)).toString("base64url"),
     Buffer.alloc(64, 0x5a).toString("base64url"),
   ].join(".");
+}
+
+function successfulAccessToken(): string {
+  return fakeEs256Token({
+    aud: "https://mcp.alphanet.example/mcp",
+    azp: "mcp-client-v1",
+    credential_id: CREDENTIAL_ID,
+    exp: 1_800,
+    grant_epoch: 7,
+    iat: 1_200,
+    iss: "https://auth.alphanet.example/api/auth",
+    jti: "50000000-0000-4000-8000-000000000005",
+    nbf: 1_200,
+    scope: "research:read offline_access",
+    sub: GRANT_ID,
+    token_jti_digest: TOKEN_JTI_DIGEST,
+  });
+}
+
+function successfulTokenResponse(accessToken = successfulAccessToken()): Response {
+  return Response.json(
+    {
+      access_token: accessToken,
+      expires_at: 1_800,
+      expires_in: 600,
+      refresh_token: `aln_rt_v1_${"R".repeat(32)}`,
+      scope: "offline_access research:read",
+      token_type: "Bearer",
+    },
+    {
+      headers: {
+        "Cache-Control": "no-store",
+        Pragma: "no-cache",
+      },
+    },
+  );
 }
 
 function isUnknownRecord(value: unknown): value is Record<string, unknown> {
@@ -80,6 +117,7 @@ function streamingTokenRequest(chunks: readonly Uint8Array[]): Request {
 
 function securityHooks(): AlphaNetRemoteMcpOAuthSecurityHooks {
   return {
+    admitAuthorizationRequest: () => Promise.resolve({ allowed: true }),
     activateAuthorizationGrant: () => Promise.resolve(),
     compensateFailedAuthorizationGrantExchange: () => Promise.resolve(),
     executeDomainRevocationTransaction: () =>
@@ -188,6 +226,10 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
             scopes: string[];
             user: { id: string };
           }) => Promise<Record<string, unknown>>;
+          postLogin?: {
+            page: string;
+            shouldRedirect(input: unknown): Promise<boolean>;
+          };
           storeTokens?: {
             hash(token: string, type: string): Promise<string> | string;
           };
@@ -216,10 +258,13 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
       allowUnauthenticatedClientRegistration: false,
       codeExpiresIn: REMOTE_MCP_AUTHORIZATION_CODE_TTL_SECONDS,
       grantTypes: ["authorization_code", "refresh_token"],
+      rateLimit: { authorize: false },
       refreshTokenExpiresIn: REMOTE_MCP_REFRESH_TOKEN_TTL_SECONDS,
       scopes: [...REMOTE_MCP_OAUTH_SCOPES],
       validAudiences: ["https://mcp.alphanet.example/mcp"],
     });
+    expect(providerOptions?.postLogin?.page).toBe("/oauth/select-agent");
+    await expect(providerOptions?.postLogin?.shouldRedirect({})).resolves.toBe(true);
     expect(providerOptions?.storeTokens).toBeDefined();
     const refreshDigest = await Promise.resolve(
       providerOptions?.storeTokens?.hash("secret", "refresh_token"),
@@ -237,7 +282,7 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
         scopes: ["research:read", "offline_access"],
         user: { id: AUTH_USER_ID },
       }),
-    ).resolves.toEqual({});
+    ).rejects.toThrow("token response authority is unavailable");
   });
 
   it("removes native introspection and its advertised metadata from the live boundary", async () => {
@@ -283,6 +328,14 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
   it("blocks direct authorize handling and persists the one-shot envelope first", async () => {
     const events: string[] = [];
     const hooks = securityHooks();
+    hooks.admitAuthorizationRequest = (input) => {
+      expect(input).toEqual({
+        clientId: "mcp-client-v1",
+        clientIp: "2001:db8::10",
+      });
+      events.push("authorize:admitted");
+      return Promise.resolve({ allowed: true });
+    };
     hooks.persistAuthorizationRequestEnvelope = (authorization) => {
       expect(authorization).toMatchObject({
         clientId: "mcp-client-v1",
@@ -326,25 +379,144 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
         scope: "offline_access research:read",
         state: "state-high-entropy-value",
       }).toString();
-      return new Request(url);
+      return new Request(url, {
+        headers: { "x-alphanet-client-ip": "2001:db8::10" },
+      });
     };
 
     expect((await providerHandler(authorizeRequest())).status).toBe(503);
     expect(events).toEqual([]);
     const response = await live.wrapProviderHandler(providerHandler)({
       authorizationHeaders: [],
+      continuationHeaders: [],
       request: authorizeRequest(),
     });
     expect(response.status).toBe(200);
-    expect(events).toEqual(["envelope:persisted", "provider"]);
+    expect(events).toEqual(["authorize:admitted", "envelope:persisted", "provider"]);
+  });
+
+  it("rate limits authorize before persistence and fails closed when admission is unavailable", async () => {
+    const authorizeUrl = new URL(
+      "https://auth.alphanet.example/api/auth/oauth2/authorize",
+    );
+    authorizeUrl.search = new URLSearchParams({
+      client_id: "mcp-client-v1",
+      code_challenge: CODE_CHALLENGE,
+      code_challenge_method: "S256",
+      redirect_uri: "https://client.example/oauth/callback",
+      resource: "https://mcp.alphanet.example/mcp",
+      response_type: "code",
+      scope: "research:read",
+    }).toString();
+    const authorizeRequest = () =>
+      new Request(authorizeUrl, {
+        headers: { "x-alphanet-client-ip": "203.0.113.40" },
+      });
+
+    for (const unavailable of [false, true]) {
+      let persistenceCalls = 0;
+      let providerCalls = 0;
+      const hooks = securityHooks();
+      hooks.admitAuthorizationRequest = unavailable
+        ? () => Promise.reject(new Error("Redis unavailable"))
+        : () => Promise.resolve({ allowed: false, retryAfterSeconds: 37 });
+      hooks.persistAuthorizationRequestEnvelope = () => {
+        persistenceCalls += 1;
+        return Promise.resolve();
+      };
+      const live = createAlphaNetRemoteMcpOAuthLiveBoundary({
+        consentPage: "/oauth/consent",
+        issuer: "https://auth.alphanet.example/api/auth",
+        jwksUrl: "https://keys.alphanet.example/remote-mcp/jwks.json",
+        loginPage: "/login",
+        resource: "https://mcp.alphanet.example/mcp",
+        security: hooks,
+        tokenStorageKey: Buffer.alloc(32, 0x77),
+      });
+      const handle = live.wrapProviderHandler(() => {
+        providerCalls += 1;
+        return Promise.resolve(new Response("must not run"));
+      });
+      const execution = handle({
+        authorizationHeaders: [],
+        continuationHeaders: [],
+        request: authorizeRequest(),
+      });
+
+      if (unavailable) {
+        await expect(execution).rejects.toThrow("Redis unavailable");
+      } else {
+        const response = await execution;
+        expect(response.status).toBe(429);
+        expect(response.headers.get("retry-after")).toBe("37");
+        await expect(response.json()).resolves.toMatchObject({
+          error: "temporarily_unavailable",
+        });
+      }
+      expect(persistenceCalls).toBe(0);
+      expect(providerCalls).toBe(0);
+    }
+  });
+
+  it("requires one exact continuation header on continue and consent requests", async () => {
+    const live = createAlphaNetRemoteMcpOAuthLiveBoundary({
+      consentPage: "/oauth/consent",
+      issuer: "https://auth.alphanet.example/api/auth",
+      jwksUrl: "https://keys.alphanet.example/remote-mcp/jwks.json",
+      loginPage: "/login",
+      resource: "https://mcp.alphanet.example/mcp",
+      security: securityHooks(),
+      tokenStorageKey: Buffer.alloc(32, 0x77),
+    });
+    let providerCalls = 0;
+    const handle = live.wrapProviderHandler(() => {
+      providerCalls += 1;
+      return Promise.resolve(new Response("continued"));
+    });
+
+    for (const path of ["/oauth2/continue", "/oauth2/consent"]) {
+      const url = `https://auth.alphanet.example/api/auth${path}`;
+      await expect(
+        handle({
+          authorizationHeaders: [],
+          continuationHeaders: [],
+          request: new Request(url, { method: "POST" }),
+        }),
+      ).rejects.toThrow("continuation header is required");
+
+      await expect(
+        handle({
+          authorizationHeaders: [],
+          continuationHeaders: [CONTINUATION_HANDLE, "second-continuation"],
+          request: new Request(url, {
+            headers: { "X-AlphaNet-OAuth-Continuation": CONTINUATION_HANDLE },
+            method: "POST",
+          }),
+        }),
+      ).rejects.toThrow("continuation header must not be repeated");
+
+      await expect(
+        handle({
+          authorizationHeaders: [],
+          continuationHeaders: ["raw-continuation"],
+          request: new Request(url, {
+            headers: { "X-AlphaNet-OAuth-Continuation": "fetch-continuation" },
+            method: "POST",
+          }),
+        }),
+      ).rejects.toThrow("raw continuation headers are unavailable");
+    }
+    expect(providerCalls).toBe(0);
   });
 
   it("claims consent once per request and leaves failed pre-token Grants pending", async () => {
     const phases: string[] = [];
+    const continuationHandles: Array<string | undefined> = [];
     const compensations: unknown[] = [];
     const hooks = securityHooks();
-    hooks.postLogin.resolveGrantId = (_context, phase) => {
+    hooks.postLogin.resolveGrantId = (_context, phase, continuationHandle) => {
       phases.push(phase);
+      continuationHandles.push(continuationHandle);
       return Promise.resolve(GRANT_ID);
     };
     hooks.compensateFailedAuthorizationGrantExchange = (input) => {
@@ -363,7 +535,10 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
     const provider = live.plugins.find((plugin) => plugin.id === "oauth-provider");
     const postLogin = (
       provider?.options as {
-        postLogin: { consentReferenceId(input: unknown): Promise<string> };
+        postLogin: {
+          consentReferenceId(input: unknown): Promise<string>;
+          shouldRedirect(input: unknown): Promise<boolean>;
+        };
       }
     ).postLogin;
     const consentContext = {
@@ -374,10 +549,13 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
     const successfulConsent = await live.wrapProviderHandler(async () => {
       await expect(postLogin.consentReferenceId(consentContext)).resolves.toBe(GRANT_ID);
       await expect(postLogin.consentReferenceId(consentContext)).resolves.toBe(GRANT_ID);
+      await expect(postLogin.shouldRedirect(consentContext)).resolves.toBe(false);
       return new Response("consent-complete");
     })({
       authorizationHeaders: [],
+      continuationHeaders: [CONTINUATION_HANDLE],
       request: new Request("https://auth.alphanet.example/api/auth/oauth2/consent", {
+        headers: { "X-AlphaNet-OAuth-Continuation": CONTINUATION_HANDLE },
         method: "POST",
       }),
     });
@@ -391,7 +569,9 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
       return new Response(null, { status: 500 });
     })({
       authorizationHeaders: [],
+      continuationHeaders: [CONTINUATION_HANDLE],
       request: new Request("https://auth.alphanet.example/api/auth/oauth2/consent", {
+        headers: { "X-AlphaNet-OAuth-Continuation": CONTINUATION_HANDLE },
         method: "POST",
       }),
     });
@@ -408,7 +588,9 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
         throw consentFailure;
       })({
         authorizationHeaders: [],
+        continuationHeaders: [CONTINUATION_HANDLE],
         request: new Request("https://auth.alphanet.example/api/auth/oauth2/consent", {
+          headers: { "X-AlphaNet-OAuth-Continuation": CONTINUATION_HANDLE },
           method: "POST",
         }),
       }),
@@ -436,10 +618,38 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
       }
       await expect(postLogin.consentReferenceId(consentContext)).resolves.toBe(GRANT_ID);
       return new Response("authorize-complete");
-    })({ authorizationHeaders: [], request: new Request(authorizeUrl) });
+    })({
+      authorizationHeaders: [],
+      continuationHeaders: [],
+      request: new Request(authorizeUrl, {
+        headers: { "x-alphanet-client-ip": "2001:db8::11" },
+      }),
+    });
     expect(authorizeResponse.status).toBe(200);
     expect(phases).toEqual(["claim", "claim", "claim", "inspect"]);
+    expect(continuationHandles).toEqual([
+      CONTINUATION_HANDLE,
+      CONTINUATION_HANDLE,
+      CONTINUATION_HANDLE,
+      undefined,
+    ]);
     expect(compensations).toEqual([]);
+
+    const continueResponse = await live.wrapProviderHandler(async () => {
+      await expect(postLogin.shouldRedirect(consentContext)).resolves.toBe(false);
+      await expect(postLogin.consentReferenceId(consentContext)).resolves.toBe(GRANT_ID);
+      return new Response("continue-complete");
+    })({
+      authorizationHeaders: [],
+      continuationHeaders: [CONTINUATION_HANDLE],
+      request: new Request("https://auth.alphanet.example/api/auth/oauth2/continue", {
+        headers: { "X-AlphaNet-OAuth-Continuation": CONTINUATION_HANDLE },
+        method: "POST",
+      }),
+    });
+    expect(continueResponse.status).toBe(200);
+    expect(phases).toEqual(["claim", "claim", "claim", "inspect", "inspect"]);
+    expect(continuationHandles.at(-1)).toBe(CONTINUATION_HANDLE);
   });
 
   it("does not infer pre-token authority from Provider redirect representations", async () => {
@@ -471,6 +681,7 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
     };
     const consentRequest = () =>
       new Request("https://auth.alphanet.example/api/auth/oauth2/consent", {
+        headers: { "X-AlphaNet-OAuth-Continuation": CONTINUATION_HANDLE },
         method: "POST",
       });
     const runRedirect = (location: string) =>
@@ -480,7 +691,11 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
           headers: { Location: location },
           status: 302,
         });
-      })({ authorizationHeaders: [], request: consentRequest() });
+      })({
+        authorizationHeaders: [],
+        continuationHeaders: [CONTINUATION_HANDLE],
+        request: consentRequest(),
+      });
 
     const success = new URL("https://client.example/oauth/callback");
     success.searchParams.set("code", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6");
@@ -549,6 +764,14 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
       tokenStorageKey: Buffer.alloc(32, 0x77),
     });
     const boundary = live.plugins[0];
+    const provider = live.plugins.find((plugin) => plugin.id === "oauth-provider");
+    const providerOptions = provider?.options as {
+      customTokenResponseFields(input: {
+        grantType: "refresh_token";
+        scopes: string[];
+        user: { id: string };
+      }): Promise<Record<string, unknown>> | Record<string, unknown>;
+    };
     let boundedProviderRequest: Request | undefined;
     const providerHandler = async (request: Request): Promise<Response> => {
       const guard = await boundary.onRequest?.(request, {} as never);
@@ -557,9 +780,16 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
       }
       boundedProviderRequest = request;
       events.push("provider:start");
-      await Promise.resolve();
+      await providerOptions.customTokenResponseFields({
+        grantType: "refresh_token",
+        scopes: ["offline_access", "research:read"],
+        user: { id: AUTH_USER_ID },
+      });
       events.push("provider:complete");
-      return new Response("provider-complete");
+      const response = successfulTokenResponse();
+      response.headers.delete("Cache-Control");
+      response.headers.delete("Pragma");
+      return response;
     };
     const tokenRequest = () =>
       new Request("https://auth.alphanet.example/api/auth/oauth2/token", {
@@ -580,10 +810,17 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
     const handle = live.wrapProviderHandler(providerHandler);
     const response = await handle({
       authorizationHeaders: [],
+      continuationHeaders: [],
       request: admittedRequest,
     });
     expect(response.status).toBe(200);
-    await expect(response.text()).resolves.toBe("provider-complete");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("pragma")).toBe("no-cache");
+    await expect(response.json()).resolves.toMatchObject({
+      expires_in: 600,
+      scope: "offline_access research:read",
+      token_type: "Bearer",
+    });
     expect(events).toEqual([
       "lock:enter",
       "provider:start",
@@ -669,7 +906,7 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
         return guard.response;
       }
       await providerOptions.customTokenResponseFields(authorizationCodeTokenFields());
-      await jwtOptions.sign({
+      const accessToken = await jwtOptions.sign({
         aud: "https://mcp.alphanet.example/mcp",
         azp: "mcp-client-v1",
         exp: 1_800,
@@ -681,11 +918,12 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
         sub: AUTH_USER_ID,
       });
       events.push("provider:response");
-      return new Response("token-complete");
+      return successfulTokenResponse(accessToken);
     };
 
     const response = await live.wrapProviderHandler(providerHandler)({
       authorizationHeaders: [],
+      continuationHeaders: [],
       request: authorizationCodeTokenRequest(),
     });
 
@@ -766,6 +1004,7 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
     await expect(
       live.wrapProviderHandler(providerHandler)({
         authorizationHeaders: [],
+        continuationHeaders: [],
         request: authorizationCodeTokenRequest(),
       }),
     ).rejects.toBe(providerFailure);
@@ -801,6 +1040,7 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
       return Promise.resolve(new Response(null, { status: 400 }));
     })({
       authorizationHeaders: [],
+      continuationHeaders: [],
       request: authorizationCodeTokenRequest(),
     });
 
@@ -851,9 +1091,10 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
         if (guard && "response" in guard) return guard.response;
         await providerOptions.customTokenResponseFields(authorizationCodeTokenFields());
         events.push("provider:success");
-        return new Response("token-complete");
+        return successfulTokenResponse();
       })({
         authorizationHeaders: [],
+        continuationHeaders: [],
         request: authorizationCodeTokenRequest(),
       }),
     ).rejects.toBe(lockFailure);
@@ -905,12 +1146,64 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
 
     const response = await live.wrapProviderHandler(providerHandler)({
       authorizationHeaders: [],
+      continuationHeaders: [],
       request: authorizationCodeTokenRequest(),
     });
     expect(response.status).toBe(500);
     expect(events).toEqual([
       "grant:activate",
       "provider:error-response",
+      "grant:compensate",
+    ]);
+  });
+
+  it("compensates authority when Provider returns a malformed 2xx token response", async () => {
+    const events: string[] = [];
+    const hooks = securityHooks();
+    hooks.activateAuthorizationGrant = () => {
+      events.push("grant:activate");
+      return Promise.resolve();
+    };
+    hooks.compensateFailedAuthorizationGrantExchange = () => {
+      events.push("grant:compensate");
+      return Promise.resolve();
+    };
+    const live = createAlphaNetRemoteMcpOAuthLiveBoundary({
+      consentPage: "/oauth/consent",
+      issuer: "https://auth.alphanet.example/api/auth",
+      jwksUrl: "https://keys.alphanet.example/remote-mcp/jwks.json",
+      loginPage: "/login",
+      resource: "https://mcp.alphanet.example/mcp",
+      security: hooks,
+      tokenStorageKey: Buffer.alloc(32, 0x77),
+    });
+    const boundary = live.plugins[0];
+    const provider = live.plugins.find((plugin) => plugin.id === "oauth-provider");
+    const providerOptions = provider?.options as {
+      customTokenResponseFields(
+        input: ReturnType<typeof authorizationCodeTokenFields>,
+      ): Promise<Record<string, unknown>> | Record<string, unknown>;
+    };
+
+    await expect(
+      live.wrapProviderHandler(async (request) => {
+        const guard = await boundary.onRequest?.(request, {} as never);
+        if (guard && "response" in guard) return guard.response;
+        await providerOptions.customTokenResponseFields(authorizationCodeTokenFields());
+        events.push("provider:malformed-success");
+        return new Response("not-a-token-response", {
+          headers: { "Content-Type": "text/plain" },
+          status: 200,
+        });
+      })({
+        authorizationHeaders: [],
+        continuationHeaders: [],
+        request: authorizationCodeTokenRequest(),
+      }),
+    ).rejects.toThrow("token success response is invalid");
+    expect(events).toEqual([
+      "grant:activate",
+      "provider:malformed-success",
       "grant:compensate",
     ]);
   });
@@ -942,7 +1235,7 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
     const response = await live.wrapProviderHandler(() => {
       providerCalls += 1;
       return Promise.resolve(new Response("provider must not run"));
-    })({ authorizationHeaders: [], request });
+    })({ authorizationHeaders: [], continuationHeaders: [], request });
 
     expect(response.status).toBe(413);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
@@ -992,6 +1285,7 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
       return Promise.resolve(new Response("provider must not run"));
     })({
       authorizationHeaders: ["Basic first", "Basic second"],
+      continuationHeaders: [],
       request,
     });
 

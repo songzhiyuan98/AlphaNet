@@ -339,7 +339,8 @@ resource "aws_cloudwatch_metric_alarm" "valkey_memory" {
 }
 
 locals {
-  search_metric_namespace = "AlphaNet/${title(var.environment)}/Search"
+  remote_mcp_oauth_metric_namespace = "AlphaNet/${title(var.environment)}/RemoteMcpOAuth"
+  search_metric_namespace           = "AlphaNet/${title(var.environment)}/Search"
   search_queue_log_metrics = {
     dead_lettered_count = { metric_name = "IndexDeadLetteredCount", unit = "Count" }
     expired_lease_count = { metric_name = "IndexExpiredLeaseCount", unit = "Count" }
@@ -350,6 +351,128 @@ locals {
     }
     ready_count = { metric_name = "IndexReadyCount", unit = "Count" }
   }
+}
+
+# OAuth lifecycle gauges exist whenever the independently gated API OAuth
+# server can create envelopes/Grants, even if MCP runtime/public exposure is
+# still off. The Worker derives threshold_exceeded from the same TypeScript
+# capacity contract used by authorize admission, so Terraform does not carry a
+# second drift-prone copy of that numeric threshold.
+resource "aws_cloudwatch_log_metric_filter" "remote_mcp_oauth_lifecycle_backlog" {
+  count = var.mcp_oauth_server_enabled ? 1 : 0
+
+  name           = "${local.name}-remote-mcp-oauth-lifecycle-backlog"
+  log_group_name = aws_cloudwatch_log_group.service["worker"].name
+  pattern        = "{ $.event = \"remote_mcp_oauth_lifecycle_maintenance\" && $.outcome = \"succeeded\" && $.backlog_count = * }"
+
+  metric_transformation {
+    name          = "LifecycleBacklogCount"
+    namespace     = local.remote_mcp_oauth_metric_namespace
+    value         = "$.backlog_count"
+    default_value = "0"
+    unit          = "Count"
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "remote_mcp_oauth_lifecycle_backlog_exceeded" {
+  count = var.mcp_oauth_server_enabled ? 1 : 0
+
+  name           = "${local.name}-remote-mcp-oauth-lifecycle-backlog-exceeded"
+  log_group_name = aws_cloudwatch_log_group.service["worker"].name
+  pattern        = "{ $.event = \"remote_mcp_oauth_lifecycle_maintenance\" && $.outcome = \"succeeded\" && $.backlog_alarm_threshold_exceeded = true }"
+
+  metric_transformation {
+    name          = "LifecycleBacklogThresholdExceeded"
+    namespace     = local.remote_mcp_oauth_metric_namespace
+    value         = "1"
+    default_value = "0"
+    unit          = "Count"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "remote_mcp_oauth_lifecycle_backlog" {
+  count = var.mcp_oauth_server_enabled ? 1 : 0
+
+  alarm_name          = "${local.name}-remote-mcp-oauth-lifecycle-backlog"
+  alarm_description   = "Remote MCP OAuth lifecycle backlog remains above the shared admission-capacity threshold"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  datapoints_to_alarm = 2
+  threshold           = 0
+  period              = 60
+  statistic           = "Sum"
+  namespace           = local.remote_mcp_oauth_metric_namespace
+  metric_name         = "LifecycleBacklogThresholdExceeded"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.operations.arn]
+  ok_actions          = [aws_sns_topic.operations.arn]
+}
+
+resource "aws_cloudwatch_log_metric_filter" "remote_mcp_oauth_lifecycle_heartbeat" {
+  count = var.mcp_oauth_server_enabled ? 1 : 0
+
+  name           = "${local.name}-remote-mcp-oauth-lifecycle-heartbeat"
+  log_group_name = aws_cloudwatch_log_group.service["worker"].name
+  pattern        = "{ $.event = \"remote_mcp_oauth_lifecycle_maintenance\" && $.outcome = \"succeeded\" }"
+
+  metric_transformation {
+    name          = "LifecycleHeartbeatCount"
+    namespace     = local.remote_mcp_oauth_metric_namespace
+    value         = "1"
+    default_value = "0"
+    unit          = "Count"
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "remote_mcp_oauth_lifecycle_failure" {
+  count = var.mcp_oauth_server_enabled ? 1 : 0
+
+  name           = "${local.name}-remote-mcp-oauth-lifecycle-failure"
+  log_group_name = aws_cloudwatch_log_group.service["worker"].name
+  pattern        = "{ $.event = \"remote_mcp_oauth_lifecycle_maintenance\" && $.outcome = \"failed\" }"
+
+  metric_transformation {
+    name          = "LifecycleFailureCount"
+    namespace     = local.remote_mcp_oauth_metric_namespace
+    value         = "1"
+    default_value = "0"
+    unit          = "Count"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "remote_mcp_oauth_lifecycle_missing" {
+  count = var.mcp_oauth_server_enabled ? 1 : 0
+
+  alarm_name          = "${local.name}-remote-mcp-oauth-lifecycle-missing"
+  alarm_description   = "Remote MCP OAuth lifecycle Worker has stopped emitting its 30-second success heartbeat"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 2
+  datapoints_to_alarm = 2
+  threshold           = 1
+  period              = 60
+  statistic           = "Sum"
+  namespace           = local.remote_mcp_oauth_metric_namespace
+  metric_name         = "LifecycleHeartbeatCount"
+  treat_missing_data  = "breaching"
+  alarm_actions       = [aws_sns_topic.operations.arn]
+  ok_actions          = [aws_sns_topic.operations.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "remote_mcp_oauth_lifecycle_failure" {
+  count = var.mcp_oauth_server_enabled ? 1 : 0
+
+  alarm_name          = "${local.name}-remote-mcp-oauth-lifecycle-failure"
+  alarm_description   = "Remote MCP OAuth lifecycle Worker reported a failed maintenance run"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  threshold           = 0
+  period              = 60
+  statistic           = "Sum"
+  namespace           = local.remote_mcp_oauth_metric_namespace
+  metric_name         = "LifecycleFailureCount"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.operations.arn]
+  ok_actions          = [aws_sns_topic.operations.arn]
 }
 
 # These filters consume the query-free structured events emitted by API and

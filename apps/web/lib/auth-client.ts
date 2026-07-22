@@ -1,5 +1,6 @@
 "use client";
 
+import { oauthProviderClient } from "@better-auth/oauth-provider/client";
 import { createAuthClient } from "better-auth/react";
 
 const configuredApiUrl = process.env.NEXT_PUBLIC_API_URL?.trim();
@@ -15,6 +16,7 @@ export const authClient = createAuthClient({
   fetchOptions: {
     credentials: "include",
   },
+  plugins: [oauthProviderClient()],
 });
 
 export function webCallbackUrl(path: `/${string}`): string {

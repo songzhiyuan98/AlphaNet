@@ -1,6 +1,6 @@
 # Remote MCP OAuth 与内部信任边界 v1
 
-> 状态：Accepted for implementation; public exposure remains disabled
+> 状态：Accepted; local live OAuth verified; public exposure remains disabled
 > 决策编号：ARCH-0015
 > 适用范围：Remote MCP OAuth、Agent Grant、MCP → API 委托与首批工具
 > 依赖：ARCH-0001、ARCH-0002、ARCH-0005、产品文档 08 与 09
@@ -98,6 +98,16 @@ confidential 方法误报给客户端。申请 `offline_access` 的 Client 还�
 `grant_types` 中包含 `refresh_token`；只支持 `authorization_code` 的 Client 不能
 获得离线授权。
 
+预注册 Client 只能由 Operator-only reconciliation 路径管理。Operator 提交经过
+review、以 SHA-256 固定精确字节的规范 JSON allowlist；事务内先锁定并验证不可变
+Resource，再原子创建、更新或禁用 AlphaNet-managed Client，且拒绝接管同名的 unmanaged
+行。清单不能表达 secret、confidential Client、跳过 Consent 或关闭 PKCE。该路径已经
+通过真实 PostgreSQL 集成测试；AWS 只提供默认关闭、无 Service／schedule 的手动一次性
+任务，并以固定 task revision 的 Step Functions 作为唯一运行入口。Operator 不持有
+`ecs:RunTask`、`ecs:RegisterTaskDefinition` 或 `iam:PassRole`；普通应用身份和 GitHub
+deploy role 都不能注册 Client。具体操作见
+[Remote MCP OAuth resource and client provisioning](../operations/remote-mcp-oauth-client-provisioning.md)。
+
 ### 3.2 RFC 8707 Resource Indicator
 
 OAuth Provider 1.6.23 的 Token endpoint 支持 `resource`，但其 Authorize query
@@ -129,10 +139,13 @@ API 在 Provider 前后增加 fail-closed guard：
 
 1. 原始 `/oauth2/authorize` 必须包含一次且仅一次与规范 MCP Resource 完全相等的
    `resource`；缺失、重复、含 fragment/query 或不匹配时拒绝。
-2. Provider 配置的 `validAudiences` 只包含该 Resource，不能签发第二种 audience。
-3. `/oauth2/token` 的 Authorization Code 与 Refresh Token 请求都必须再次提交
+2. 通过结构与语义校验后、持久化 Authorization Request Envelope 前，按 IP、Client、
+   全局的从窄到宽顺序执行专用 Redis 限流；IP 或 Client 被拒绝后不得继续消耗共享全局
+   预算。拒绝或依赖异常都 fail closed，且不得进入 Provider 或产生 Envelope。
+3. Provider 配置的 `validAudiences` 只包含该 Resource，不能签发第二种 audience。
+4. `/oauth2/token` 的 Authorization Code 与 Refresh Token 请求都必须再次提交
    完全相等的 `resource`；缺失或不匹配时在 Provider 之前拒绝。
-4. AlphaNet Grant 与 `oauth_grant` Credential 的 audience 同样只能等于该
+5. AlphaNet Grant 与 `oauth_grant` Credential 的 audience 同样只能等于该
    Resource；签发 callback 逐次验证当前 Grant。
 
 因为 V1 的 Authorize、Token、Provider audience 与 Grant 四处都只有同一个合法值，
@@ -188,11 +201,11 @@ Actor／Grant／Credential 内部标识不以明文进入浏览器响应。Bette
 Continuation 使用带随机 nonce 的版本化 AES-256-GCM 不透明封装，只保存在 URL
 fragment，并通过有界专用 header 回送；不得写入 query、Cookie 或 Web Storage。
 `/oauth/consent` 的 HTTP response 固定 `Referrer-Policy: no-referrer`，避免签名 query
-经页面资源请求进入 Referer。Owner API 不提供独立 `claim` endpoint，`claim` 只能在
-未来接线的 Provider Consent HTTP 请求内原子发生。该适配层由
-`MCP_OAUTH_OWNER_CONSENT_ENABLED` 独立控制，默认及 AWS 配置保持 `false`；Provider、
-OAuth-aware 登录恢复与 Consent claim 尚未 live assembly，因此该页面现在不代表
-可用的公开 OAuth 产品面。
+经页面资源请求进入 Referer。Owner API 不提供独立 `claim` endpoint，`claim` 只在
+Provider Consent HTTP 请求内原子发生。固定 Provider 的 live handler、OAuth-aware
+登录／post-login 恢复与 Consent claim 已完成装配，并通过本地真实 HTTP E2E 验证；
+该适配层仍由 `MCP_OAUTH_OWNER_CONSENT_ENABLED` 独立控制，默认及 AWS 配置保持
+`false`，因此这项本地证据不代表已部署或可公开使用的 OAuth 产品面。
 
 `claim` 不是 Access Token authority 边界。若 Consent claim 后 Provider 只返回重定向、
 非成功响应或抛错，而请求尚未与 Authorization Code 的 Token exchange 关联，平台不
@@ -296,6 +309,12 @@ Token endpoint 在进入 Provider 或跨副本 Refresh lock 前按实际流读�
 Access Token 显式 revocation 使用其 `jti` 的 keyed digest 和 expiry；原始 Token、
 原始 `jti` 和 Authorization header 不落库、不进日志。
 
+领域级撤销 transaction 与 Provider `/oauth2/revoke` live 入口已经装配。本地真实 HTTP
+E2E 已证明撤销 Access Token 会在同一事务中撤销 Grant、Credential 与 JTI authority、
+提高 token epoch，并清除相关 Provider Access Token／Consent；未知或无效 Token 仍按
+RFC 7009 避免形成 Token oracle。该证据不替代公网部署后的 Grant 撤销与 Refresh reuse
+runbook 演练。
+
 Active Grant 到达绝对 `expires_at` 后可进入不可逆的 `expired` 终态，保留原
 `activated_at`，由数据库写入固定原因和 `expired_at`。创建同一 Agent + Client 的
 replacement Grant 前，数据库在同一事务内清理已自然到期的 Active 行，使过期授权
@@ -386,27 +405,54 @@ Redis 的单次 jti 消费失败时 fail closed；Redis 不是 Grant 或权限�
 - 配置、Compose、Terraform/SG/Secrets；
 - 保持公网 MCP 关闭。
 
-当前 server 已把 live OAuth verifier、双层 Redis limiter、ActorContext 委托和
-固定 16 工具完整社交研究表面装配为一个由 `MCP_RUNTIME_ENABLED` 控制的私有运行切片；
+当前 server 已把 live OAuth verifier、双层 Redis limiter、ActorContext 委托和固定
+16 工具完整社交研究表面装配为一个由 `MCP_RUNTIME_ENABLED` 控制的私有运行切片；
 `MCP_PUBLIC_ENABLED` 只控制 ALB/CloudFront 暴露，不能代替运行时保护。Phase B
-五工具与 Phase C 全部 11 个扩展工具已经走同一私有 API、DTO、Policy、PendingAction 和幂等边界；OAuth 签发
-闭环和下方 Public gate 的全部证据完成前，部署配置仍必须保持公网 MCP 关闭。
-配置字段或 schema 存在不等于公网运行时已经可用。
+五工具与 Phase C 全部 11 个扩展工具已经走同一私有 API、DTO、Policy、PendingAction
+和幂等边界。
 
-当前工程还已实现 RFC 9728 Protected Resource Metadata、一次性 Authorization
-Request 安全存储、Owner-only Agent 选择和 Consent 领域服务、pending Grant／
-Credential、Authorization Code 与 Refresh 串行锁、Grant 激活、active-only JTI
-authority、失败补偿和 Owner + Client 粒度的 Refresh reuse 防护。public PKCE Client
-约束、`offline_access` 不变量、605 秒签发 horizon、当前 Client 逐次复核与双 Pool
-隔离都有单元或真实 PostgreSQL 回归证据。
+Authorization Server 的固定 Better Auth Provider live handler、OAuth-aware 登录／
+post-login／Consent claim、Authorization Code + PKCE S256、精确 Resource、Grant 激活、
+active-only JTI、ES256 签名与数据库加密的轮换 JWKS、Token 成功响应校验、领域级撤销和
+失败补偿已经装配。本地真实 HTTP E2E 已通过 Fastify 完成 metadata／JWKS、Owner 注册与
+验证、授权／选择 Agent／同意、code 兑换、Access Token claim 与撤销，并证明第 61 个
+同 IP authorize 请求在 Envelope 持久化前返回 429。public PKCE Client guard、
+`offline_access` 不变量、605 秒签发 horizon、当前 Client 逐次复核与双 Pool 隔离另有
+单元或真实 PostgreSQL 回归证据。
 
-Owner Consent 的 contracts、签名 query 结构解析、Owner API、Web 页面与 API-side
-Consent service assembly 已在独立暗发布开关后完成；默认及 AWS 仍关闭。它们仍是
-可独立验证的领域与协议原语，不等于已部署的 Authorization Server。Better Auth
-OAuth Provider 的 live HTTP handler、OAuth-aware 登录／post-login／Consent claim
-接线、生产签名密钥／JWKS runtime、领域撤销 transaction 实现和入口、真实 Host
-端到端 Authorization Code／Refresh 互操作仍未装配或验收。因此当前状态不得描述为
-真实 OAuth 已经对外可用，`MCP_PUBLIC_ENABLED` 必须保持关闭。
+预注册 Client 的 Operator-only、SHA-256 固定清单 reconciliation 与默认关闭的 AWS
+手动一次性任务也已实现；真实 PostgreSQL 集成测试覆盖原子创建／更新／禁用、不可变
+Resource、unmanaged collision 和不安全清单拒绝。它不提供 dynamic registration，
+也不会由普通部署自动执行。
+
+`000020` 又补齐了跨 Provider／领域事务的崩溃恢复。Authorize 的全局 admission ceiling
+与 Worker lifecycle capacity 使用同一个版本化常量：最多 1200 次／分钟；单 Worker
+每 30 秒为每个阶段提供 1000 行上限，即 2000 行／分钟。Worker 在 25 秒和阶段行数双重
+边界内，以 250 行 `FOR UPDATE SKIP LOCKED` 小批次公平轮询到期 Envelope、未完成 Grant
+bootstrap 与可删除 Envelope，因此一个大队列不会饿死另外两个阶段，也不会因持续满批
+形成 busy loop。
+
+新 Grant 由数据库 Trigger 写入只含标识符的 closed bootstrap queue；同步 terminal
+transition 和 Worker reconciliation 在同一事务出队。候选发现从该本地索引队列开始，
+不会每 30 秒 anti-join 全部历史 active Grant。完整的 Consent、Access Token + JTI 对、
+可选 Refresh Token 和当前 Principal／Client authority 才会写入不可变 `coherent` 记录；
+任何缺失都在同一事务中撤销 Provider token family、JTI 和 Credential，并把 Grant
+fail-closed 终结。无 Grant 引用的 denied／expired Envelope 保留七天后才批量删除；存在
+Grant 的双向审计链永不进入该清理路径。
+
+每轮先输出 capped backlog、oldest age、处理量、row/time limit 等无敏感字段结构化指标。
+OAuth Server 开启时，CloudWatch 同时监控 backlog threshold、maintenance failure 与
+30 秒 success heartbeat 缺失；这些资源不依赖 MCP runtime/public edge gate。真实
+PostgreSQL 回归覆盖幂等、批量上限、并发 `SKIP LOCKED`、四种崩溃残态、保留窗口、
+1205 行 fixture、queue 生命周期与索引清单。
+
+本地合并门还使用官方 MCP TypeScript SDK 的 `Client` 与
+`StreamableHTTPClientTransport` 跑通了 Authorization Code + PKCE → ES256/JWKS →
+公开 MCP transport → mTLS 私有 API → Redis replay 防护 → PostgreSQL authority →
+真实工具调用；测试生成独立 CA、Server 与 Client 证书，拒绝未被 pin 的 Client leaf，
+并证明撤销后下一次工具调用失败。它证明的是本地完整协议链，不等于某个具名外部
+MCP Host 或公网环境已经互操作。具名 Host 验收、公网 mTLS 信任链和生产运行演练仍未
+完成；Public MCP／OAuth edge 也尚未部署。因此 `MCP_PUBLIC_ENABLED` 必须保持关闭。
 
 ### Phase B：五工具纵向切片
 
@@ -460,6 +506,13 @@ MCP／OAuth edge 仍未部署，`MCP_PUBLIC_ENABLED` 必须保持 `false`。
 - Token、code、verifier、assertion、Authorization header 和 UGC 不进入日志；
 - 至少一个真实 MCP Host 通过合并门，三个真实 Host 通过 Public MVP 门；
 - mTLS 轮换、JWKS 轮换、Grant 撤销和 Refresh reuse runbook 已演练。
+
+当前已满足本地 Authorization Code + PKCE、ES256／JWKS、领域级撤销、authorize
+前置限流、Refresh rotation／reuse 的真实 HTTP E2E、Operator-only Client
+provisioning、崩溃后持久化对账、Envelope cleanup／保留窗口／写放大负载，以及官方
+SDK Client 穿过完整本地 mTLS 链调用真实工具的回归证据。尚未满足的关键门包括具名
+外部 Host 互操作、公网环境 mTLS/JWKS/Grant/Refresh 轮换和故障演练；Public MCP 保持
+默认关闭且未部署。
 
 ## 9. 被否决方案
 

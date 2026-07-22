@@ -926,15 +926,27 @@ const OptionalRemoteMcpOAuthResourceUrlSchema = z.preprocess(
 const McpOAuthOwnerConsentEnvironmentFields = {
   MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64: OptionalMcpIndependentKeyBase64Schema,
   MCP_OAUTH_CONTINUATION_KEY_BASE64: OptionalMcpIndependentKeyBase64Schema,
+  MCP_OAUTH_ISSUER: OptionalRemoteMcpOAuthUrlSchema,
+  MCP_OAUTH_JWKS_URI: OptionalRemoteMcpOAuthUrlSchema,
+  MCP_OAUTH_JWK_ENCRYPTION_KEY_BASE64: OptionalMcpIndependentKeyBase64Schema,
   MCP_OAUTH_OWNER_CONSENT_ENABLED: BooleanStringSchema.default(false),
   MCP_OAUTH_RESOURCE: OptionalRemoteMcpOAuthResourceUrlSchema,
+  MCP_OAUTH_SERVER_ENABLED: BooleanStringSchema.default(false),
+  MCP_OAUTH_TOKEN_STORAGE_KEY_BASE64: OptionalMcpIndependentKeyBase64Schema,
 } satisfies z.ZodRawShape;
 
 type McpOAuthOwnerConsentValidationTarget = {
+  BETTER_AUTH_URL: string;
+  MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64?: Buffer | undefined;
   MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64?: Buffer | undefined;
   MCP_OAUTH_CONTINUATION_KEY_BASE64?: Buffer | undefined;
+  MCP_OAUTH_ISSUER?: string | undefined;
+  MCP_OAUTH_JWKS_URI?: string | undefined;
+  MCP_OAUTH_JWK_ENCRYPTION_KEY_BASE64?: Buffer | undefined;
   MCP_OAUTH_OWNER_CONSENT_ENABLED: boolean;
   MCP_OAUTH_RESOURCE?: string | undefined;
+  MCP_OAUTH_SERVER_ENABLED: boolean;
+  MCP_OAUTH_TOKEN_STORAGE_KEY_BASE64?: Buffer | undefined;
   NODE_ENV: z.infer<typeof NodeEnvironmentSchema>;
 };
 
@@ -988,6 +1000,87 @@ function validateMcpOAuthOwnerConsentEnvironment(
         path: ["MCP_OAUTH_RESOURCE"],
       });
     }
+  }
+
+  const liveSpecificTuple = [
+    value.MCP_OAUTH_ISSUER,
+    value.MCP_OAUTH_JWKS_URI,
+    value.MCP_OAUTH_TOKEN_STORAGE_KEY_BASE64,
+    value.MCP_OAUTH_JWK_ENCRYPTION_KEY_BASE64,
+  ];
+  const liveTupleRequired =
+    value.MCP_OAUTH_SERVER_ENABLED ||
+    liveSpecificTuple.some((entry) => entry !== undefined);
+  const liveTuple = [
+    ...tuple,
+    ...liveSpecificTuple,
+    value.MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64,
+  ];
+  if (liveTupleRequired && liveTuple.some((entry) => entry === undefined)) {
+    context.addIssue({
+      code: "custom",
+      message:
+        "the issuer, JWKS URI, OAuth storage keys, Owner-consent tuple, and access-token jti digest key must be configured together",
+      path: ["MCP_OAUTH_SERVER_ENABLED"],
+    });
+  }
+  if (value.MCP_OAUTH_SERVER_ENABLED && !value.MCP_OAUTH_OWNER_CONSENT_ENABLED) {
+    context.addIssue({
+      code: "custom",
+      message: "requires MCP_OAUTH_OWNER_CONSENT_ENABLED=true",
+      path: ["MCP_OAUTH_SERVER_ENABLED"],
+    });
+  }
+
+  if (value.MCP_OAUTH_ISSUER !== undefined) {
+    const expectedIssuer = new URL("/api/auth", value.BETTER_AUTH_URL).toString();
+    if (value.MCP_OAUTH_ISSUER !== expectedIssuer) {
+      context.addIssue({
+        code: "custom",
+        message: "must equal the Better Auth /api/auth issuer",
+        path: ["MCP_OAUTH_ISSUER"],
+      });
+    }
+    if (
+      value.MCP_OAUTH_JWKS_URI !== undefined &&
+      value.MCP_OAUTH_JWKS_URI !== `${value.MCP_OAUTH_ISSUER}/jwks`
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "must equal the issuer JWKS endpoint",
+        path: ["MCP_OAUTH_JWKS_URI"],
+      });
+    }
+    if (
+      value.NODE_ENV === "production" &&
+      new URL(value.MCP_OAUTH_ISSUER).protocol !== "https:"
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "must use https in production",
+        path: ["MCP_OAUTH_ISSUER"],
+      });
+    }
+  }
+
+  const independentKeys = [
+    value.MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64,
+    value.MCP_OAUTH_CONTINUATION_KEY_BASE64,
+    value.MCP_OAUTH_TOKEN_STORAGE_KEY_BASE64,
+    value.MCP_OAUTH_JWK_ENCRYPTION_KEY_BASE64,
+    value.MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64,
+  ].filter((entry): entry is Buffer => entry !== undefined);
+  if (
+    independentKeys.some((entry, index) =>
+      independentKeys.slice(index + 1).some((other) => entry.equals(other)),
+    )
+  ) {
+    context.addIssue({
+      code: "custom",
+      message:
+        "OAuth binding, continuation, storage, signing, and jti keys must be independent",
+      path: ["MCP_OAUTH_SERVER_ENABLED"],
+    });
   }
 }
 
@@ -1171,6 +1264,11 @@ type McpInternalApiValidationTarget = McpActorAssertionValidationTarget & {
   MCP_INTERNAL_API_PORT: number;
   MCP_INTERNAL_API_SERVER_CERT_PEM_BASE64?: Buffer | undefined;
   MCP_INTERNAL_API_SERVER_KEY_PEM_BASE64?: Buffer | undefined;
+  MCP_OAUTH_ISSUER?: string | undefined;
+  MCP_OAUTH_JWKS_URI?: string | undefined;
+  MCP_OAUTH_JWK_ENCRYPTION_KEY_BASE64?: Buffer | undefined;
+  MCP_OAUTH_SERVER_ENABLED: boolean;
+  MCP_OAUTH_TOKEN_STORAGE_KEY_BASE64?: Buffer | undefined;
   PORT: number;
 };
 
@@ -1187,12 +1285,19 @@ function validateMcpInternalApiEnvironment(
     value.MCP_ACTOR_ASSERTION_CURRENT_KEY_BASE64 !== undefined ||
     value.MCP_ACTOR_ASSERTION_CURRENT_KEY_VERSION !== undefined ||
     Object.keys(value.MCP_ACTOR_ASSERTION_PREVIOUS_KEYS).length > 0;
+  const oauthServerTupleConfigured =
+    value.MCP_OAUTH_SERVER_ENABLED ||
+    value.MCP_OAUTH_ISSUER !== undefined ||
+    value.MCP_OAUTH_JWKS_URI !== undefined ||
+    value.MCP_OAUTH_TOKEN_STORAGE_KEY_BASE64 !== undefined ||
+    value.MCP_OAUTH_JWK_ENCRYPTION_KEY_BASE64 !== undefined;
   const hasAnyConfiguration =
     tlsTuple.some((entry) => entry !== undefined) ||
     value.MCP_INTERNAL_API_ALLOWED_CLIENT_CERT_SHA256_FINGERPRINTS.length > 0 ||
     actorTupleConfigured ||
     value.MCP_ACTOR_ASSERTION_REPLAY_DIGEST_KEY_BASE64 !== undefined ||
-    value.MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64 !== undefined;
+    (value.MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64 !== undefined &&
+      !oauthServerTupleConfigured);
   const tupleRequired = value.MCP_INTERNAL_API_ENABLED || hasAnyConfiguration;
 
   if (

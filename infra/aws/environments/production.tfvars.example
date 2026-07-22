@@ -18,11 +18,16 @@ alb_origin_domain_name     = "origin.alphanet.example"
 alb_origin_certificate_arn = ""
 route53_zone_id            = "ZREPLACE_WITH_PUBLIC_ZONE"
 cloudfront_price_class     = "PriceClass_200"
-mcp_public_enabled         = false
-mcp_runtime_enabled        = false
-mcp_oauth_issuer           = ""
-mcp_oauth_jwks_uri         = ""
-allow_direct_alb_cidrs     = []
+# Production keeps Owner consent, the OAuth server, MCP runtime, and public
+# edge independently disabled until their separate readiness gates pass.
+mcp_public_enabled               = false
+mcp_runtime_enabled              = false
+mcp_oauth_owner_consent_enabled = false
+mcp_oauth_server_enabled        = false
+mcp_oauth_provisioning_enabled  = false
+mcp_oauth_issuer                 = ""
+mcp_oauth_jwks_uri               = ""
+allow_direct_alb_cidrs           = []
 
 nat_gateway_mode                   = "one_per_az"
 enable_vpc_flow_logs               = true

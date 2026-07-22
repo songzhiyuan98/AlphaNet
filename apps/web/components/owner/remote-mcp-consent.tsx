@@ -7,6 +7,7 @@ import {
   RemoteMcpOAuthContinuationHandleSchema,
   type OwnerRemoteMcpOAuthConsentInspectResponse,
 } from "@alphanet/contracts";
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
 import {
@@ -267,7 +268,17 @@ function isBoundedOAuthQuery(value: string): boolean {
   );
 }
 
-function RestartAuthorization({ message, title }: { message: string; title: string }) {
+function RestartAuthorization({
+  actionHref,
+  actionLabel,
+  message,
+  title,
+}: {
+  actionHref?: string;
+  actionLabel?: string;
+  message: string;
+  title: string;
+}) {
   return (
     <section className="oauthConsentState" aria-labelledby="oauth-consent-state-title">
       <span className="oauthConsentStateMark" aria-hidden="true">
@@ -279,6 +290,11 @@ function RestartAuthorization({ message, title }: { message: string; title: stri
       <div className="oauthConsentRestartNote">
         为避免把旧授权请求绑定到错误的 Owner 会话，此页面不会自动跳转登录或复用旧请求。
       </div>
+      {actionHref && actionLabel ? (
+        <Link className="submitButton oauthConsentPrimaryAction" href={actionHref}>
+          {actionLabel}
+        </Link>
+      ) : null}
     </section>
   );
 }
@@ -295,9 +311,26 @@ export function RemoteMcpConsent({
   const [selectedAgentId, setSelectedAgentId] = useState("");
   const [continuationHandle, setContinuationHandle] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loginRecoveryHref, setLoginRecoveryHref] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const oauthQuery = useRef("");
   const pendingActionRef = useRef<PendingAction | null>(null);
+
+  useEffect(() => {
+    if (sessionState !== "unauthenticated") return;
+    const exactOAuthQuery = window.location.search.slice(1);
+    const fragment = readContinuationFromFragment(window.location.hash);
+    const parameters = new URLSearchParams(exactOAuthQuery);
+    if (
+      fragment.kind === "absent" &&
+      isBoundedOAuthQuery(exactOAuthQuery) &&
+      parameters.getAll("sig").length === 1
+    ) {
+      // Keep the signed Provider query byte-for-byte. The official Better Auth
+      // client plugin sends only server-declared signed fields during login.
+      setLoginRecoveryHref(`/login?${exactOAuthQuery}`);
+    }
+  }, [sessionState]);
 
   useEffect(() => {
     if (sessionState !== "authenticated") return;
@@ -457,10 +490,22 @@ export function RemoteMcpConsent({
   if (sessionState !== "authenticated") {
     return (
       <RestartAuthorization
-        title="请从 Agent 客户端重新连接"
+        {...(sessionState === "unauthenticated" && loginRecoveryHref
+          ? {
+              actionHref: loginRecoveryHref,
+              actionLabel: "登录并继续",
+            }
+          : {})}
+        title={
+          sessionState === "unauthenticated" && loginRecoveryHref
+            ? "登录以继续连接"
+            : "请从 Agent 客户端重新连接"
+        }
         message={
           sessionState === "unauthenticated"
-            ? "当前没有可确认的 Owner 登录会话。返回发起授权的 Agent 客户端并重新开始连接。"
+            ? loginRecoveryHref
+              ? "当前没有可确认的 Owner 会话。登录后，AlphaNet 将继续这次由 Agent 发起的授权。"
+              : "当前没有可确认的 Owner 登录会话。返回发起授权的 Agent 客户端并重新开始连接。"
             : "暂时无法安全确认 Owner 登录会话。返回发起授权的 Agent 客户端，稍后重新开始连接。"
         }
       />
