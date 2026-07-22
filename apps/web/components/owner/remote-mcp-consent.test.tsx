@@ -145,7 +145,23 @@ describe("RemoteMcpConsent", () => {
     }
   });
 
-  it("does not inspect or redirect when the Owner session is unavailable", () => {
+  it("offers explicit signed-query login recovery without inspecting or redirecting", async () => {
+    setPageUrl();
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<RemoteMcpConsent sessionState="unauthenticated" />);
+
+    expect(await screen.findByRole("heading", { name: "登录以继续连接" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "登录并继续" }).getAttribute("href")).toBe(
+      `/login?${exactOAuthQuery}`,
+    );
+    expect(screen.getByText(/不会自动跳转登录/u)).toBeTruthy();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not offer login recovery for an old session-bound continuation", () => {
+    setPageUrl(`#continuation=${continuationHandle}`);
     const fetchMock = vi.fn<typeof fetch>();
     vi.stubGlobal("fetch", fetchMock);
 
@@ -154,7 +170,7 @@ describe("RemoteMcpConsent", () => {
     expect(
       screen.getByRole("heading", { name: "请从 Agent 客户端重新连接" }),
     ).toBeTruthy();
-    expect(screen.getByText(/不会自动跳转登录/u)).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "登录并继续" })).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

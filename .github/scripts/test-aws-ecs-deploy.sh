@@ -501,6 +501,21 @@ case "$url" in
   */v1/public/content*)
     printf '%s\n' '{"schema_version":"1","request_id":"req-content-smoke","items":[],"page":{"next_cursor":null,"has_more":false,"limit":1},"ranking":{"snapshot_id":"snapshot-1","ranking_version":"content-v1","as_of":"2026-07-20T00:00:00Z","expires_at":"2026-07-20T00:05:00Z"},"counts_as_of":"2026-07-20T00:00:00Z"}' > "$output_path"
     ;;
+  */.well-known/oauth-authorization-server/api/auth)
+    if [[ "${MOCK_OAUTH_METADATA_INVALID:-false}" == "true" ]]; then
+      printf '%s\n' '{"issuer":"https://attacker.example/api/auth"}' > "$output_path"
+    else
+      jq -n --arg issuer "${PUBLIC_BASE_URL}/api/auth" '{
+        issuer: $issuer,
+        authorization_endpoint: ($issuer + "/oauth2/authorize"),
+        token_endpoint: ($issuer + "/oauth2/token"),
+        jwks_uri: ($issuer + "/jwks"),
+        revocation_endpoint: ($issuer + "/oauth2/revoke"),
+        token_endpoint_auth_methods_supported: ["none"],
+        revocation_endpoint_auth_methods_supported: ["none"]
+      }' > "$output_path"
+    fi
+    ;;
   *)
     printf '%s\n' '{}' > "$output_path"
     ;;
@@ -579,7 +594,7 @@ run_deploy() {
     EXPECTED_REPOSITORY="songzhiyuan98/AlphaNet" \
     PUBLIC_BASE_URL="https://staging.alphanet.example" \
     RELEASE_MANIFEST_PATH="$manifest_path" \
-    SMOKE_PATHS="/health/ready,/v1/public/communities?limit=1,/v1/public/content?scope=global&sort=latest&limit=1" \
+    SMOKE_PATHS="/health/ready,/v1/public/communities?limit=1,/v1/public/content?scope=global&sort=latest&limit=1,/.well-known/oauth-authorization-server/api/auth" \
     TARGET_ENVIRONMENT="${TARGET_ENVIRONMENT:-staging}" \
     MOCK_CURL_FAIL="${MOCK_CURL_FAIL:-false}" \
     bash "$repository_root/.github/scripts/aws-ecs-deploy.sh"
@@ -589,7 +604,7 @@ MOCK_EVENTUAL_CONSISTENCY=true run_deploy > "$test_directory/success.out"
 grep -q 'AWS ECS deployment completed' "$test_directory/success.out"
 test "$(grep -c '^ecs run-task ' "$test_directory/aws.log")" -eq 2
 test "$(grep -c '^ecs update-service ' "$test_directory/aws.log")" -eq 4
-test "$(wc -l < "$test_directory/curl.log" | tr -d ' ')" -eq 3
+test "$(wc -l < "$test_directory/curl.log" | tr -d ' ')" -eq 4
 first_run_task_line="$(grep -n '^ecs run-task ' "$test_directory/aws.log" | head -n 1 | cut -d: -f1)"
 second_run_task_line="$(grep -n '^ecs run-task ' "$test_directory/aws.log" | tail -n 1 | cut -d: -f1)"
 first_update_line="$(grep -n '^ecs update-service ' "$test_directory/aws.log" | head -n 1 | cut -d: -f1)"
@@ -639,6 +654,19 @@ if grep -q '^ecs describe-task-definition --task-definition alphanet-staging-' \
   echo "Deployment must never resolve a task definition by family latest." >&2
   exit 1
 fi
+
+rm -rf "$mock_state"
+mkdir -p "$mock_state/registered" "$mock_state/current"
+: > "$test_directory/aws.log"
+: > "$test_directory/curl.log"
+
+if MOCK_OAUTH_METADATA_INVALID=true run_deploy \
+  > "$test_directory/invalid-oauth-metadata.out" 2>&1; then
+  echo "Expected invalid public OAuth discovery metadata to fail the deployment." >&2
+  exit 1
+fi
+grep -q 'Public OAuth discovery response violated' \
+  "$test_directory/invalid-oauth-metadata.out"
 
 rm -rf "$mock_state"
 mkdir -p "$mock_state/registered" "$mock_state/current"

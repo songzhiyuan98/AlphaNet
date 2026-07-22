@@ -10,6 +10,7 @@ import { closeDependencies, type HealthDependency } from "@alphanet/database";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import type { Transport as McpSdkTransport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { JSONRPCMessageSchema, type RequestId } from "@modelcontextprotocol/sdk/types.js";
 import express from "express";
 import type { NextFunction, Request, RequestHandler, Response } from "express";
@@ -815,12 +816,19 @@ export function createMcpApp(options: McpAppOptions): McpApp {
         tools: toolRegistrations,
         version: options.version,
       });
+      // SDK 1.29 documents explicit undefined as its stateless switch, while
+      // its declaration omits undefined under exactOptionalPropertyTypes.
+      // Keep that required runtime value and confine the declaration adapter.
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion -- Root integration typechecking enables exact optional properties; this package intentionally does not.
       const transport = new StreamableHTTPServerTransport({
         enableJsonResponse: true,
         sessionIdGenerator: undefined,
-      });
+      } as unknown as ConstructorParameters<typeof StreamableHTTPServerTransport>[0]);
       try {
-        await protocolServer.connect(transport);
+        // SDK 1.29's accessors expose `T | undefined`, while its Transport
+        // interface models the same callbacks as exact optional properties.
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion -- Required only in the root exact-optional integration graph.
+        await protocolServer.connect(transport as unknown as McpSdkTransport);
         await transport.handleRequest(request, response, request.body);
       } catch (error) {
         options.logger.error(

@@ -1,7 +1,13 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHmac, randomUUID } from "node:crypto";
+import { isIP } from "node:net";
 
-import { AGENT_SCOPES, AgentScopeSchema, type AgentScope } from "@alphanet/contracts";
+import {
+  AGENT_SCOPES,
+  AgentScopeSchema,
+  RemoteMcpOAuthContinuationHandleSchema,
+  type AgentScope,
+} from "@alphanet/contracts";
 import { oauthProvider } from "@better-auth/oauth-provider";
 import type { BetterAuthPlugin } from "better-auth";
 import { jwt } from "better-auth/plugins";
@@ -16,6 +22,8 @@ import {
   type ValidatedRemoteMcpTokenRequest,
   type ValidatedRemoteMcpAuthorizeQuery,
 } from "./remote-mcp-oauth-guard.js";
+import type { RemoteMcpOAuthAuthorizeRateLimiter } from "./remote-mcp-oauth-authorize-rate-limit.js";
+import { validateRemoteMcpOAuthTokenSuccessResponse } from "./remote-mcp-oauth-token-response.js";
 
 export const REMOTE_MCP_ACCESS_TOKEN_TTL_SECONDS = 10 * 60;
 export const REMOTE_MCP_AUTHORIZATION_CODE_TTL_SECONDS = 5 * 60;
@@ -149,6 +157,11 @@ export interface RemoteMcpDomainRevocationInput {
 
 export interface AlphaNetRemoteMcpOAuthSecurityHooks {
   /**
+   * Dedicated fail-closed admission that runs before an Authorization Request
+   * Envelope can write to PostgreSQL. Provider and edge limits do not replace it.
+   */
+  admitAuthorizationRequest: RemoteMcpOAuthAuthorizeRateLimiter;
+  /**
    * Atomically claim/revalidate the pending Grant immediately before the
    * Provider creates access and refresh tokens in parallel.
    */
@@ -194,6 +207,7 @@ export interface AlphaNetRemoteMcpOAuthSecurityHooks {
     resolveGrantId(
       context: OAuthPostLoginContext,
       phase: RemoteMcpOAuthConsentReferencePhase,
+      continuationHandle: string | undefined,
     ): Promise<string>;
     shouldRedirect: OAuthPostLogin["shouldRedirect"];
   };
@@ -223,6 +237,12 @@ export interface AlphaNetRemoteMcpOAuthRawHttpRequest {
    * Headers alone is insufficient because it collapses duplicate fields.
    */
   authorizationHeaders: readonly string[];
+  /**
+   * Every X-AlphaNet-OAuth-Continuation field-value from the server's raw
+   * header list. The continuation is session-bound and must not be recovered
+   * from Fetch Headers after duplicate fields have been collapsed.
+   */
+  continuationHeaders: readonly string[];
   request: Request;
 }
 
@@ -253,7 +273,13 @@ interface RemoteMcpOAuthProviderRequestState {
   authorizationCodeTokenRequest?: RemoteMcpAuthorizationCodeTokenRequest;
   claimedGrantId?: string;
   compensationAttempted: boolean;
+  continuationHandle?: string;
   consentReferencePhase: RemoteMcpOAuthConsentReferencePhase;
+  inspectedGrantId?: string;
+  postLoginContinuationConfirmed: boolean;
+  tokenClientId?: string;
+  tokenGrantType?: "authorization_code" | "refresh_token";
+  tokenProtocolScopes?: readonly RemoteMcpOAuthScope[];
 }
 
 /**
@@ -385,6 +411,7 @@ function isUuid(value: unknown): value is string {
 function assertSecurityHooks(security: AlphaNetRemoteMcpOAuthSecurityHooks): void {
   if (
     !security ||
+    typeof security.admitAuthorizationRequest !== "function" ||
     typeof security.activateAuthorizationGrant !== "function" ||
     typeof security.compensateFailedAuthorizationGrantExchange !== "function" ||
     typeof security.executeDomainRevocationTransaction !== "function" ||
@@ -521,16 +548,19 @@ function createLiveTokenResponseFields(
   requestState: AsyncLocalStorage<RemoteMcpOAuthProviderRequestState>,
 ): OAuthTokenResponseFields {
   return async (context) => {
+    const state = requestState.getStore();
+    const protocolScopes = normalizeProtocolScopes(context.scopes);
+    if (!state || !protocolScopes) {
+      throw new Error("Remote MCP OAuth token response authority is unavailable");
+    }
     if (context.grantType === "refresh_token") {
+      state.tokenProtocolScopes = protocolScopes;
       return {};
     }
-    const state = requestState.getStore();
     const activation = validateAuthorizationGrantActivation(context, options, state);
     await options.security.activateAuthorizationGrant(activation);
-    if (!state) {
-      throw new Error("Remote MCP OAuth authorization Grant activation is unavailable");
-    }
     state.activatedGrantId = activation.grantId;
+    state.tokenProtocolScopes = activation.scopes;
     return {};
   };
 }
@@ -768,29 +798,48 @@ function createLivePostLogin(
   security: AlphaNetRemoteMcpOAuthSecurityHooks,
   requestState: AsyncLocalStorage<RemoteMcpOAuthProviderRequestState>,
 ): OAuthPostLogin {
+  async function resolveGrantId(
+    context: OAuthPostLoginContext,
+    state: RemoteMcpOAuthProviderRequestState,
+    phase: RemoteMcpOAuthConsentReferencePhase,
+  ): Promise<string> {
+    const cached = phase === "claim" ? state.claimedGrantId : state.inspectedGrantId;
+    if (cached) return cached;
+    const grantId = await security.postLogin.resolveGrantId(
+      context,
+      phase,
+      state.continuationHandle,
+    );
+    if (!isUuid(grantId)) {
+      throw new Error("Remote MCP OAuth consent Grant is unavailable");
+    }
+    if (phase === "claim") state.claimedGrantId = grantId;
+    else state.inspectedGrantId = grantId;
+    return grantId;
+  }
+
   return {
     consentReferenceId: async (context) => {
       const state = requestState.getStore();
       if (!state) {
         throw new Error("Remote MCP OAuth consent Grant is unavailable");
       }
-      if (state.consentReferencePhase === "claim" && state.claimedGrantId) {
-        return state.claimedGrantId;
-      }
-      const grantId = await security.postLogin.resolveGrantId(
-        context,
-        state.consentReferencePhase,
-      );
-      if (!isUuid(grantId)) {
-        throw new Error("Remote MCP OAuth consent Grant is unavailable");
-      }
-      if (state.consentReferencePhase === "claim") {
-        state.claimedGrantId = grantId;
-      }
-      return grantId;
+      return resolveGrantId(context, state, state.consentReferencePhase);
     },
     page: security.postLogin.page,
-    shouldRedirect: security.postLogin.shouldRedirect,
+    shouldRedirect: async (context) => {
+      const state = requestState.getStore();
+      if (!state) return security.postLogin.shouldRedirect(context);
+      // Provider 1.6.23 does not mark its POST /oauth2/continue post-login
+      // branch as cleared. Only the request-local continuation admission can
+      // skip the otherwise mandatory Agent-selection redirect.
+      if (state.claimedGrantId) return false;
+      if (!state.postLoginContinuationConfirmed) {
+        return security.postLogin.shouldRedirect(context);
+      }
+      await resolveGrantId(context, state, "inspect");
+      return false;
+    },
   };
 }
 
@@ -890,6 +939,31 @@ function assertRawAuthorizationHeaderSnapshot(
   if (collapsed !== raw) {
     throw new Error("Remote MCP OAuth raw Authorization headers are unavailable");
   }
+}
+
+function validatedContinuationHeaderSnapshot(
+  request: Request,
+  continuationHeaders: unknown,
+): string | undefined {
+  if (!isStringArray(continuationHeaders)) {
+    throw new Error("Remote MCP OAuth raw continuation headers are unavailable");
+  }
+  if (continuationHeaders.length > 1) {
+    throw new Error("Remote MCP OAuth continuation header must not be repeated");
+  }
+  const collapsed = request.headers.get("x-alphanet-oauth-continuation");
+  const raw = continuationHeaders[0] ?? null;
+  if (collapsed !== raw) {
+    throw new Error("Remote MCP OAuth raw continuation headers are unavailable");
+  }
+  if (raw === null) {
+    return undefined;
+  }
+  const parsed = RemoteMcpOAuthContinuationHandleSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new Error("Remote MCP OAuth continuation header is invalid");
+  }
+  return parsed.data;
 }
 
 class RemoteMcpOAuthTokenBodyTooLargeError extends Error {
@@ -1007,6 +1081,50 @@ function guardErrorResponse(error: RemoteMcpOAuthGuardError): Response {
   });
 }
 
+function authorizeRateLimitResponse(retryAfterSeconds: number): Response {
+  return new Response(
+    JSON.stringify({
+      error: "temporarily_unavailable",
+      error_description: "OAuth authorization is temporarily rate limited.",
+    }),
+    {
+      headers: {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/json; charset=utf-8",
+        Pragma: "no-cache",
+        "Retry-After": String(retryAfterSeconds),
+      },
+      status: 429,
+    },
+  );
+}
+
+function trustedAuthorizeClientIp(request: Request): string {
+  const clientIp = request.headers.get("x-alphanet-client-ip");
+  if (clientIp === null || isIP(clientIp) === 0) {
+    throw new Error("Remote MCP OAuth authorize client IP is unavailable");
+  }
+  return clientIp;
+}
+
+function validatedAuthorizeAdmission(
+  value: Awaited<ReturnType<RemoteMcpOAuthAuthorizeRateLimiter>>,
+): { allowed: true } | { allowed: false; retryAfterSeconds: number } {
+  if (value?.allowed === true && Object.keys(value).length === 1) {
+    return { allowed: true };
+  }
+  if (
+    value?.allowed === false &&
+    Object.keys(value).length === 2 &&
+    Number.isSafeInteger(value.retryAfterSeconds) &&
+    value.retryAfterSeconds >= 1 &&
+    value.retryAfterSeconds <= 60
+  ) {
+    return { allowed: false, retryAfterSeconds: value.retryAfterSeconds };
+  }
+  throw new Error("Remote MCP OAuth authorize rate-limit decision is invalid");
+}
+
 function authorizationCodeExchangeLockInput(
   parameters: string,
   request: RemoteMcpAuthorizationCodeTokenRequest,
@@ -1038,6 +1156,22 @@ async function compensateFailedProviderRequest(
   await security.compensateFailedAuthorizationGrantExchange(Object.freeze({ grantId }));
 }
 
+function secureTokenSuccessResponse(response: Response): Response {
+  const headers = new Headers(response.headers);
+  // OAuth Provider 1.6.23 drops the endpoint-level headers supplied to
+  // `ctx.json` before this boundary observes the Response. Reapply the
+  // protocol-required cache controls here, then validate and return this same
+  // response so the outward transport cannot accidentally serve a cacheable
+  // token document.
+  headers.set("Cache-Control", "no-store");
+  headers.set("Pragma", "no-cache");
+  return new Response(response.body, {
+    headers,
+    status: response.status,
+    statusText: response.statusText,
+  });
+}
+
 async function executeTrackedProviderRequest(
   options: AlphaNetRemoteMcpOAuthProviderOptions,
   state: RemoteMcpOAuthProviderRequestState,
@@ -1045,15 +1179,29 @@ async function executeTrackedProviderRequest(
   request: Request,
 ): Promise<Response> {
   try {
-    const response = await providerHandler(request);
-    if (!(response instanceof Response)) {
+    const providerResponse = await providerHandler(request);
+    if (!(providerResponse instanceof Response)) {
       await compensateFailedProviderRequest(options.security, state);
       throw new Error("Remote MCP OAuth provider handler returned an invalid response");
     }
-    if (!response.ok) {
+    if (!providerResponse.ok) {
       await compensateFailedProviderRequest(options.security, state);
+      return providerResponse;
     }
-    return response;
+    if (state.tokenGrantType) {
+      if (!state.tokenClientId || !state.tokenProtocolScopes) {
+        throw new Error("Remote MCP OAuth token response authority is unavailable");
+      }
+      const response = secureTokenSuccessResponse(providerResponse);
+      await validateRemoteMcpOAuthTokenSuccessResponse(response, {
+        clientId: state.tokenClientId,
+        issuer: options.issuer,
+        resource: options.resource,
+        scopes: state.tokenProtocolScopes,
+      });
+      return response;
+    }
+    return providerResponse;
   } catch (error) {
     await compensateFailedProviderRequest(options.security, state);
     throw error;
@@ -1070,15 +1218,32 @@ function wrapLiveProviderHandler(
     throw new Error("Remote MCP OAuth provider handler is unavailable");
   }
   const issuer = new URL(options.issuer);
-  return async ({ authorizationHeaders, request }) => {
+  return async ({ authorizationHeaders, continuationHeaders, request }) => {
     const requestUrl = new URL(request.url);
     const relativePath = oauthRelativePath(requestUrl.pathname, options.issuer);
+    const continuationHandle = validatedContinuationHeaderSnapshot(
+      request,
+      continuationHeaders,
+    );
+    const requiresContinuation =
+      requestUrl.origin === issuer.origin &&
+      request.method === "POST" &&
+      (relativePath === "/oauth2/continue" || relativePath === "/oauth2/consent");
+    if (requiresContinuation && continuationHandle === undefined) {
+      throw new Error("Remote MCP OAuth continuation header is required");
+    }
     const state: RemoteMcpOAuthProviderRequestState = {
       compensationAttempted: false,
+      ...(continuationHandle ? { continuationHandle } : {}),
       consentReferencePhase:
         requestUrl.origin === issuer.origin && relativePath === "/oauth2/consent"
           ? "claim"
           : "inspect",
+      postLoginContinuationConfirmed:
+        requestUrl.origin === issuer.origin &&
+        request.method === "POST" &&
+        relativePath === "/oauth2/continue" &&
+        continuationHandle !== undefined,
     };
     return requestState.run(state, async () => {
       const isCanonicalAuthorizeRequest =
@@ -1090,6 +1255,15 @@ function wrapLiveProviderHandler(
           const authorization = validateRemoteMcpAuthorizeQuery(requestUrl.search, {
             resource: options.resource,
           });
+          const admission = validatedAuthorizeAdmission(
+            await options.security.admitAuthorizationRequest({
+              clientId: authorization.clientId,
+              clientIp: trustedAuthorizeClientIp(request),
+            }),
+          );
+          if (!admission.allowed) {
+            return authorizeRateLimitResponse(admission.retryAfterSeconds);
+          }
           await options.security.persistAuthorizationRequestEnvelope(authorization);
           requestAdmissions.add(request);
           try {
@@ -1124,6 +1298,8 @@ function wrapLiveProviderHandler(
           { resource: options.resource },
           options.security.withOwnerClientRefreshLock,
           async (validatedRequest) => {
+            state.tokenClientId = validatedRequest.clientId;
+            state.tokenGrantType = validatedRequest.grantType;
             const executeProvider = async (): Promise<Response> => {
               requestAdmissions.add(providerRequest);
               try {
@@ -1310,6 +1486,11 @@ function createProviderPlugin(
       clientSecret: "aln_cs_v1_",
       refreshToken: "aln_rt_v1_",
     },
+    // Authorization admission is enforced by AlphaNet's Redis-backed,
+    // pre-persistence global/client/IP limiter. The Provider's in-memory
+    // limiter runs after its request envelope is stored, so leaving it enabled
+    // would both double-limit and permit rejected requests to consume storage.
+    rateLimit: { authorize: false },
     refreshTokenExpiresIn: REMOTE_MCP_REFRESH_TOKEN_TTL_SECONDS,
     schema: remoteMcpOAuthProviderSchema,
     scopes: [...REMOTE_MCP_OAUTH_SCOPES],

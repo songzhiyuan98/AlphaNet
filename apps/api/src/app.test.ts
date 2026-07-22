@@ -29,8 +29,16 @@ function createAuthRuntime(options?: {
   checkReady?: () => Promise<void>;
   getOwnerSession?: () => Promise<OwnerSession | null>;
   googleEnabled?: boolean;
-  handler?: (request: Request) => Promise<Response>;
+  handler?: (
+    request: Request,
+    transport?: {
+      authorizationHeaders: readonly string[];
+      continuationHeaders: readonly string[];
+    },
+  ) => Promise<Response>;
   ownerSession?: OwnerSession | null;
+  remoteMcpOAuthEnabled?: boolean;
+  remoteMcpOAuthJwksPath?: string;
 }): {
   close: ReturnType<typeof vi.fn>;
   getOwnerSession: ReturnType<typeof vi.fn>;
@@ -58,6 +66,10 @@ function createAuthRuntime(options?: {
     getOwnerSession,
     googleEnabled: options?.googleEnabled ?? false,
     handle: handler,
+    remoteMcpOAuthEnabled: options?.remoteMcpOAuthEnabled ?? false,
+    ...(options?.remoteMcpOAuthJwksPath
+      ? { remoteMcpOAuthJwksPath: options.remoteMcpOAuthJwksPath }
+      : {}),
   } as unknown as AlphaNetAuthRuntime;
 
   return { close, getOwnerSession, handler, runtime };
@@ -830,6 +842,59 @@ describe("API service", () => {
     expect(response.headers["cache-control"]).toBe("no-store, private");
   });
 
+  it("strips caller-supplied MCP ActorContext headers at the public listener", async () => {
+    const actorContext = "private-listener-assertion-must-not-cross-public-boundary";
+    let authActorContext: string | null | undefined;
+    const auth = createAuthRuntime({
+      handler: (request) => {
+        authActorContext = request.headers.get("x-alphanet-mcp-actor-context");
+        return Promise.resolve(Response.json({ ok: true }));
+      },
+    });
+    const app = await createApiApp({
+      allowedOrigins: ["https://app.alphanet.test"],
+      authRuntime: auth.runtime,
+      environment: "test",
+      version: "test-version",
+    });
+    apps.push(app);
+    app.get("/v1/test-public-header-boundary", (request) => ({
+      normalizedHeaderPresent: Object.keys(request.headers).some(
+        (name) => name.toLowerCase() === "x-alphanet-mcp-actor-context",
+      ),
+      rawHeaderPresent: request.raw.rawHeaders.some(
+        (value, index) =>
+          index % 2 === 0 && value.toLowerCase() === "x-alphanet-mcp-actor-context",
+      ),
+    }));
+
+    const authResponse = await app.inject({
+      headers: {
+        "X-AlphaNet-Mcp-Actor-Context": actorContext,
+      },
+      method: "POST",
+      payload: {
+        email: "owner@example.test",
+      },
+      url: "/api/auth/sign-in/email",
+    });
+    const domainResponse = await app.inject({
+      headers: {
+        "x-ALPHANET-mCP-aCTOR-cONTEXT": actorContext,
+      },
+      method: "GET",
+      url: "/v1/test-public-header-boundary",
+    });
+
+    expect(authResponse.statusCode).toBe(200);
+    expect(authActorContext).toBeNull();
+    expect(domainResponse.statusCode).toBe(200);
+    expect(domainResponse.json()).toEqual({
+      normalizedHeaderPresent: false,
+      rawHeaderPresent: false,
+    });
+  });
+
   it("denies Better Auth routes outside the public allowlist", async () => {
     const auth = createAuthRuntime();
     const app = await createApiApp({
@@ -852,6 +917,334 @@ describe("API service", () => {
       },
     });
     expect(auth.handler).not.toHaveBeenCalled();
+  });
+
+  it("keeps the complete Remote MCP OAuth surface dark when disabled", async () => {
+    const auth = createAuthRuntime({
+      remoteMcpOAuthJwksPath: "/oauth/remote-mcp/jwks.json",
+    });
+    const app = await createApiApp({
+      allowedOrigins: ["https://app.alphanet.test"],
+      authRuntime: auth.runtime,
+      environment: "test",
+      version: "test-version",
+    });
+    apps.push(app);
+
+    for (const request of [
+      { method: "GET" as const, url: "/api/auth/oauth2/authorize" },
+      { method: "POST" as const, url: "/api/auth/oauth2/token" },
+      {
+        method: "GET" as const,
+        url: "/.well-known/oauth-authorization-server/api/auth",
+      },
+      { method: "GET" as const, url: "/oauth/remote-mcp/jwks.json" },
+    ]) {
+      const response = await app.inject(request);
+      expect(response.statusCode).toBe(404);
+      expect(response.json()).toMatchObject({ error: { code: "route_not_found" } });
+    }
+    expect(auth.handler).not.toHaveBeenCalled();
+  });
+
+  it("admits only the configured Remote MCP OAuth methods and paths", async () => {
+    const auth = createAuthRuntime({
+      remoteMcpOAuthEnabled: true,
+      remoteMcpOAuthJwksPath: "/oauth/remote-mcp/jwks.json",
+    });
+    const app = await createApiApp({
+      allowedOrigins: ["https://app.alphanet.test"],
+      authRuntime: auth.runtime,
+      environment: "test",
+      version: "test-version",
+    });
+    apps.push(app);
+
+    const allowedRequests = [
+      { method: "GET" as const, url: "/api/auth/oauth2/authorize" },
+      {
+        method: "GET" as const,
+        url: "/.well-known/oauth-authorization-server/api/auth",
+      },
+      {
+        method: "GET" as const,
+        url: "/api/auth/.well-known/oauth-authorization-server",
+      },
+      {
+        method: "GET" as const,
+        url: "/api/auth/.well-known/openid-configuration",
+      },
+      { method: "GET" as const, url: "/oauth/remote-mcp/jwks.json" },
+      ...[
+        "consent",
+        "continue",
+        "delete-consent",
+        "revoke",
+        "token",
+        "update-consent",
+      ].map((endpoint) => ({
+        method: "POST" as const,
+        url: `/api/auth/oauth2/${endpoint}`,
+      })),
+    ];
+    for (const request of allowedRequests) {
+      const response = await app.inject(request);
+      expect(response.statusCode, `${request.method} ${request.url}`).toBe(200);
+    }
+
+    for (const request of [
+      { method: "GET" as const, url: "/api/auth/oauth2/introspect" },
+      { method: "POST" as const, url: "/api/auth/oauth2/introspect" },
+      { method: "POST" as const, url: "/api/auth/oauth2/register" },
+      { method: "POST" as const, url: "/api/auth/oauth2/authorize" },
+      { method: "GET" as const, url: "/api/auth/oauth2/token" },
+      { method: "POST" as const, url: "/oauth/remote-mcp/jwks.json" },
+    ]) {
+      const response = await app.inject(request);
+      expect(response.statusCode, `${request.method} ${request.url}`).toBe(404);
+    }
+    expect(auth.handler).toHaveBeenCalledTimes(allowedRequests.length);
+  });
+
+  it("preserves public caching only for the configured live OAuth JWKS", async () => {
+    const auth = createAuthRuntime({
+      handler: (request) =>
+        Promise.resolve(
+          new Response(JSON.stringify({ keys: [] }), {
+            ...(new URL(request.url).pathname === "/api/auth/jwks"
+              ? {
+                  headers: {
+                    "cache-control": "public, max-age=300, must-revalidate",
+                  },
+                }
+              : {}),
+          }),
+        ),
+      remoteMcpOAuthEnabled: true,
+      remoteMcpOAuthJwksPath: "/api/auth/jwks",
+    });
+    const app = await createApiApp({
+      allowedOrigins: ["https://app.alphanet.test"],
+      authRuntime: auth.runtime,
+      environment: "test",
+      version: "test-version",
+    });
+    apps.push(app);
+
+    const jwks = await app.inject({ method: "GET", url: "/api/auth/jwks" });
+    expect(jwks.statusCode).toBe(200);
+    expect(jwks.headers["cache-control"]).toBe("public, max-age=300, must-revalidate");
+
+    const signIn = await app.inject({
+      headers: { origin: "https://app.alphanet.test" },
+      method: "POST",
+      payload: { email: "owner@example.test", password: "password" },
+      url: "/api/auth/sign-in/email",
+    });
+    expect(signIn.statusCode).toBe(200);
+    expect(signIn.headers["cache-control"]).toBe("no-store, private");
+  });
+
+  it("preserves an absent RFC 7009 revocation response body", async () => {
+    const auth = createAuthRuntime({
+      handler: () => Promise.resolve(new Response(null, { status: 200 })),
+      remoteMcpOAuthEnabled: true,
+    });
+    const app = await createApiApp({
+      allowedOrigins: ["https://app.alphanet.test"],
+      authRuntime: auth.runtime,
+      environment: "test",
+      version: "test-version",
+    });
+    apps.push(app);
+
+    const response = await app.inject({
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      method: "POST",
+      payload: "client_id=public-client&token=opaque-token",
+      url: "/api/auth/oauth2/revoke",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toBe("");
+  });
+
+  it("preserves OAuth form bytes, duplicate parameters, and every raw security header", async () => {
+    const captured: {
+      authorizationHeaders: readonly string[] | undefined;
+      body: string | undefined;
+      continuationHeaders: readonly string[] | undefined;
+    } = {
+      authorizationHeaders: undefined,
+      body: undefined,
+      continuationHeaders: undefined,
+    };
+    const auth = createAuthRuntime({
+      handler: async (request, transport) => {
+        captured.body = await request.text();
+        captured.authorizationHeaders = transport?.authorizationHeaders;
+        captured.continuationHeaders = transport?.continuationHeaders;
+        return Response.json({ ok: true });
+      },
+      remoteMcpOAuthEnabled: true,
+      remoteMcpOAuthJwksPath: "/oauth/remote-mcp/jwks.json",
+    });
+    const app = await createApiApp({
+      allowedOrigins: ["https://app.alphanet.test"],
+      authRuntime: auth.runtime,
+      environment: "test",
+      version: "test-version",
+    });
+    apps.push(app);
+    app.addHook("onRequest", (request, _reply, done) => {
+      const retained: string[] = [];
+      for (let index = 0; index + 1 < request.raw.rawHeaders.length; index += 2) {
+        const name = request.raw.rawHeaders[index];
+        const value = request.raw.rawHeaders[index + 1];
+        if (
+          name &&
+          value !== undefined &&
+          name.toLowerCase() !== "authorization" &&
+          name.toLowerCase() !== "x-alphanet-oauth-continuation"
+        ) {
+          retained.push(name, value);
+        }
+      }
+      request.raw.rawHeaders.splice(
+        0,
+        request.raw.rawHeaders.length,
+        ...retained,
+        "Authorization",
+        "Basic first",
+        "authorization",
+        "Basic second",
+        "X-AlphaNet-OAuth-Continuation",
+        "continuation-one",
+        "x-alphanet-oauth-continuation",
+        "continuation-two",
+      );
+      done();
+    });
+    const body =
+      "grant_type=authorization_code&scope=research%3Aread&scope=offline_access&client_id=staging";
+
+    const response = await app.inject({
+      headers: {
+        authorization: "Basic first, Basic second",
+        "content-type": "application/x-www-form-urlencoded",
+        "x-alphanet-oauth-continuation": "continuation-one, continuation-two",
+      },
+      method: "POST",
+      payload: body,
+      url: "/api/auth/oauth2/token",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(captured).toEqual({
+      authorizationHeaders: ["Basic first", "Basic second"],
+      body,
+      continuationHeaders: ["continuation-one", "continuation-two"],
+    });
+  });
+
+  it("rejects OAuth form bodies larger than 16 KiB before auth handling", async () => {
+    const auth = createAuthRuntime({ remoteMcpOAuthEnabled: true });
+    const app = await createApiApp({
+      allowedOrigins: ["https://app.alphanet.test"],
+      authRuntime: auth.runtime,
+      environment: "test",
+      version: "test-version",
+    });
+    apps.push(app);
+
+    const response = await app.inject({
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      method: "POST",
+      payload: `token=${"a".repeat(16 * 1_024)}`,
+      url: "/api/auth/oauth2/revoke",
+    });
+
+    expect(response.statusCode).toBe(413);
+    expect(auth.handler).not.toHaveBeenCalled();
+  });
+
+  it("returns only safe OAuth login recovery redirects", async () => {
+    const safeUrl =
+      "https://app.alphanet.test/oauth/consent?client_id=staging&sig=server-signed";
+    const safeAuth = createAuthRuntime({
+      handler: () =>
+        Promise.resolve(
+          Response.json({
+            redirect: true,
+            sessionToken: "must-not-leak",
+            url: safeUrl,
+          }),
+        ),
+    });
+    const safeApp = await createApiApp({
+      allowedOrigins: ["https://app.alphanet.test"],
+      authRuntime: safeAuth.runtime,
+      environment: "test",
+      version: "test-version",
+    });
+    apps.push(safeApp);
+
+    const safeResponse = await safeApp.inject({
+      method: "POST",
+      payload: { email: "owner@example.test", oauth_query: "signed" },
+      url: "/api/auth/sign-in/email",
+    });
+    expect(safeResponse.json()).toEqual({ redirect: true, url: safeUrl });
+    expect(safeResponse.body).not.toContain("sessionToken");
+
+    const unsafeAuth = createAuthRuntime({
+      handler: () =>
+        Promise.resolve(
+          Response.json({
+            redirect: true,
+            url: "https://attacker.example/oauth/callback?code=secret",
+          }),
+        ),
+    });
+    const unsafeApp = await createApiApp({
+      allowedOrigins: ["https://app.alphanet.test"],
+      authRuntime: unsafeAuth.runtime,
+      environment: "test",
+      version: "test-version",
+    });
+    apps.push(unsafeApp);
+    const unsafeResponse = await unsafeApp.inject({
+      method: "POST",
+      payload: { email: "owner@example.test", oauth_query: "signed" },
+      url: "/api/auth/sign-in/email",
+    });
+    expect(unsafeResponse.json()).toEqual({ status: true });
+    expect(unsafeResponse.body).not.toContain("attacker.example");
+    expect(unsafeResponse.body).not.toContain("secret");
+
+    const wrongPathAuth = createAuthRuntime({
+      handler: () =>
+        Promise.resolve(
+          Response.json({
+            redirect: true,
+            url: "https://app.alphanet.test/auth/error?sig=server-signed&token=secret",
+          }),
+        ),
+    });
+    const wrongPathApp = await createApiApp({
+      allowedOrigins: ["https://app.alphanet.test"],
+      authRuntime: wrongPathAuth.runtime,
+      environment: "test",
+      version: "test-version",
+    });
+    apps.push(wrongPathApp);
+    const wrongPathResponse = await wrongPathApp.inject({
+      method: "POST",
+      payload: { email: "owner@example.test", oauth_query: "signed" },
+      url: "/api/auth/sign-in/email",
+    });
+    expect(wrongPathResponse.json()).toEqual({ status: true });
+    expect(wrongPathResponse.body).not.toContain("token");
   });
 
   it("allows the Google callback and rejects the legacy URL-token reset callback", async () => {
@@ -932,6 +1325,7 @@ describe("API service", () => {
       payload: {
         callbackURL: "https://app.alphanet.test/home",
         errorCallbackURL: "https://app.alphanet.test/auth/error",
+        oauth_query: "client_id=staging-client&sig=server-signed",
         provider: "google",
       },
       url: "/api/auth/sign-in/social",

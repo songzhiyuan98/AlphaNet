@@ -12,6 +12,11 @@
       "types": "./src/index.ts",
       "development": "./src/index.ts",
       "default": "./dist/index.js"
+    },
+    "./remote-mcp-oauth-capacity": {
+      "types": "./src/remote-mcp-oauth-capacity.ts",
+      "development": "./src/remote-mcp-oauth-capacity.ts",
+      "default": "./dist/remote-mcp-oauth-capacity.js"
     }
   },
   "scripts": {

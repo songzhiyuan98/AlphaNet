@@ -16,6 +16,9 @@ importers:
       '@eslint/js':
         specifier: 9.39.5
         version: 9.39.5
+      '@modelcontextprotocol/sdk':
+        specifier: 1.29.0
+        version: 1.29.0(zod@4.4.3)
       '@playwright/test':
         specifier: 1.61.1
         version: 1.61.1
@@ -165,6 +168,9 @@ importers:
       '@alphanet/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@better-auth/oauth-provider':
+        specifier: 1.6.23
+        version: 1.6.23(@better-auth/core@1.6.23(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.1)(better-call@1.3.7(zod@4.4.3))(jose@6.2.3)(kysely@0.29.4)(nanostores@1.4.0))(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.1)(better-auth@1.6.23(next@16.2.10(@babel/core@7.29.7)(@playwright/test@1.61.1)(@types/node@22.20.1)(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(pg@8.22.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(vitest@4.1.10))(better-call@1.3.7(zod@4.4.3))
       better-auth:
         specifier: 1.6.23
         version: 1.6.23(next@16.2.10(@babel/core@7.29.7)(@playwright/test@1.61.1)(@types/node@22.20.1)(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(pg@8.22.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(vitest@4.1.10)
@@ -242,6 +248,9 @@ importers:
 
   packages/auth:
     dependencies:
+      '@alphanet/config':
+        specifier: workspace:*
+        version: link:../config
       '@alphanet/contracts':
         specifier: workspace:*
         version: link:../contracts

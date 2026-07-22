@@ -17,11 +17,16 @@ alb_origin_domain_name     = "origin-staging.alphanet.example"
 alb_origin_certificate_arn = ""
 route53_zone_id            = "ZREPLACE_WITH_PUBLIC_ZONE"
 cloudfront_price_class     = "PriceClass_100"
-mcp_public_enabled         = false
-mcp_runtime_enabled        = false
-mcp_oauth_issuer           = ""
-mcp_oauth_jwks_uri         = ""
-allow_direct_alb_cidrs     = []
+# Four separate rollout gates remain off. The OAuth server requires Owner
+# consent, but neither setting promotes the MCP runtime or public edge.
+mcp_public_enabled               = false
+mcp_runtime_enabled              = false
+mcp_oauth_owner_consent_enabled = false
+mcp_oauth_server_enabled        = false
+mcp_oauth_provisioning_enabled  = false
+mcp_oauth_issuer                 = ""
+mcp_oauth_jwks_uri               = ""
+allow_direct_alb_cidrs           = []
 
 nat_gateway_mode                   = "single"
 enable_vpc_flow_logs               = true

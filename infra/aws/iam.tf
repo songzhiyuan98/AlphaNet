@@ -58,6 +58,74 @@ resource "aws_iam_role_policy" "task_execution" {
   policy = data.aws_iam_policy_document.task_execution.json
 }
 
+# The OAuth manifest job is never part of CD and has distinct roles. Its ECS
+# agent can pull only the migration image and read only the migration password
+# plus the dedicated manifest secret. The container task role has no policy and
+# therefore cannot call AWS APIs itself.
+resource "aws_iam_role" "oauth_provision_execution" {
+  count = var.mcp_oauth_provisioning_enabled ? 1 : 0
+
+  name               = "${local.name}-oauth-provision-execution"
+  assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
+}
+
+data "aws_iam_policy_document" "oauth_provision_execution" {
+  count = var.mcp_oauth_provisioning_enabled ? 1 : 0
+
+  statement {
+    sid    = "PullMigrationImage"
+    effect = "Allow"
+    actions = [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:BatchGetImage",
+      "ecr:GetDownloadUrlForLayer",
+    ]
+    resources = [data.aws_ecr_repository.service["migrate"].arn]
+  }
+
+  statement {
+    sid       = "GetEcrAuthorizationToken"
+    effect    = "Allow"
+    actions   = ["ecr:GetAuthorizationToken"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "WriteOAuthProvisionLogs"
+    effect = "Allow"
+    actions = [
+      "logs:CreateLogStream",
+      "logs:PutLogEvents",
+    ]
+    resources = ["${aws_cloudwatch_log_group.service["oauth-provision"].arn}:*"]
+  }
+
+  statement {
+    sid     = "ReadOnlyProvisioningInputs"
+    effect  = "Allow"
+    actions = ["secretsmanager:GetSecretValue"]
+    resources = [
+      aws_secretsmanager_secret.application.arn,
+      aws_secretsmanager_secret.oauth_client_provisioning[0].arn,
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "oauth_provision_execution" {
+  count = var.mcp_oauth_provisioning_enabled ? 1 : 0
+
+  name   = "operator-oauth-provisioning"
+  role   = aws_iam_role.oauth_provision_execution[0].id
+  policy = data.aws_iam_policy_document.oauth_provision_execution[0].json
+}
+
+resource "aws_iam_role" "oauth_provision_task" {
+  count = var.mcp_oauth_provisioning_enabled ? 1 : 0
+
+  name               = "${local.name}-oauth-provision-task"
+  assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
+}
+
 # Bootstrap is deliberately outside the CD trust boundary. This execution role
 # is the only ECS identity allowed to read Aurora's administrator secret.
 resource "aws_iam_role" "bootstrap_execution" {

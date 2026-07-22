@@ -1,15 +1,30 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+set +x
+export AWS_PAGER=""
 
 usage() {
   printf '%s\n' \
     "Usage: $0 --initial APPLICATION_SECRET_ARN DB_HOST VALKEY_HOST VALKEY_AUTH_SECRET_ARN API_INTERNAL_DNS_NAME [AWS_REGION]" \
+    "       $0 --augment-mcp-oauth APPLICATION_SECRET_ARN [AWS_REGION]" \
     "" \
-    "This is a first-deploy operation. It refuses to overwrite an existing" \
-    "version; later changes require the coordinated rotation runbook."
+    "--initial refuses any existing version. --augment-mcp-oauth preserves" \
+    "every existing field, adds only absent OAuth keys, and uses an AWSCURRENT" \
+    "compare-and-swap so a concurrent update cannot be overwritten."
 }
 
-if [[ "${1:-}" != "--initial" || $# -lt 6 || $# -gt 7 ]]; then
+mode="${1:-}"
+if [[ "${mode}" == "--initial" ]]; then
+  if [[ $# -lt 6 || $# -gt 7 ]]; then
+    usage >&2
+    exit 2
+  fi
+elif [[ "${mode}" == "--augment-mcp-oauth" ]]; then
+  if [[ $# -lt 2 || $# -gt 3 ]]; then
+    usage >&2
+    exit 2
+  fi
+else
   usage >&2
   exit 2
 fi
@@ -22,6 +37,129 @@ for command_name in aws jq openssl; do
 done
 
 application_secret_arn="$2"
+if [[ "${mode}" == "--augment-mcp-oauth" ]]; then
+  aws_region="${3:-${AWS_REGION:-us-west-2}}"
+  pending_version_count="$(aws secretsmanager list-secret-version-ids \
+    --region "${aws_region}" \
+    --secret-id "${application_secret_arn}" \
+    --include-deprecated \
+    --output json | jq '[.Versions[] | select(.VersionStages | index("AWSPENDING"))] | length')"
+  if [[ "${pending_version_count}" != "0" ]]; then
+    printf '%s\n' \
+      "Application secret already has AWSPENDING; finish or cancel that rotation before augmentation." >&2
+    exit 1
+  fi
+  current_secret_response="$(aws secretsmanager get-secret-value \
+    --region "${aws_region}" \
+    --secret-id "${application_secret_arn}" \
+    --version-stage AWSCURRENT \
+    --output json)"
+  current_version_id="$(jq -er '.VersionId' <<<"${current_secret_response}")"
+  current_secret_json="$(jq -er '.SecretString' <<<"${current_secret_response}")"
+  if ! jq -e 'type == "object"' <<<"${current_secret_json}" >/dev/null; then
+    printf '%s\n' "Application SecretString must be a JSON object." >&2
+    exit 1
+  fi
+
+  missing_oauth_key_count="$(jq -er '
+    ([
+      "MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64",
+      "MCP_OAUTH_CONTINUATION_KEY_BASE64",
+      "MCP_OAUTH_TOKEN_STORAGE_KEY_BASE64",
+      "MCP_OAUTH_JWK_ENCRYPTION_KEY_BASE64",
+      "MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64"
+    ] - keys) | length
+  ' <<<"${current_secret_json}")"
+  if [[ "${missing_oauth_key_count}" == "0" ]]; then
+    printf '%s\n' \
+      "Application secret already contains every OAuth key; augmentation refuses to overwrite them." >&2
+    exit 1
+  fi
+
+  oauth_authorization_binding_key_base64="$(openssl rand 32 | openssl base64 -A)"
+  oauth_continuation_key_base64="$(openssl rand 32 | openssl base64 -A)"
+  oauth_token_storage_key_base64="$(openssl rand 32 | openssl base64 -A)"
+  oauth_jwk_encryption_key_base64="$(openssl rand 32 | openssl base64 -A)"
+  access_token_jti_digest_key_base64="$(openssl rand 32 | openssl base64 -A)"
+  pending_client_token="$(openssl rand -hex 32)"
+
+  new_version_id="$(
+    printf '%s\0' \
+      "${current_secret_json}" \
+      "${oauth_authorization_binding_key_base64}" \
+      "${oauth_continuation_key_base64}" \
+      "${oauth_token_storage_key_base64}" \
+      "${oauth_jwk_encryption_key_base64}" \
+      "${access_token_jti_digest_key_base64}" |
+      jq -Rsc '
+        split("\u0000") as $value |
+        if (($value | length) != 7 or $value[6] != "") then
+          error("unexpected OAuth augmentation field framing")
+        else
+          ($value[0] | fromjson) as $current |
+          [
+            { key: "MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64", value: $value[1] },
+            { key: "MCP_OAUTH_CONTINUATION_KEY_BASE64", value: $value[2] },
+            { key: "MCP_OAUTH_TOKEN_STORAGE_KEY_BASE64", value: $value[3] },
+            { key: "MCP_OAUTH_JWK_ENCRYPTION_KEY_BASE64", value: $value[4] },
+            { key: "MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64", value: $value[5] }
+          ] |
+          reduce .[] as $entry ($current;
+            if has($entry.key) then . else . + { ($entry.key): $entry.value } end
+          )
+        end
+      ' |
+      aws secretsmanager put-secret-value \
+        --region "${aws_region}" \
+        --secret-id "${application_secret_arn}" \
+        --client-request-token "${pending_client_token}" \
+        --version-stages AWSPENDING \
+        --secret-string file:///dev/stdin \
+        --query VersionId \
+        --output text
+  )"
+  if [[ "${new_version_id}" != "${pending_client_token}" ]]; then
+    printf '%s\n' "Secrets Manager returned an unexpected pending version." >&2
+    exit 1
+  fi
+
+  if ! aws secretsmanager update-secret-version-stage \
+    --region "${aws_region}" \
+    --secret-id "${application_secret_arn}" \
+    --version-stage AWSCURRENT \
+    --move-to-version-id "${new_version_id}" \
+    --remove-from-version-id "${current_version_id}" \
+    >/dev/null; then
+    aws secretsmanager update-secret-version-stage \
+      --region "${aws_region}" \
+      --secret-id "${application_secret_arn}" \
+      --version-stage AWSPENDING \
+      --remove-from-version-id "${new_version_id}" \
+      >/dev/null 2>&1 || true
+    printf '%s\n' \
+      "Application secret changed concurrently; augmentation left AWSCURRENT untouched." >&2
+    exit 1
+  fi
+  aws secretsmanager update-secret-version-stage \
+    --region "${aws_region}" \
+    --secret-id "${application_secret_arn}" \
+    --version-stage AWSPENDING \
+    --remove-from-version-id "${new_version_id}" \
+    >/dev/null
+
+  unset \
+    current_secret_response \
+    current_secret_json \
+    oauth_authorization_binding_key_base64 \
+    oauth_continuation_key_base64 \
+    oauth_token_storage_key_base64 \
+    oauth_jwk_encryption_key_base64 \
+    access_token_jti_digest_key_base64
+  printf '%s\n' \
+    "Application secret augmented with absent OAuth keys; existing values were preserved."
+  exit 0
+fi
+
 database_host="$3"
 valkey_host="$4"
 valkey_auth_secret_arn="$5"
@@ -152,6 +290,10 @@ internal_ca_certificate_base64="$(printf '%s' "${internal_ca_certificate}" | ope
 actor_assertion_key_base64="$(openssl rand 32 | openssl base64 -A)"
 actor_assertion_replay_digest_key_base64="$(openssl rand 32 | openssl base64 -A)"
 access_token_jti_digest_key_base64="$(openssl rand 32 | openssl base64 -A)"
+oauth_authorization_binding_key_base64="$(openssl rand 32 | openssl base64 -A)"
+oauth_continuation_key_base64="$(openssl rand 32 | openssl base64 -A)"
+oauth_token_storage_key_base64="$(openssl rand 32 | openssl base64 -A)"
+oauth_jwk_encryption_key_base64="$(openssl rand 32 | openssl base64 -A)"
 
 database_url="postgresql://alphanet_runtime:${runtime_password}@${database_host}:5432/alphanet?sslmode=verify-full"
 redis_url="rediss://default:${valkey_auth_token}@${valkey_host}:6379/0"
@@ -180,10 +322,14 @@ printf '%s\0' \
   '1' \
   '{}' \
   "${actor_assertion_replay_digest_key_base64}" \
-  "${access_token_jti_digest_key_base64}" |
+  "${access_token_jti_digest_key_base64}" \
+  "${oauth_authorization_binding_key_base64}" \
+  "${oauth_continuation_key_base64}" \
+  "${oauth_token_storage_key_base64}" \
+  "${oauth_jwk_encryption_key_base64}" |
   jq -Rsc '
     split("\u0000") as $value |
-    if (($value | length) != 25 or $value[24] != "") then
+    if (($value | length) != 29 or $value[28] != "") then
       error("unexpected application secret field framing")
     else
       {
@@ -210,7 +356,11 @@ printf '%s\0' \
         MCP_ACTOR_ASSERTION_CURRENT_KEY_VERSION: $value[20],
         MCP_ACTOR_ASSERTION_PREVIOUS_KEYS: $value[21],
         MCP_ACTOR_ASSERTION_REPLAY_DIGEST_KEY_BASE64: $value[22],
-        MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64: $value[23]
+        MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64: $value[23],
+        MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64: $value[24],
+        MCP_OAUTH_CONTINUATION_KEY_BASE64: $value[25],
+        MCP_OAUTH_TOKEN_STORAGE_KEY_BASE64: $value[26],
+        MCP_OAUTH_JWK_ENCRYPTION_KEY_BASE64: $value[27]
       }
     end
   ' |
@@ -251,6 +401,10 @@ unset \
   actor_assertion_key_base64 \
   actor_assertion_replay_digest_key_base64 \
   access_token_jti_digest_key_base64 \
+  oauth_authorization_binding_key_base64 \
+  oauth_continuation_key_base64 \
+  oauth_token_storage_key_base64 \
+  oauth_jwk_encryption_key_base64 \
   database_url \
   redis_url \
   existing_version_count

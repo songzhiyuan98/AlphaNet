@@ -45,3 +45,49 @@ resource "aws_secretsmanager_secret_policy" "application" {
   policy              = data.aws_iam_policy_document.application_secret.json
   block_public_policy = true
 }
+
+# This container has no Terraform-managed version. An authenticated operator
+# stages a reviewed manifest as a digest-addressed Secrets Manager version;
+# the one-off launcher binds the ECS revision to that exact version ID.
+resource "aws_secretsmanager_secret" "oauth_client_provisioning" {
+  count = var.mcp_oauth_provisioning_enabled ? 1 : 0
+
+  name                    = "${local.name}/remote-mcp-oauth-client-provisioning"
+  description             = "Operator-reviewed Remote MCP OAuth public-client manifest; values are populated outside Terraform"
+  recovery_window_in_days = var.environment == "production" ? 30 : 7
+
+  tags = {
+    Purpose = "operator-oauth-provisioning"
+  }
+}
+
+data "aws_iam_policy_document" "oauth_client_provisioning_secret" {
+  count = var.mcp_oauth_provisioning_enabled ? 1 : 0
+
+  statement {
+    sid    = "DenyUnencryptedTransport"
+    effect = "Deny"
+
+    principals {
+      type        = "AWS"
+      identifiers = ["*"]
+    }
+
+    actions   = ["secretsmanager:*"]
+    resources = [aws_secretsmanager_secret.oauth_client_provisioning[0].arn]
+
+    condition {
+      test     = "Bool"
+      variable = "aws:SecureTransport"
+      values   = ["false"]
+    }
+  }
+}
+
+resource "aws_secretsmanager_secret_policy" "oauth_client_provisioning" {
+  count = var.mcp_oauth_provisioning_enabled ? 1 : 0
+
+  secret_arn          = aws_secretsmanager_secret.oauth_client_provisioning[0].arn
+  policy              = data.aws_iam_policy_document.oauth_client_provisioning_secret[0].json
+  block_public_policy = true
+}

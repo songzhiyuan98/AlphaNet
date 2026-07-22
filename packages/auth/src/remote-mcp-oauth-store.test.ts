@@ -491,6 +491,17 @@ describe("createAlphaNetRemoteMcpOAuthSecurityStore", () => {
       ),
     ).resolves.toBe("provider-result");
     expect(callback).toHaveBeenCalledWith({ grantId: GRANT_ID });
+    const providerDigest = createHmac("sha256", Buffer.alloc(32, 0x22))
+      .update("alphanet:authorization_code:v1\0", "utf8")
+      .update(AUTHORIZATION_CODE, "utf8")
+      .digest("base64url");
+    const storedIdentifier = createHash("sha256")
+      .update(providerDigest, "utf8")
+      .digest("base64url");
+    const codeRead = pool.client.calls.find((call) =>
+      call.text.includes("read_authorization_code"),
+    );
+    expect(codeRead?.values).toEqual([storedIdentifier]);
     const serializedQueries = JSON.stringify(pool.client.calls);
     expect(serializedQueries).not.toContain(AUTHORIZATION_CODE);
     expect(serializedQueries).not.toContain(CODE_VERIFIER);

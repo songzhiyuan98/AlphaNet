@@ -178,7 +178,17 @@ export function parseRemoteMcpOAuthConsentQuery(
 
   const parameters = new URLSearchParams(oauthQuery);
   validateSignedTransport(parameters);
-  return validateRemoteMcpAuthorizeQuery(extractAuthorizeParameters(parameters), {
+  const authorization = extractAuthorizeParameters(parameters);
+  // @better-auth/oauth-provider 1.6.23 intentionally strips the RFC 8707
+  // extension from its signed post-login/consent transport. The raw authorize
+  // boundary already required the exact singleton resource and persisted that
+  // binding before Provider dispatch. Reconstruct only that immutable trusted
+  // value here; a future Provider version that signs `resource` still has to
+  // match it exactly in validateRemoteMcpAuthorizeQuery.
+  if (!authorization.has("resource")) {
+    authorization.set("resource", options.resource);
+  }
+  return validateRemoteMcpAuthorizeQuery(authorization, {
     resource: options.resource,
   });
 }

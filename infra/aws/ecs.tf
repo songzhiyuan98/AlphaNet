@@ -1,5 +1,9 @@
 locals {
   application_secret_arn = aws_secretsmanager_secret.application.arn
+  database_jobs = setunion(
+    toset(["bootstrap", "migrate", "runtime-smoke"]),
+    var.mcp_oauth_provisioning_enabled ? toset(["oauth-provision"]) : toset([]),
+  )
 
   common_service_environment = [
     { name = "APP_VERSION", value = var.app_version },
@@ -9,45 +13,56 @@ locals {
     { name = "TZ", value = "UTC" },
   ]
 
-  api_environment = concat(local.common_service_environment, [
-    { name = "HOST", value = "0.0.0.0" },
-    { name = "PORT", value = "4000" },
-    { name = "CORS_ORIGINS", value = local.public_origin },
-    { name = "BETTER_AUTH_URL", value = local.public_origin },
-    { name = "AUTH_TRUSTED_ORIGINS", value = local.public_origin },
-    { name = "AUTH_SECURE_COOKIES", value = "true" },
-    { name = "API_TRUSTED_PROXY_CIDRS", value = join(",", values(local.public_subnet_cidrs)) },
-    { name = "AUTH_DATABASE_POOL_MAX", value = "10" },
-    { name = "AUTH_EMAIL_DAILY_GLOBAL_LIMIT", value = "10000" },
-    { name = "AUTH_EMAIL_MODE", value = "resend" },
-    { name = "AUTH_EMAIL_FROM", value = var.auth_email_from },
-    { name = "AUTH_EMAIL_REPLY_TO", value = var.auth_email_reply_to },
-    { name = "AGENT_API_AUDIENCE", value = "urn:alphanet:api:v1" },
-    { name = "AGENT_API_KEY_PEPPER_VERSION", value = "1" },
-    { name = "AGENT_API_KEY_PREVIOUS_PEPPERS", value = "{}" },
-    { name = "AGENT_CREDENTIAL_ACTIVE_PER_AGENT", value = "5" },
-    { name = "AGENT_CREDENTIAL_ACTIVE_PER_OWNER", value = "20" },
-    { name = "AGENT_CREDENTIAL_ISSUE_PER_OWNER_24H", value = "10" },
-    { name = "AGENT_CREDENTIAL_MUTATION_COOLDOWN_SECONDS", value = "30" },
-    { name = "AGENT_CREDENTIAL_DEFAULT_TTL_DAYS", value = "90" },
-    { name = "AGENT_CREDENTIAL_MAX_TTL_DAYS", value = "365" },
-    { name = "PENDING_ACTION_ENCRYPTION_KEY_VERSION", value = "1" },
-    { name = "PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS", value = "{}" },
-    { name = "SEARCH_EMBEDDING_PROVIDER", value = "bedrock" },
-    { name = "SEARCH_EMBEDDING_MODEL_ID", value = var.search_embedding_model_id },
-    { name = "SEARCH_EMBEDDING_DIMENSIONS", value = "512" },
-    { name = "SEARCH_EMBEDDING_TIMEOUT_MS", value = "5000" },
-    { name = "MCP_INTERNAL_API_ENABLED", value = tostring(local.mcp_runtime_enabled) },
-    { name = "MCP_INTERNAL_API_PORT", value = tostring(local.mcp_internal_api_port) },
-    { name = "MCP_OAUTH_OWNER_CONSENT_ENABLED", value = "false" },
-  ])
+  api_environment = concat(
+    local.common_service_environment,
+    [
+      { name = "HOST", value = "0.0.0.0" },
+      { name = "PORT", value = "4000" },
+      { name = "CORS_ORIGINS", value = local.public_origin },
+      { name = "BETTER_AUTH_URL", value = local.public_origin },
+      { name = "AUTH_TRUSTED_ORIGINS", value = local.public_origin },
+      { name = "AUTH_SECURE_COOKIES", value = "true" },
+      { name = "API_TRUSTED_PROXY_CIDRS", value = join(",", values(local.public_subnet_cidrs)) },
+      { name = "AUTH_DATABASE_POOL_MAX", value = "10" },
+      { name = "AUTH_EMAIL_DAILY_GLOBAL_LIMIT", value = "10000" },
+      { name = "AUTH_EMAIL_MODE", value = "resend" },
+      { name = "AUTH_EMAIL_FROM", value = var.auth_email_from },
+      { name = "AUTH_EMAIL_REPLY_TO", value = var.auth_email_reply_to },
+      { name = "AGENT_API_AUDIENCE", value = "urn:alphanet:api:v1" },
+      { name = "AGENT_API_KEY_PEPPER_VERSION", value = "1" },
+      { name = "AGENT_API_KEY_PREVIOUS_PEPPERS", value = "{}" },
+      { name = "AGENT_CREDENTIAL_ACTIVE_PER_AGENT", value = "5" },
+      { name = "AGENT_CREDENTIAL_ACTIVE_PER_OWNER", value = "20" },
+      { name = "AGENT_CREDENTIAL_ISSUE_PER_OWNER_24H", value = "10" },
+      { name = "AGENT_CREDENTIAL_MUTATION_COOLDOWN_SECONDS", value = "30" },
+      { name = "AGENT_CREDENTIAL_DEFAULT_TTL_DAYS", value = "90" },
+      { name = "AGENT_CREDENTIAL_MAX_TTL_DAYS", value = "365" },
+      { name = "PENDING_ACTION_ENCRYPTION_KEY_VERSION", value = "1" },
+      { name = "PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS", value = "{}" },
+      { name = "SEARCH_EMBEDDING_PROVIDER", value = "bedrock" },
+      { name = "SEARCH_EMBEDDING_MODEL_ID", value = var.search_embedding_model_id },
+      { name = "SEARCH_EMBEDDING_DIMENSIONS", value = "512" },
+      { name = "SEARCH_EMBEDDING_TIMEOUT_MS", value = "5000" },
+      { name = "MCP_INTERNAL_API_ENABLED", value = tostring(local.mcp_runtime_enabled) },
+      { name = "MCP_INTERNAL_API_PORT", value = tostring(local.mcp_internal_api_port) },
+      { name = "MCP_OAUTH_OWNER_CONSENT_ENABLED", value = tostring(var.mcp_oauth_owner_consent_enabled) },
+      { name = "MCP_OAUTH_SERVER_ENABLED", value = tostring(var.mcp_oauth_server_enabled) },
+    ],
+    var.mcp_oauth_server_enabled ? [
+      { name = "MCP_OAUTH_ISSUER", value = var.mcp_oauth_issuer },
+      { name = "MCP_OAUTH_JWKS_URI", value = var.mcp_oauth_jwks_uri },
+      { name = "MCP_OAUTH_RESOURCE", value = local.mcp_oauth_resource },
+      ] : var.mcp_oauth_owner_consent_enabled ? [
+      { name = "MCP_OAUTH_RESOURCE", value = local.mcp_oauth_resource },
+    ] : [],
+  )
 
   web_environment = concat(local.common_service_environment, [
     { name = "PORT", value = "3000" },
     { name = "API_INTERNAL_URL", value = "http://api.${aws_service_discovery_private_dns_namespace.main.name}:4000" },
     { name = "SSR_ALLOW_MISSING_CLIENT_IP", value = "false" },
     { name = "GOOGLE_AUTH_ENABLED", value = tostring(var.google_oauth_enabled) },
-    { name = "MCP_OAUTH_OWNER_CONSENT_ENABLED", value = "false" },
+    { name = "MCP_OAUTH_OWNER_CONSENT_ENABLED", value = tostring(var.mcp_oauth_owner_consent_enabled) },
     # The Web image is built with an empty public API URL so browser calls stay
     # on the CloudFront cookie origin. This runtime value documents that contract.
     { name = "NEXT_PUBLIC_API_URL", value = "" },
@@ -113,6 +128,18 @@ locals {
       { name = "MCP_ACTOR_ASSERTION_REPLAY_DIGEST_KEY_BASE64", valueFrom = "${local.application_secret_arn}:MCP_ACTOR_ASSERTION_REPLAY_DIGEST_KEY_BASE64::" },
       { name = "MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64", valueFrom = "${local.application_secret_arn}:MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64::" },
     ] : [],
+    var.mcp_oauth_server_enabled ? [
+      { name = "MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64", valueFrom = "${local.application_secret_arn}:MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64::" },
+      { name = "MCP_OAUTH_CONTINUATION_KEY_BASE64", valueFrom = "${local.application_secret_arn}:MCP_OAUTH_CONTINUATION_KEY_BASE64::" },
+      { name = "MCP_OAUTH_TOKEN_STORAGE_KEY_BASE64", valueFrom = "${local.application_secret_arn}:MCP_OAUTH_TOKEN_STORAGE_KEY_BASE64::" },
+      { name = "MCP_OAUTH_JWK_ENCRYPTION_KEY_BASE64", valueFrom = "${local.application_secret_arn}:MCP_OAUTH_JWK_ENCRYPTION_KEY_BASE64::" },
+      ] : var.mcp_oauth_owner_consent_enabled ? [
+      { name = "MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64", valueFrom = "${local.application_secret_arn}:MCP_OAUTH_AUTHORIZATION_BINDING_KEY_BASE64::" },
+      { name = "MCP_OAUTH_CONTINUATION_KEY_BASE64", valueFrom = "${local.application_secret_arn}:MCP_OAUTH_CONTINUATION_KEY_BASE64::" },
+    ] : [],
+    var.mcp_oauth_server_enabled && !local.mcp_runtime_enabled ? [
+      { name = "MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64", valueFrom = "${local.application_secret_arn}:MCP_ACCESS_TOKEN_JTI_DIGEST_KEY_BASE64::" },
+    ] : [],
     var.google_oauth_enabled ? [
       { name = "AUTH_GOOGLE_CLIENT_ID", valueFrom = "${local.application_secret_arn}:AUTH_GOOGLE_CLIENT_ID::" },
       { name = "AUTH_GOOGLE_CLIENT_SECRET", valueFrom = "${local.application_secret_arn}:AUTH_GOOGLE_CLIENT_SECRET::" },
@@ -144,7 +171,7 @@ locals {
     ]
   }
 
-  database_job_environment = {
+  database_job_environment = merge({
     bootstrap = [
       { name = "PGHOST", value = aws_rds_cluster.main.endpoint },
       { name = "PGPORT", value = "5432" },
@@ -173,9 +200,22 @@ locals {
       { name = "PGSSLROOTCERT", value = "/opt/alphanet/certs/aws-rds-us-west-2-bundle.pem" },
       { name = "ALPHANET_RUNTIME_ROLE", value = "alphanet_runtime" },
     ]
-  }
+    },
+    var.mcp_oauth_provisioning_enabled ? {
+      oauth-provision = [
+        { name = "PGHOST", value = aws_rds_cluster.main.endpoint },
+        { name = "PGPORT", value = "5432" },
+        { name = "PGDATABASE", value = aws_rds_cluster.main.database_name },
+        { name = "PGUSER", value = "alphanet_migration" },
+        { name = "PGSSLMODE", value = "verify-full" },
+        { name = "PGSSLROOTCERT", value = "/opt/alphanet/certs/aws-rds-us-west-2-bundle.pem" },
+        { name = "ALPHANET_MIGRATION_ROLE", value = "alphanet_migration" },
+        { name = "ALPHANET_EXPECTED_OAUTH_RESOURCE", value = "${local.public_origin}/mcp" },
+      ]
+    } : {},
+  )
 
-  database_job_secrets = {
+  database_job_secrets = merge({
     bootstrap = [
       { name = "PGUSER", valueFrom = "${aws_rds_cluster.main.master_user_secret[0].secret_arn}:username::" },
       { name = "PGPASSWORD", valueFrom = "${aws_rds_cluster.main.master_user_secret[0].secret_arn}:password::" },
@@ -188,17 +228,37 @@ locals {
     runtime-smoke = [
       { name = "PGPASSWORD", valueFrom = "${local.application_secret_arn}:ALPHANET_RUNTIME_PASSWORD::" },
     ]
-  }
+    },
+    var.mcp_oauth_provisioning_enabled ? {
+      # The trusted Step Functions launcher runs this exact immutable task
+      # revision. Both manifest fields resolve through the single approved
+      # stage, while a caller-supplied expected digest is passed only as a
+      # non-secret environment value and rechecked inside the wrapper.
+      oauth-provision = [
+        { name = "PGPASSWORD", valueFrom = "${local.application_secret_arn}:ALPHANET_MIGRATION_PASSWORD::" },
+        { name = "ALPHANET_OAUTH_MANIFEST_BASE64", valueFrom = "${aws_secretsmanager_secret.oauth_client_provisioning[0].arn}:manifest_base64:ALPHANET_OAUTH_APPROVED:" },
+        { name = "ALPHANET_OAUTH_MANIFEST_SHA256", valueFrom = "${aws_secretsmanager_secret.oauth_client_provisioning[0].arn}:manifest_sha256:ALPHANET_OAUTH_APPROVED:" },
+      ]
+    } : {},
+  )
 
-  database_job_entrypoint = {
+  database_job_entrypoint = merge({
     bootstrap     = ["/bin/bash", "/opt/alphanet/db/scripts/aws-bootstrap-database.sh"]
     migrate       = ["/bin/bash", "/opt/alphanet/db/scripts/aws-migrate-release.sh"]
     runtime-smoke = ["/bin/bash", "/opt/alphanet/db/scripts/aws-smoke-runtime.sh"]
-  }
+    },
+    var.mcp_oauth_provisioning_enabled ? {
+      oauth-provision = ["/bin/bash", "/opt/alphanet/db/scripts/aws-reconcile-remote-mcp-oauth-clients.sh"]
+    } : {},
+  )
 }
 
 resource "aws_cloudwatch_log_group" "service" {
-  for_each = toset(concat(tolist(local.services), ["bootstrap", "runtime-smoke"]))
+  for_each = setunion(
+    local.services,
+    toset(["bootstrap", "runtime-smoke"]),
+    var.mcp_oauth_provisioning_enabled ? toset(["oauth-provision"]) : toset([]),
+  )
 
   name              = "/aws/ecs/${local.name}/${each.key}"
   retention_in_days = var.log_retention_days
@@ -341,6 +401,64 @@ resource "aws_ecs_task_definition" "service" {
       )
       error_message = "An enabled MCP runtime requires a fixed custom domain_name plus mcp_oauth_issuer and mcp_oauth_jwks_uri."
     }
+
+    precondition {
+      condition = (
+        each.key != "api" ||
+        !var.mcp_oauth_server_enabled ||
+        var.mcp_oauth_owner_consent_enabled
+      )
+      error_message = "mcp_oauth_server_enabled requires mcp_oauth_owner_consent_enabled; neither gate enables the MCP runtime or public edge."
+    }
+
+    precondition {
+      condition = (
+        each.key != "api" ||
+        !var.mcp_oauth_server_enabled ||
+        (
+          var.service_desired_count["worker"] > 0 &&
+          (
+            !var.enable_service_autoscaling ||
+            try(
+              var.service_autoscaling["worker"].min_capacity,
+              var.service_desired_count["worker"],
+            ) > 0
+          )
+        )
+      )
+      error_message = "mcp_oauth_server_enabled requires an effective minimum of at least one lifecycle Worker task before OAuth can admit durable envelopes or Grants."
+    }
+
+    precondition {
+      condition = (
+        each.key != "api" ||
+        !var.mcp_oauth_server_enabled ||
+        var.enable_waf
+      )
+      error_message = "mcp_oauth_server_enabled requires the CloudFront WAF, including the endpoint-scoped public JWKS rate limit."
+    }
+
+    precondition {
+      condition = (
+        each.key != "api" ||
+        !var.mcp_oauth_owner_consent_enabled ||
+        var.domain_name != ""
+      )
+      error_message = "Owner consent requires the fixed custom domain that anchors the immutable Remote MCP resource."
+    }
+
+    precondition {
+      condition = (
+        each.key != "api" ||
+        !var.mcp_oauth_server_enabled ||
+        (
+          var.domain_name != "" &&
+          var.mcp_oauth_issuer == "${local.public_origin}/api/auth" &&
+          var.mcp_oauth_jwks_uri == "${local.public_origin}/api/auth/jwks"
+        )
+      )
+      error_message = "An enabled OAuth server requires a fixed custom domain and the exact public /api/auth issuer and /api/auth/jwks URI."
+    }
   }
 
   depends_on = [
@@ -351,15 +469,22 @@ resource "aws_ecs_task_definition" "service" {
 }
 
 resource "aws_ecs_task_definition" "database_job" {
-  for_each = toset(["bootstrap", "migrate", "runtime-smoke"])
+  for_each = local.database_jobs
 
   family                   = "${local.name}-${each.key}"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = tostring(var.task_cpu["migrate"])
   memory                   = tostring(var.task_memory["migrate"])
-  execution_role_arn       = each.key == "bootstrap" ? aws_iam_role.bootstrap_execution.arn : aws_iam_role.task_execution.arn
-  task_role_arn            = aws_iam_role.task.arn
+  execution_role_arn = (
+    each.key == "bootstrap" ? aws_iam_role.bootstrap_execution.arn :
+    each.key == "oauth-provision" ? aws_iam_role.oauth_provision_execution[0].arn :
+    aws_iam_role.task_execution.arn
+  )
+  task_role_arn = (
+    each.key == "oauth-provision" ? aws_iam_role.oauth_provision_task[0].arn :
+    aws_iam_role.task.arn
+  )
 
   runtime_platform {
     cpu_architecture        = var.cpu_architecture
@@ -410,10 +535,16 @@ resource "aws_ecs_task_definition" "database_job" {
       condition     = startswith(var.image_overrides["migrate"], "${data.aws_ecr_repository.service["migrate"].repository_url}@sha256:")
       error_message = "Database job image_overrides must reference the exact shared AlphaNet migrate ECR repository by digest."
     }
+
+    precondition {
+      condition     = each.key != "oauth-provision" || var.domain_name != ""
+      error_message = "Remote MCP OAuth provisioning requires the fixed custom domain that anchors its immutable /mcp Resource."
+    }
   }
 
   depends_on = [
     aws_iam_role_policy.bootstrap_execution,
+    aws_iam_role_policy.oauth_provision_execution,
     aws_iam_role_policy.task_execution,
   ]
 }

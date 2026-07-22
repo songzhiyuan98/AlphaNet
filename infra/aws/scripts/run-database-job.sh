@@ -4,8 +4,8 @@ set -Eeuo pipefail
 usage() {
   printf '%s\n' \
     "Usage: $0 JOB CLUSTER TASK_DEFINITION SUBNET_IDS SECURITY_GROUP_ID [AWS_REGION] [TIMEOUT_SECONDS]" \
-    "JOB must be bootstrap, migrate, or runtime-smoke; SUBNET_IDS is comma separated." \
-    "Default timeout: 1800 seconds for bootstrap/migrate, 600 for runtime-smoke." \
+    "JOB must be bootstrap, migrate, oauth-provision, or runtime-smoke; SUBNET_IDS is comma separated." \
+    "Default timeout: 1800 seconds for bootstrap/migrate, 600 for oauth-provision/runtime-smoke." \
     "ALPHANET_JOB_TIMEOUT_SECONDS and ALPHANET_JOB_POLL_SECONDS may override defaults."
 }
 
@@ -21,12 +21,12 @@ subnet_ids="$4"
 security_group_id="$5"
 aws_region="${6:-${AWS_REGION:-us-west-2}}"
 
-if [[ ! "${job}" =~ ^(bootstrap|migrate|runtime-smoke)$ ]]; then
+if [[ ! "${job}" =~ ^(bootstrap|migrate|oauth-provision|runtime-smoke)$ ]]; then
   usage >&2
   exit 2
 fi
 
-if [[ "${job}" == "runtime-smoke" ]]; then
+if [[ "${job}" == "runtime-smoke" || "${job}" == "oauth-provision" ]]; then
   default_timeout_seconds=600
 else
   default_timeout_seconds=1800

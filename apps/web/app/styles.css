@@ -2229,6 +2229,7 @@ footer {
 
 .ownerSectionNav {
   align-items: center;
+  background: var(--surface-canvas);
   border-bottom: 1px solid var(--line);
   display: flex;
   gap: 28px;

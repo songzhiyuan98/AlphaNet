@@ -1024,6 +1024,23 @@ for raw_path in "${smoke_paths[@]}"; do
         exit 1
       }
       ;;
+    /.well-known/oauth-authorization-server/api/auth)
+      jq -e --arg issuer "${PUBLIC_BASE_URL}/api/auth" '
+        type == "object" and
+        .issuer == $issuer and
+        .authorization_endpoint == ($issuer + "/oauth2/authorize") and
+        .token_endpoint == ($issuer + "/oauth2/token") and
+        .jwks_uri == ($issuer + "/jwks") and
+        .revocation_endpoint == ($issuer + "/oauth2/revoke") and
+        .token_endpoint_auth_methods_supported == ["none"] and
+        .revocation_endpoint_auth_methods_supported == ["none"] and
+        (has("registration_endpoint") | not) and
+        (has("introspection_endpoint") | not)
+      ' "$smoke_response" >/dev/null || {
+        echo "Public OAuth discovery response violated the configured issuer and endpoint contract." >&2
+        exit 1
+      }
+      ;;
   esac
 done
 echo "::endgroup::"
