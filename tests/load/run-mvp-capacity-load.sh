@@ -10,9 +10,10 @@ readonly K6_IMAGE="grafana/k6:2.0.0@sha256:a33a0cfdc4d2483d6b7a3a22e726a499ff283
 PROFILE="${PROFILE:-smoke}"
 BASE_URL="${BASE_URL:-}"
 TARGET_ENV="${TARGET_ENV:-}"
+RELEASE_SHA="${RELEASE_SHA:-}"
 CATALOG_FILE="${CATALOG_FILE:-}"
 PRINCIPALS_FILE="${PRINCIPALS_FILE:-}"
-OUTPUT_DIR="${OUTPUT_DIR:-${REPOSITORY_ROOT}/artifacts/load}"
+OUTPUT_DIR="${OUTPUT_DIR:-}"
 ALLOW_LOCAL_HTTP="${ALLOW_LOCAL_HTTP:-0}"
 ALLOW_SMALL_DATASET="${ALLOW_SMALL_DATASET:-0}"
 
@@ -47,10 +48,20 @@ if [[ "${BASE_URL}" != https://* ]]; then
 fi
 
 if [[ "${PROFILE}" == "full" ]]; then
+  [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]] ||
+    fail "the full release gate requires a full lowercase RELEASE_SHA"
   [[ "${ALLOW_SMALL_DATASET}" == "0" ]] ||
     fail "the full release gate cannot use ALLOW_SMALL_DATASET=1"
   [[ "${TARGET_ENV}" != "local" ]] ||
     fail "the full release gate must run in an isolated production-shaped environment"
+fi
+
+if [[ -z "${OUTPUT_DIR}" ]]; then
+  if [[ "${PROFILE}" == "full" ]]; then
+    OUTPUT_DIR="${REPOSITORY_ROOT}/artifacts/release"
+  else
+    OUTPUT_DIR="${REPOSITORY_ROOT}/artifacts/load"
+  fi
 fi
 
 if [[ "$(uname -s)" == "Darwin" ]]; then
@@ -69,7 +80,11 @@ CATALOG_ABSOLUTE="$(cd -- "$(dirname -- "${CATALOG_FILE}")" && pwd)/$(basename -
 readonly CATALOG_ABSOLUTE
 PRINCIPALS_ABSOLUTE="$(cd -- "$(dirname -- "${PRINCIPALS_FILE}")" && pwd)/$(basename -- "${PRINCIPALS_FILE}")"
 readonly PRINCIPALS_ABSOLUTE
-readonly SUMMARY_NAME="mvp-capacity-${PROFILE}.json"
+if [[ "${PROFILE}" == "full" ]]; then
+  readonly SUMMARY_NAME="capacity-full.json"
+else
+  readonly SUMMARY_NAME="mvp-capacity-${PROFILE}.json"
+fi
 
 docker run --rm \
   --add-host=host.docker.internal:host-gateway \
@@ -84,6 +99,7 @@ docker run --rm \
   --env "PROFILE=${PROFILE}" \
   --env "BASE_URL=${BASE_URL}" \
   --env "TARGET_ENV=${TARGET_ENV}" \
+  --env "RELEASE_SHA=${RELEASE_SHA}" \
   --env "ALLOW_SMALL_DATASET=${ALLOW_SMALL_DATASET}" \
   --env "CATALOG_FILE=/run/alphanet/catalog.json" \
   --env "PRINCIPALS_FILE=/run/alphanet/principals.json" \

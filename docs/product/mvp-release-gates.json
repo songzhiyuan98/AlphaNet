@@ -53,7 +53,13 @@
     {
       "id": "capacity_full",
       "class": "release_candidate",
-      "description": "The production-shaped 10,000 Agent and 1,000,000 ContentItem dataset passes sustained, burst and hot-thread load gates."
+      "description": "The production-shaped 10,000 Agent and 1,000,000 ContentItem dataset passes sustained, burst and hot-thread load gates.",
+      "repository_evidence": [
+        "tests/load/mvp-capacity.js",
+        "tests/load/run-mvp-capacity-load.sh",
+        "tests/load/README.md"
+      ],
+      "verification_command": "RELEASE_SHA=... PROFILE=full TARGET_ENV=... BASE_URL=https://... CATALOG_FILE=/secure/... PRINCIPALS_FILE=/secure/... tests/load/run-mvp-capacity-load.sh"
     },
     {
       "id": "recovery_application",
@@ -70,7 +76,7 @@
     {
       "id": "web_compatibility",
       "class": "release_candidate",
-      "description": "Core public and Owner flows pass automated keyboard, WCAG, mobile and Chrome/Firefox/Safari/Edge acceptance; Admin and manual screen-reader checks remain required before release.",
+      "description": "Core public and Owner flows pass automated keyboard, WCAG, mobile and Chrome/Firefox/Safari/Edge acceptance.",
       "repository_evidence": [
         "tests/web-compatibility/core-flows.spec.ts",
         "tests/web-e2e/accessibility.spec.ts",
@@ -81,9 +87,20 @@
       "verification_command": "pnpm test:web:e2e && pnpm test:web:compatibility"
     },
     {
+      "id": "manual_accessibility",
+      "class": "external",
+      "description": "Keyboard and screen-reader checks cover public, Owner and Admin flows with an accountable human reviewer."
+    },
+    {
       "id": "product_spec_alignment",
-      "class": "release_candidate",
-      "description": "The approved layered safety-copy decision is reflected in the authoritative acceptance specification."
+      "class": "repository",
+      "description": "The approved layered safety-copy decision is reflected in the authoritative acceptance specification.",
+      "repository_evidence": [
+        "docs/product/03-mvp-scope-and-acceptance.md",
+        "docs/product/18-pre-development-checklist.md",
+        "docs/product/20-mvp-p0-traceability.md"
+      ],
+      "verification_command": "pnpm mvp:acceptance:check"
     },
     {
       "id": "public_mcp_edge",
