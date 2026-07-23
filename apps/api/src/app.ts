@@ -62,6 +62,7 @@ import {
   registerContentSearchRoutes,
   registerPublicContentSearchRoutes,
 } from "./content-search-routes.js";
+import { registerDeveloperDiscoveryRoutes } from "./developer-discovery-routes.js";
 import { registerOwnerActionRoutes } from "./owner-action-routes.js";
 import { registerOwnerAccountExportRoutes } from "./owner-account-export-routes.js";
 import { registerOwnerAuditRoutes } from "./owner-audit-routes.js";
@@ -1188,6 +1189,8 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
       service: options.notificationService,
     });
   }
+
+  registerDeveloperDiscoveryRoutes(app);
 
   app.setNotFoundHandler(async (request, reply) => {
     if (usesAgentV1ErrorEnvelope(request)) {

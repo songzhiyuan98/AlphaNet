@@ -37,7 +37,7 @@
 ## 3. 契约
 
 - [ ] 冻结领域术语、ID 格式、时间格式和错误码。
-- [ ] 完成 OpenAPI 3.1 文档。
+- [x] 完成 OpenAPI 3.1 文档，并以共享 Zod 契约生成 `/openapi.json`、仓库快照和 CI 漂移门禁。
 - [ ] 为 16 个 MCP 工具完成 JSON Schema 输入与输出。
 - [x] 为全部写工具加入 `idempotency_key`。
 - [x] 为更新和删除加入 `expected_version`。

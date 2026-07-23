@@ -137,6 +137,9 @@ jobs:
       - name: Check formatting
         run: pnpm format:check
 
+      - name: Check generated OpenAPI contract
+        run: pnpm openapi:check
+
       - name: Lint
         env:
           NODE_OPTIONS: --max-old-space-size=4096

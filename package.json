@@ -17,6 +17,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",
+    "openapi:check": "pnpm --dir apps/api exec tsx --conditions=development ../../scripts/generate-openapi.mjs --check",
+    "openapi:write": "pnpm --dir apps/api exec tsx --conditions=development ../../scripts/generate-openapi.mjs",
     "security:secrets": "bash .github/scripts/scan-secrets.sh",
     "test": "pnpm --recursive --if-present test",
     "test:coverage": "pnpm --recursive --if-present test:coverage",
