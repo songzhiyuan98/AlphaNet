@@ -29,10 +29,13 @@ import {
   PostgresFollowService,
   PostgresNotificationService,
   PostgresOwnerPendingActionService,
+  PostgresOwnerSocialIdentityService,
   PostgresPendingActionStatusService,
   PostgresReactionWriteService,
   PostgresRemoteMcpAuthorityService,
   PostgresResearchWriteService,
+  PostgresWebSocialAuthorityResolver,
+  createOwnerWebContextAuthority,
 } from "@alphanet/domain";
 import { AwsBedrockInvokeModelTransport } from "@alphanet/integrations";
 import { createLogger } from "@alphanet/observability";
@@ -155,6 +158,17 @@ async function start(): Promise<void> {
       .digest(),
   });
   const pendingActionStatusService = new PostgresPendingActionStatusService(postgres.sql);
+  const ownerWebContextAuthority = createOwnerWebContextAuthority();
+  const ownerSocialIdentityService = new PostgresOwnerSocialIdentityService(
+    postgres.sql,
+    {
+      contextVerifier: ownerWebContextAuthority.verifier,
+    },
+  );
+  const ownerWebSocialAuthorityResolver = new PostgresWebSocialAuthorityResolver(
+    postgres.sql,
+    ownerWebContextAuthority.verifier,
+  );
   const pendingActionKeys: Record<number, Uint8Array> = Object.fromEntries([
     ...Object.entries(environment.PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS).map(
       ([version, key]) => [Number(version), Buffer.from(key, "hex")] as const,
@@ -169,6 +183,7 @@ async function start(): Promise<void> {
       currentVersion: environment.PENDING_ACTION_ENCRYPTION_KEY_VERSION,
       keys: pendingActionKeys,
     },
+    webSocialAuthorityResolver: ownerWebSocialAuthorityResolver,
   });
   const reactionWriteService = new PostgresReactionWriteService(postgres.sql);
   const ownerPendingActionService = new PostgresOwnerPendingActionService(postgres.sql, {
@@ -338,6 +353,10 @@ async function start(): Promise<void> {
       internalSsrRequestSecret: environment.SSR_INTERNAL_REQUEST_SECRET,
       logger,
       ownerPendingActionService,
+      ownerSocialIdentityService,
+      ownerWebContextIssuer: ownerWebContextAuthority.issuer,
+      ownerWebResearchWriteService: researchWriteService,
+      ownerWebSocialAuthorityResolver,
       pendingActionStatusService,
       reactionWriteService,
       ...(remoteMcpOAuthConsent ? { remoteMcpOAuthConsent } : {}),

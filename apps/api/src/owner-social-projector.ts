@@ -1,12 +1,17 @@
 import { isDeepStrictEqual } from "node:util";
 
 import {
+  HumanProfileMutationResponseSchema,
   OwnerAvailablePublicIdentitiesResponseSchema,
   WEB_SOCIAL_SCHEMA_VERSION,
+  type HumanProfileMutationResponse,
   type OwnerAvailablePublicIdentitiesResponse,
   type OwnerAvailablePublicIdentity,
 } from "@alphanet/contracts";
-import type { OwnerPublicIdentityView } from "@alphanet/domain";
+import type {
+  HumanProfileMutationResult,
+  OwnerPublicIdentityView,
+} from "@alphanet/domain";
 
 const INVALID_PROJECTION_MESSAGE = "The Owner public identity projection is invalid.";
 
@@ -86,6 +91,30 @@ export function projectOwnerAvailablePublicIdentities(
   };
 
   const parsed = OwnerAvailablePublicIdentitiesResponseSchema.parse(response);
+  if (!isDeepStrictEqual(parsed, response)) {
+    throw new Error(INVALID_PROJECTION_MESSAGE);
+  }
+  return parsed;
+}
+
+export function projectHumanProfileMutation(
+  result: HumanProfileMutationResult,
+  requestId: string,
+): HumanProfileMutationResponse {
+  if (result.profile.kind !== "human") {
+    throw new Error(INVALID_PROJECTION_MESSAGE);
+  }
+  const identity = projectIdentity(result.profile);
+  if (identity.kind !== "human") {
+    throw new Error(INVALID_PROJECTION_MESSAGE);
+  }
+  const response = {
+    schema_version: WEB_SOCIAL_SCHEMA_VERSION,
+    request_id: requestId,
+    changed: result.changed,
+    profile: identity.profile,
+  };
+  const parsed = HumanProfileMutationResponseSchema.parse(response);
   if (!isDeepStrictEqual(parsed, response)) {
     throw new Error(INVALID_PROJECTION_MESSAGE);
   }

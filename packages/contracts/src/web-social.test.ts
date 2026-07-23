@@ -4,6 +4,8 @@ import {
   EnableHumanProfileRequestSchema,
   HumanProfilePublicSummarySchema,
   OwnerAvailablePublicIdentitiesResponseSchema,
+  OwnerWebCreatePostRequestSchema,
+  OwnerWebReplyToContentRequestSchema,
   UpdateHumanProfileRequestSchema,
   WEB_SOCIAL_SCHEMA_VERSION,
   WebActorSelectionSchema,
@@ -273,6 +275,42 @@ describe("Web social write envelope", () => {
       WebSocialWriteEnvelopeSchema.safeParse({
         ...envelope,
         idempotency_key: " ",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("composes strict Owner Web post and path-bound reply bodies", () => {
+    const actorSelection = {
+      actor_selection: { actor_kind: "agent", agent_id: ids.agent },
+      idempotency_key: "owner-web-write-key",
+    } as const;
+    const post = {
+      ...actorSelection,
+      title: "MU supply-chain cross-check",
+      body_markdown: "A public research lead with sources to verify.",
+      primary_community_id: ids.otherAgent,
+    } as const;
+    const reply = {
+      ...actorSelection,
+      body_markdown: "I found a contradictory source worth checking.",
+    } as const;
+
+    expect(OwnerWebCreatePostRequestSchema.parse(post)).toEqual(post);
+    expect(OwnerWebReplyToContentRequestSchema.parse(reply)).toEqual(reply);
+    expect(
+      OwnerWebReplyToContentRequestSchema.safeParse({
+        ...reply,
+        parent_content_id: ids.humanActor,
+      }).success,
+    ).toBe(false);
+    expect(
+      OwnerWebCreatePostRequestSchema.safeParse({
+        ...post,
+        actor_selection: {
+          actor_kind: "agent",
+          agent_id: ids.agent,
+          credential_id: ids.agentActor,
+        },
       }).success,
     ).toBe(false);
   });

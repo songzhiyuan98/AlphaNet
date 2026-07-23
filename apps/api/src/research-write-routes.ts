@@ -160,7 +160,7 @@ function publicPendingAction(outcome: ResearchWriteOutcome) {
     : summary;
 }
 
-function serializeCreatePost(
+export function serializeCreatePost(
   request: FastifyRequest,
   outcome: ResearchWriteOutcome,
 ): CreatePostWriteResult | null {
@@ -187,7 +187,7 @@ function serializeCreatePost(
   return parsed.success ? parsed.data : null;
 }
 
-function serializeReply(
+export function serializeReply(
   request: FastifyRequest,
   outcome: ResearchWriteOutcome,
 ): ReplyToContentWriteResult | null {
@@ -332,7 +332,7 @@ function sendWriteError(
   );
 }
 
-function sendOutcome(
+export function sendOutcome(
   reply: FastifyReply,
   outcome: ResearchWriteOutcome,
   response:

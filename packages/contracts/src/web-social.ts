@@ -11,6 +11,7 @@ import {
   V1EnvelopeShape,
   V1_SCHEMA_VERSION,
 } from "./agent.ts";
+import { CreatePostRequestSchema, ReplyToContentRequestSchema } from "./content-write.ts";
 import { IdempotencyKeySchema } from "./write-primitives.ts";
 
 export const WEB_SOCIAL_SCHEMA_VERSION = V1_SCHEMA_VERSION;
@@ -88,6 +89,19 @@ export const HumanProfilePublicSummarySchema = z
   })
   .strict();
 export type HumanProfilePublicSummary = z.infer<typeof HumanProfilePublicSummarySchema>;
+
+export const HumanProfileMutationResponseSchema = z
+  .object({
+    ...V1EnvelopeShape,
+    changed: z.boolean(),
+    profile: HumanProfilePublicSummarySchema.extend({
+      status: z.literal("active"),
+    }),
+  })
+  .strict();
+export type HumanProfileMutationResponse = z.infer<
+  typeof HumanProfileMutationResponseSchema
+>;
 
 const ActiveHumanProfilePublicSummarySchema = HumanProfilePublicSummarySchema.extend({
   status: z.literal("active"),
@@ -180,3 +194,45 @@ export const WebSocialWriteEnvelopeSchema = z
   .object(WebSocialWriteEnvelopeShape)
   .strict();
 export type WebSocialWriteEnvelope = z.infer<typeof WebSocialWriteEnvelopeSchema>;
+
+export const OwnerWebCreatePostRequestSchema = CreatePostRequestSchema.safeExtend({
+  actor_selection: WebActorSelectionSchema,
+});
+export type OwnerWebCreatePostRequest = z.infer<typeof OwnerWebCreatePostRequestSchema>;
+
+const ReplyToContentRequestShape = ReplyToContentRequestSchema.shape;
+const PATH_BOUND_REPLY_VALIDATION_CONTENT_ID = "00000000-0000-4000-8000-000000000001";
+
+export const OwnerWebReplyToContentRequestSchema = z
+  .object({
+    body_markdown: ReplyToContentRequestShape.body_markdown,
+    symbols: ReplyToContentRequestShape.symbols,
+    topics: ReplyToContentRequestShape.topics,
+    source_links: ReplyToContentRequestShape.source_links,
+    references: ReplyToContentRequestShape.references,
+    idempotency_key: ReplyToContentRequestShape.idempotency_key,
+    actor_selection: WebActorSelectionSchema,
+  })
+  .strict()
+  .superRefine((request, context) => {
+    const parsed = ReplyToContentRequestSchema.safeParse({
+      parent_content_id: PATH_BOUND_REPLY_VALIDATION_CONTENT_ID,
+      body_markdown: request.body_markdown,
+      ...(request.symbols === undefined ? {} : { symbols: request.symbols }),
+      ...(request.topics === undefined ? {} : { topics: request.topics }),
+      ...(request.source_links === undefined
+        ? {}
+        : { source_links: request.source_links }),
+      ...(request.references === undefined ? {} : { references: request.references }),
+      idempotency_key: request.idempotency_key,
+    });
+    if (!parsed.success) {
+      context.addIssue({
+        code: "custom",
+        message: "The path-bound reply request exceeds the supported write limits.",
+      });
+    }
+  });
+export type OwnerWebReplyToContentRequest = z.infer<
+  typeof OwnerWebReplyToContentRequestSchema
+>;
