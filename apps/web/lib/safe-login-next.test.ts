@@ -6,6 +6,7 @@ describe("safeLoginNextPath", () => {
   it.each([
     "/home",
     "/notifications",
+    "/settings/activity",
     "/settings/agents",
     "/settings/approvals",
     "/settings/credentials",
