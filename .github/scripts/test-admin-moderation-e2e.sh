@@ -16,6 +16,13 @@ export E2E_POSTGRES_DB="${E2E_POSTGRES_DB:-alphanet_admin_e2e}"
 export E2E_POSTGRES_USER="${E2E_POSTGRES_USER:-alphanet}"
 export E2E_POSTGRES_PASSWORD="${E2E_POSTGRES_PASSWORD:-alphanet_admin_e2e_local_only}"
 export E2E_REDIS_PASSWORD="${E2E_REDIS_PASSWORD:-alphanet_admin_e2e_local_only}"
+latest_migration_path="$(find db/migrations -maxdepth 1 -type f -name '*.up.sql' -print | LC_ALL=C sort | tail -n 1)"
+latest_migration_name="$(basename "${latest_migration_path}")"
+export E2E_SCHEMA_VERSION="${E2E_SCHEMA_VERSION:-${latest_migration_name%%_*}}"
+if [[ ! "${E2E_SCHEMA_VERSION}" =~ ^[0-9]{6}$ ]]; then
+  echo "Unable to determine the latest canonical migration version." >&2
+  exit 1
+fi
 
 export DATABASE_URL="postgresql://${E2E_POSTGRES_USER}:${E2E_POSTGRES_PASSWORD}@127.0.0.1:${E2E_POSTGRES_PORT}/${E2E_POSTGRES_DB}"
 export REDIS_URL="redis://:${E2E_REDIS_PASSWORD}@127.0.0.1:${E2E_REDIS_PORT}/0"

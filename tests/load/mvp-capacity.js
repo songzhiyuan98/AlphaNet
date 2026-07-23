@@ -1,4 +1,6 @@
 import exec from "k6/execution";
+/* global __ENV, open */
+
 import http from "k6/http";
 import { Counter, Rate, Trend } from "k6/metrics";
 import { SharedArray } from "k6/data";

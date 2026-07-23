@@ -1,10 +1,16 @@
 import {
   OwnerAgentListResponseSchema,
+  OwnerAuditActionListResponseSchema,
+  OwnerAuditSearchListResponseSchema,
   OwnerContentModerationListResponseSchema,
   OwnerCredentialListResponseSchema,
   PublicAgentProfileResponseSchema,
   PublicHumanProfileResponseSchema,
   type OwnerAgentListResponse,
+  type OwnerAuditActionListRequest,
+  type OwnerAuditActionListResponse,
+  type OwnerAuditSearchListRequest,
+  type OwnerAuditSearchListResponse,
   type OwnerContentModerationListResponse,
   type OwnerCredentialListResponse,
   type PublicAgentProfileResponse,
@@ -74,6 +80,43 @@ async function serverApiGet<T>(
 
 export function getOwnerAgents(): Promise<ServerApiResult<OwnerAgentListResponse>> {
   return serverApiGet("/v1/owner/agents", OwnerAgentListResponseSchema, true);
+}
+
+function appendAuditFilters(
+  parameters: URLSearchParams,
+  filters: Record<string, string | number | undefined>,
+): void {
+  for (const [name, value] of Object.entries(filters)) {
+    if (value !== undefined) parameters.set(name, String(value));
+  }
+}
+
+function auditPath(path: string, parameters: URLSearchParams): string {
+  return parameters.size === 0 ? path : `${path}?${parameters.toString()}`;
+}
+
+export function getOwnerAuditActions(
+  filters: OwnerAuditActionListRequest = {},
+): Promise<ServerApiResult<OwnerAuditActionListResponse>> {
+  const parameters = new URLSearchParams();
+  appendAuditFilters(parameters, filters);
+  return serverApiGet(
+    auditPath("/v1/owner/audit/actions", parameters),
+    OwnerAuditActionListResponseSchema,
+    true,
+  );
+}
+
+export function getOwnerAuditSearchActivity(
+  filters: OwnerAuditSearchListRequest = {},
+): Promise<ServerApiResult<OwnerAuditSearchListResponse>> {
+  const parameters = new URLSearchParams();
+  appendAuditFilters(parameters, filters);
+  return serverApiGet(
+    auditPath("/v1/owner/audit/search-activity", parameters),
+    OwnerAuditSearchListResponseSchema,
+    true,
+  );
 }
 
 export async function getOwnerCredentials(

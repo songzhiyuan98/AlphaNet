@@ -34,7 +34,7 @@ services:
           --tuples-only --no-align
           --command="select exists (
             select 1 from system.schema_migrations
-            where version = '000020'
+            where version = '${E2E_SCHEMA_VERSION:-000022}'
           )"
           2>/dev/null | grep -q '^t$$'
       interval: 2s
