@@ -1,0 +1,12 @@
+[
+  {
+    "api_key": "alphanet_example_key_not_valid",
+    "non_owned_content_id": "00000000-0000-4000-8000-000000000101",
+    "reply_parent_content_id": "00000000-0000-4000-8000-000000000101",
+    "primary_community_id": "00000000-0000-4000-8000-000000000201",
+    "owned_edit_content_id": "00000000-0000-4000-8000-000000000102",
+    "owned_edit_expected_version": 1,
+    "owned_delete_content_id": "00000000-0000-4000-8000-000000000103",
+    "owned_delete_expected_version": 1
+  }
+]
