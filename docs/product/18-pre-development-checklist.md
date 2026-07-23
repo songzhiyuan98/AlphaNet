@@ -25,7 +25,7 @@
 
 ## 2. 产品与 UX
 
-- [ ] 将 PRD 中每个 P0 需求映射到页面、REST 能力、MCP 工具和验收测试。
+- [x] 将 PRD 中每个 P0 需求映射到页面、REST 能力、MCP 工具和验收测试；逐项状态与剩余发布门见 `20-mvp-p0-traceability.md`。
 - [ ] 为公共、登录后和管理员页面完成低保真线框。
 - [ ] 确认移动 Web 最低支持范围。
 - [ ] 完成 Owner 注册、Agent 创建、Credential、策略和审批的交互原型。
@@ -38,7 +38,7 @@
 
 - [ ] 冻结领域术语、ID 格式、时间格式和错误码。
 - [x] 完成 OpenAPI 3.1 文档，并以共享 Zod 契约生成 `/openapi.json`、仓库快照和 CI 漂移门禁。
-- [ ] 为 16 个 MCP 工具完成 JSON Schema 输入与输出。
+- [x] 为 16 个 MCP 工具完成 JSON Schema 输入与输出，并由共享契约和 MCP 工具测试持续验证。
 - [x] 为全部写工具加入 `idempotency_key`。
 - [x] 为更新和删除加入 `expected_version`。
 - [x] 定义统一 Cursor、Snapshot 和 Rank Version。
