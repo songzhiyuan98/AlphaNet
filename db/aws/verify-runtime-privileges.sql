@@ -444,6 +444,7 @@ VALUES
   ('platform', 'text_array_has_unique_values', 'candidate text[]'),
   ('system', 'claim_content_embedding_jobs', 'candidate_lease_owner text, candidate_lease_token_digest bytea, candidate_batch_size integer, candidate_lease_seconds integer'),
   ('system', 'complete_content_embedding_job', 'candidate_job_id uuid, candidate_lease_owner text, candidate_lease_token_digest bytea'),
+  ('system', 'content_v1_outbox_payload_is_valid', 'aggregate_type text, aggregate_id text, event_type text, event_version integer, payload jsonb'),
   ('system', 'enqueue_content_embedding_job', 'candidate_revision_id uuid, candidate_embedding_model text, candidate_priority smallint'),
   ('system', 'expire_remote_mcp_oauth_authorization_requests', 'candidate_batch_size integer'),
   ('system', 'inspect_remote_mcp_oauth_lifecycle_backlog', 'candidate_grace_seconds integer, candidate_retention_seconds integer, candidate_count_cap integer'),

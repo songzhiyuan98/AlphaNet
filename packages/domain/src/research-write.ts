@@ -57,6 +57,7 @@ import {
   AGENT_POLICY_CONTROL_MIGRATION_CHECKSUM,
   CONTENT_DELETE_ANTISPAM_MIGRATION_CHECKSUM,
   CONTENT_REVISION_WRITE_MIGRATION_CHECKSUM,
+  OWNER_WEB_SOCIAL_HARDENING_V1_MIGRATION_CHECKSUM,
   PENDING_ACTION_EXECUTION_MIGRATION_CHECKSUM,
 } from "./schema-migrations.js";
 
@@ -1812,6 +1813,13 @@ export class PostgresResearchWriteService implements ResearchWriteService {
           )
           and exists (
             select 1
+            from system.schema_migrations
+            where version = '000022'
+              and name = 'owner_web_social_hardening_v1'
+              and checksum = ${OWNER_WEB_SOCIAL_HARDENING_V1_MIGRATION_CHECKSUM}
+          )
+          and exists (
+            select 1
             from pg_catalog.pg_attribute
             where attrelid = to_regclass('platform.credentials')
               and attname = 'policy_ceiling_rules'
@@ -1845,6 +1853,60 @@ export class PostgresResearchWriteService implements ResearchWriteService {
             where tgrelid = to_regclass('platform.content_revisions')
               and tgname = 'content_revisions_validate_current_pointer'
               and not tgisinternal
+          )
+          and exists (
+            select 1
+            from pg_catalog.pg_constraint as constraint_record
+            where constraint_record.conrelid =
+                to_regclass('system.outbox_events')
+              and constraint_record.conname =
+                'outbox_events_content_v1_payload_shape'
+              and constraint_record.contype = 'c'
+              and constraint_record.convalidated
+          )
+          and has_function_privilege(
+            current_user,
+            to_regprocedure(
+              'system.content_v1_outbox_payload_is_valid(text,text,text,integer,jsonb)'
+            ),
+            'EXECUTE'
+          )
+          and exists (
+            select 1
+            from pg_catalog.pg_proc as routine
+            where routine.oid = to_regprocedure(
+                'platform.validate_runtime_content_outbox_provenance()'
+              )
+              and not routine.prosecdef
+              and 'search_path=pg_catalog' = any (routine.proconfig)
+              and not exists (
+                select 1
+                from pg_catalog.aclexplode(
+                  coalesce(
+                    routine.proacl,
+                    pg_catalog.acldefault('f', routine.proowner)
+                  )
+                ) as routine_acl
+                where routine_acl.grantee = 0
+                  and routine_acl.privilege_type = 'EXECUTE'
+              )
+          )
+          and exists (
+            select 1
+            from pg_catalog.pg_trigger as trigger_record
+            where trigger_record.tgrelid =
+                to_regclass('system.outbox_events')
+              and trigger_record.tgname =
+                'outbox_events_validate_runtime_content_provenance'
+              and trigger_record.tgfoid = to_regprocedure(
+                'platform.validate_runtime_content_outbox_provenance()'
+              )
+              and trigger_record.tgtype = 5
+              and not trigger_record.tgisinternal
+              and trigger_record.tgconstraint <> 0
+              and trigger_record.tgenabled in ('O', 'A')
+              and trigger_record.tgdeferrable
+              and trigger_record.tginitdeferred
           ) as ready
       `;
     });

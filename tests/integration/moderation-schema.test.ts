@@ -194,6 +194,80 @@ describeModerationSchema("Web reporting and Content moderation schema", () => {
     return { actorId, ownerId };
   }
 
+  async function readContentOutboxProjection(
+    transaction: TransactionSql,
+    contentId: string,
+  ): Promise<{
+    actor_id: string;
+    community_ids: string[];
+    event_time: Date;
+    kind: "post" | "reply";
+    parent_content_id: string | null;
+    revision_id: string;
+    root_content_id: string;
+    symbol_ids: string[];
+    topic_ids: string[];
+  }> {
+    const rows = await transaction<
+      Array<{
+        actor_id: string;
+        community_ids: string[];
+        event_time: Date;
+        kind: "post" | "reply";
+        parent_content_id: string | null;
+        revision_id: string;
+        root_content_id: string;
+        symbol_ids: string[];
+        topic_ids: string[];
+      }>
+    >`
+      select
+        content.author_actor_id::text as actor_id,
+        coalesce((
+          select array_agg(
+            distinct placement.community_id::text
+            order by placement.community_id::text
+          )
+          from (
+            select root.primary_community_id as community_id
+            union
+            select additional.community_id
+            from platform.content_additional_communities as additional
+            where additional.content_id = root.id
+          ) as placement
+          where placement.community_id is not null
+        ), array[]::text[]) as community_ids,
+        clock_timestamp() as event_time,
+        content.kind,
+        content.parent_id::text as parent_content_id,
+        content.current_revision_id::text as revision_id,
+        content.root_id::text as root_content_id,
+        coalesce((
+          select array_agg(
+            distinct classification.symbol_id::text
+            order by classification.symbol_id::text
+          )
+          from platform.content_symbols as classification
+          where classification.content_id in (content.id, root.id)
+        ), array[]::text[]) as symbol_ids,
+        coalesce((
+          select array_agg(
+            distinct classification.topic_id::text
+            order by classification.topic_id::text
+          )
+          from platform.content_topics as classification
+          where classification.content_id in (content.id, root.id)
+        ), array[]::text[]) as topic_ids
+      from platform.content_items as content
+      join platform.content_items as root on root.id = content.root_id
+      where content.id = ${contentId}
+      limit 1
+    `;
+    const projection = rows[0];
+    if (!projection) throw new Error("Content Outbox projection was not found");
+    return projection;
+  }
+
   async function createContent(label: string): Promise<ContentFixture> {
     const contentId = randomUUID();
     const revisionId = randomUUID();
@@ -248,25 +322,41 @@ describeModerationSchema("Web reporting and Content moderation schema", () => {
         set current_revision_id = ${revisionId}
         where id = ${contentId}
       `;
+      const projection = await readContentOutboxProjection(transaction, contentId);
       await transaction`
         insert into system.outbox_events (
           aggregate_type,
           aggregate_id,
           aggregate_sequence,
           event_type,
-          payload
+          event_version,
+          payload,
+          occurred_at,
+          available_at,
+          max_attempts,
+          created_at
         )
         values (
           'content',
           ${contentId},
           1,
           'content.published',
+          1,
           ${transaction.json({
-            actor_id: authorActorId,
+            actor_id: projection.actor_id,
+            community_ids: projection.community_ids,
             content_id: contentId,
-            kind: "post",
-            revision_id: revisionId,
-          })}
+            kind: projection.kind,
+            parent_content_id: projection.parent_content_id,
+            revision_id: projection.revision_id,
+            root_content_id: projection.root_content_id,
+            symbol_ids: projection.symbol_ids,
+            topic_ids: projection.topic_ids,
+          })},
+          ${projection.event_time},
+          ${projection.event_time},
+          12,
+          ${projection.event_time}
         )
       `;
     });
@@ -330,26 +420,41 @@ describeModerationSchema("Web reporting and Content moderation schema", () => {
         set current_revision_id = ${revisionId}
         where id = ${contentId}
       `;
+      const projection = await readContentOutboxProjection(transaction, contentId);
       await transaction`
         insert into system.outbox_events (
           aggregate_type,
           aggregate_id,
           aggregate_sequence,
           event_type,
-          payload
+          event_version,
+          payload,
+          occurred_at,
+          available_at,
+          max_attempts,
+          created_at
         )
         values (
           'content',
           ${contentId},
           1,
-          'content.published',
+          'content.reply',
+          1,
           ${transaction.json({
-            actor_id: authorActorId,
+            actor_id: projection.actor_id,
+            community_ids: projection.community_ids,
             content_id: contentId,
-            kind: "reply",
-            revision_id: revisionId,
-            root_content_id: root.contentId,
-          })}
+            kind: projection.kind,
+            parent_content_id: projection.parent_content_id,
+            revision_id: projection.revision_id,
+            root_content_id: projection.root_content_id,
+            symbol_ids: projection.symbol_ids,
+            topic_ids: projection.topic_ids,
+          })},
+          ${projection.event_time},
+          ${projection.event_time},
+          12,
+          ${projection.event_time}
         )
       `;
     });
@@ -995,7 +1100,8 @@ describeModerationSchema("Web reporting and Content moderation schema", () => {
     await postgres.sql.unsafe(
       `grant execute on function
         platform.audit_json_is_secret_free(jsonb),
-        platform.audit_json_is_secret_free_v2(jsonb)
+        platform.audit_json_is_secret_free_v2(jsonb),
+        system.content_v1_outbox_payload_is_valid(text, text, text, integer, jsonb)
       to ${quoteRole(runtimeRole)}`,
     );
     await postgres.sql.unsafe(

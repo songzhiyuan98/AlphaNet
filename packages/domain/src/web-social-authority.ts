@@ -25,7 +25,10 @@ import {
   type OwnerWebContextVerifier,
   type OwnerWebMutationContext,
 } from "./owner-web-session-context.js";
-import { OWNER_WEB_SOCIAL_V1_MIGRATION_CHECKSUM } from "./schema-migrations.js";
+import {
+  OWNER_WEB_SOCIAL_HARDENING_V1_MIGRATION_CHECKSUM,
+  OWNER_WEB_SOCIAL_V1_MIGRATION_CHECKSUM,
+} from "./schema-migrations.js";
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -826,11 +829,21 @@ export class PostgresWebSocialAuthorityResolver implements WebSocialAuthorityRes
               and name = 'owner_web_social_v1'
               and checksum = ${OWNER_WEB_SOCIAL_V1_MIGRATION_CHECKSUM}
           )
+          and exists (
+            select 1
+            from system.schema_migrations
+            where version = '000022'
+              and name = 'owner_web_social_hardening_v1'
+              and checksum = ${OWNER_WEB_SOCIAL_HARDENING_V1_MIGRATION_CHECKSUM}
+          )
           and to_regprocedure(
             'platform.validate_domain_write_subject()'
           ) is not null
           and to_regprocedure(
             'platform.validate_runtime_content_write_provenance()'
+          ) is not null
+          and to_regprocedure(
+            'platform.validate_runtime_content_outbox_provenance()'
           ) is not null
           and exists (
             select 1
@@ -840,8 +853,72 @@ export class PostgresWebSocialAuthorityResolver implements WebSocialAuthorityRes
               and tgfoid = to_regprocedure(
                 'platform.validate_domain_write_subject()'
               )
+              and tgtype = 7
               and not tgisinternal
+              and tgconstraint = 0
+              and not tgdeferrable
+              and not tginitdeferred
               and tgenabled in ('O', 'A')
+          )
+          and exists (
+            select 1
+            from pg_catalog.pg_proc as routine
+            where routine.oid = to_regprocedure(
+                'platform.validate_domain_write_subject()'
+              )
+              and routine.prosecdef
+              and 'search_path=pg_catalog' = any (routine.proconfig)
+              and not exists (
+                select 1
+                from pg_catalog.aclexplode(
+                  coalesce(
+                    routine.proacl,
+                    pg_catalog.acldefault('f', routine.proowner)
+                  )
+                ) as routine_acl
+                where routine_acl.grantee = 0
+                  and routine_acl.privilege_type = 'EXECUTE'
+              )
+          )
+          and exists (
+            select 1
+            from pg_catalog.pg_proc as routine
+            where routine.oid = to_regprocedure(
+                'platform.validate_runtime_content_write_provenance()'
+              )
+              and not routine.prosecdef
+              and 'search_path=pg_catalog' = any (routine.proconfig)
+              and not exists (
+                select 1
+                from pg_catalog.aclexplode(
+                  coalesce(
+                    routine.proacl,
+                    pg_catalog.acldefault('f', routine.proowner)
+                  )
+                ) as routine_acl
+                where routine_acl.grantee = 0
+                  and routine_acl.privilege_type = 'EXECUTE'
+              )
+          )
+          and exists (
+            select 1
+            from pg_catalog.pg_proc as routine
+            where routine.oid = to_regprocedure(
+                'platform.validate_runtime_content_outbox_provenance()'
+              )
+              and not routine.prosecdef
+              and 'search_path=pg_catalog' = any (routine.proconfig)
+              and not exists (
+                select 1
+                from pg_catalog.aclexplode(
+                  coalesce(
+                    routine.proacl,
+                    pg_catalog.acldefault('f', routine.proowner)
+                  )
+                ) as routine_acl
+                where routine_acl.grantee = 0
+                  and routine_acl.privilege_type = 'EXECUTE'
+              )
           )
           and (
             select count(*) = 7
@@ -886,6 +963,50 @@ export class PostgresWebSocialAuthorityResolver implements WebSocialAuthorityRes
               and provenance_trigger.tgfoid = to_regprocedure(
                 'platform.validate_runtime_content_write_provenance()'
               )
+          )
+          and exists (
+            select 1
+            from pg_catalog.pg_constraint as constraint_record
+            where constraint_record.conrelid =
+                to_regclass('platform.action_logs')
+              and constraint_record.conname =
+                'action_logs_authentication_assurance_semantics_v1'
+              and constraint_record.contype = 'c'
+              and constraint_record.convalidated
+          )
+          and exists (
+            select 1
+            from pg_catalog.pg_constraint as constraint_record
+            where constraint_record.conrelid =
+                to_regclass('system.outbox_events')
+              and constraint_record.conname =
+                'outbox_events_content_v1_payload_shape'
+              and constraint_record.contype = 'c'
+              and constraint_record.convalidated
+          )
+          and has_function_privilege(
+            current_user,
+            to_regprocedure(
+              'system.content_v1_outbox_payload_is_valid(text,text,text,integer,jsonb)'
+            ),
+            'EXECUTE'
+          )
+          and exists (
+            select 1
+            from pg_catalog.pg_trigger as trigger_record
+            where trigger_record.tgrelid =
+                to_regclass('system.outbox_events')
+              and trigger_record.tgname =
+                'outbox_events_validate_runtime_content_provenance'
+              and trigger_record.tgfoid = to_regprocedure(
+                'platform.validate_runtime_content_outbox_provenance()'
+              )
+              and trigger_record.tgtype = 5
+              and not trigger_record.tgisinternal
+              and trigger_record.tgconstraint <> 0
+              and trigger_record.tgenabled in ('O', 'A')
+              and trigger_record.tgdeferrable
+              and trigger_record.tginitdeferred
           ) as ready
       `;
     });

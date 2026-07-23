@@ -26,6 +26,7 @@ readonly remote_mcp_v1_checksum="a43f96760a7734c6b036f74275f9a349a09f5ef8ae3328a
 readonly remote_mcp_oauth_hardening_v1_checksum="3e9fa98b188a79866db57d989bcb1b15dec5d1bfa82fff45edea1b87c06d012a"
 readonly remote_mcp_oauth_lifecycle_maintenance_v1_checksum="0361f188331c627cbbce6050311f70ece5e1b767e2543573629d6277610643f4"
 readonly owner_web_social_v1_checksum="77b07de89c8b44de4e933a408408e191b8fdae16476f320fe7a1adb2e61b0e01"
+readonly owner_web_social_hardening_v1_checksum="96c121bf0c695bbe7a6765ac04288dc17a4552880294835977d861968531844e"
 readonly suffix="${GITHUB_RUN_ID:-local}_${RANDOM}_$$"
 readonly empty_database="alphanet_migration_empty_${suffix}"
 readonly owner_database="alphanet_migration_owner_${suffix}"
@@ -1037,9 +1038,10 @@ for database in \
       --set=remote_mcp_v1_checksum="${remote_mcp_v1_checksum}" \
       --set=remote_mcp_oauth_hardening_v1_checksum="${remote_mcp_oauth_hardening_v1_checksum}" \
       --set=remote_mcp_oauth_lifecycle_maintenance_v1_checksum="${remote_mcp_oauth_lifecycle_maintenance_v1_checksum}" \
-      --set=owner_web_social_v1_checksum="${owner_web_social_v1_checksum}" <<'SQL'
+      --set=owner_web_social_v1_checksum="${owner_web_social_v1_checksum}" \
+      --set=owner_web_social_hardening_v1_checksum="${owner_web_social_hardening_v1_checksum}" <<'SQL'
 SELECT
-  (SELECT count(*) FROM system.schema_migrations) = 21
+  (SELECT count(*) FROM system.schema_migrations) = 22
   AND EXISTS (
     SELECT 1
     FROM system.schema_migrations
@@ -1154,6 +1156,13 @@ SELECT
     WHERE version = '000021'
       AND name = 'owner_web_social_v1'
       AND checksum = :'owner_web_social_v1_checksum'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM system.schema_migrations
+    WHERE version = '000022'
+      AND name = 'owner_web_social_hardening_v1'
+      AND checksum = :'owner_web_social_hardening_v1_checksum'
   )
   AND (
     SELECT count(*) = 5
@@ -1614,6 +1623,132 @@ SELECT
   AND to_regclass(
     'platform.content_additional_communities_admission_rate_idx'
   ) IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+    FROM pg_proc AS routine
+    WHERE routine.oid =
+        'platform.validate_domain_write_subject()'::regprocedure
+      AND routine.prosecdef
+      AND routine.prorettype = 'pg_catalog.trigger'::regtype
+      AND 'search_path=pg_catalog' = ANY (routine.proconfig)
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM pg_proc AS routine
+    CROSS JOIN LATERAL aclexplode(
+      coalesce(routine.proacl, acldefault('f', routine.proowner))
+    ) AS privilege
+    WHERE routine.oid =
+        'platform.validate_domain_write_subject()'::regprocedure
+      AND privilege.grantee = 0
+      AND privilege.privilege_type = 'EXECUTE'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM pg_trigger AS trigger_record
+    WHERE trigger_record.tgrelid = 'platform.action_logs'::regclass
+      AND trigger_record.tgname =
+        'action_logs_validate_domain_write_subject'
+      AND trigger_record.tgfoid =
+        'platform.validate_domain_write_subject()'::regprocedure
+      AND trigger_record.tgtype = 7
+      AND NOT trigger_record.tgisinternal
+      AND trigger_record.tgconstraint = 0
+      AND NOT trigger_record.tgdeferrable
+      AND NOT trigger_record.tginitdeferred
+      AND trigger_record.tgenabled IN ('O', 'A')
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM pg_constraint AS constraint_record
+    WHERE constraint_record.conrelid = 'platform.action_logs'::regclass
+      AND constraint_record.conname =
+        'action_logs_authentication_assurance_semantics_v1'
+      AND constraint_record.contype = 'c'
+      AND constraint_record.convalidated
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM pg_proc AS routine
+    WHERE routine.oid =
+        'system.content_v1_outbox_payload_is_valid(text,text,text,integer,jsonb)'::regprocedure
+      AND routine.provolatile = 'i'
+      AND routine.proparallel = 's'
+      AND NOT routine.prosecdef
+      AND routine.prorettype = 'pg_catalog.bool'::regtype
+      AND 'search_path=pg_catalog' = ANY (routine.proconfig)
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM pg_proc AS routine
+    CROSS JOIN LATERAL aclexplode(
+      coalesce(routine.proacl, acldefault('f', routine.proowner))
+    ) AS privilege
+    WHERE routine.oid =
+        'system.content_v1_outbox_payload_is_valid(text,text,text,integer,jsonb)'::regprocedure
+      AND privilege.grantee = 0
+      AND privilege.privilege_type = 'EXECUTE'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM pg_constraint AS constraint_record
+    WHERE constraint_record.conrelid = 'system.outbox_events'::regclass
+      AND constraint_record.conname =
+        'outbox_events_content_v1_payload_shape'
+      AND constraint_record.contype = 'c'
+      AND constraint_record.convalidated
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM pg_constraint AS constraint_record
+    JOIN pg_depend AS dependency
+      ON dependency.classid = 'pg_catalog.pg_constraint'::regclass
+     AND dependency.objid = constraint_record.oid
+     AND dependency.objsubid = 0
+    WHERE constraint_record.conrelid = 'system.outbox_events'::regclass
+      AND constraint_record.conname =
+        'outbox_events_content_v1_payload_shape'
+      AND dependency.refclassid = 'pg_catalog.pg_proc'::regclass
+      AND dependency.refobjid =
+        'system.content_v1_outbox_payload_is_valid(text,text,text,integer,jsonb)'::regprocedure
+      AND dependency.refobjsubid = 0
+      AND dependency.deptype = 'n'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM pg_proc AS routine
+    WHERE routine.oid =
+        'platform.validate_runtime_content_outbox_provenance()'::regprocedure
+      AND NOT routine.prosecdef
+      AND routine.prorettype = 'pg_catalog.trigger'::regtype
+      AND 'search_path=pg_catalog' = ANY (routine.proconfig)
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM pg_proc AS routine
+    CROSS JOIN LATERAL aclexplode(
+      coalesce(routine.proacl, acldefault('f', routine.proowner))
+    ) AS privilege
+    WHERE routine.oid =
+        'platform.validate_runtime_content_outbox_provenance()'::regprocedure
+      AND privilege.grantee = 0
+      AND privilege.privilege_type = 'EXECUTE'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM pg_trigger AS trigger_record
+    WHERE trigger_record.tgrelid = 'system.outbox_events'::regclass
+      AND trigger_record.tgname =
+        'outbox_events_validate_runtime_content_provenance'
+      AND trigger_record.tgfoid =
+        'platform.validate_runtime_content_outbox_provenance()'::regprocedure
+      AND trigger_record.tgtype = 5
+      AND NOT trigger_record.tgisinternal
+      AND trigger_record.tgconstraint <> 0
+      AND trigger_record.tgdeferrable
+      AND trigger_record.tginitdeferred
+      AND trigger_record.tgenabled IN ('O', 'A')
+  )
   AND EXISTS (
     SELECT 1
     FROM pg_proc AS routine

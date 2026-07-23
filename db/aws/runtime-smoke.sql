@@ -702,9 +702,14 @@ VALUES (
   1,
   jsonb_build_object(
     'actor_id', :'actor_id',
+    'community_ids', jsonb_build_array(:'content_community_id'::uuid),
     'content_id', :'content_id',
     'kind', 'post',
-    'revision_id', :'content_revision_id'
+    'parent_content_id', NULL,
+    'revision_id', :'content_revision_id',
+    'root_content_id', :'content_id',
+    'symbol_ids', jsonb_build_array(),
+    'topic_ids', jsonb_build_array()
   ),
   statement_timestamp(),
   statement_timestamp(),

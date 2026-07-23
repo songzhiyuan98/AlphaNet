@@ -181,6 +181,109 @@ describeRevisionSchema("Content Revision write schema", () => {
     const approvalPendingActionId =
       input.approvedAction?.actionId ?? input.fakeApproval?.pendingActionId;
     const isApproved = approvalPendingActionId !== undefined;
+    const projections = await transaction<
+      Array<{
+        actor_id: string;
+        community_ids: string[];
+        current_revision_id: string;
+        kind: "post" | "reply";
+        parent_content_id: string | null;
+        root_content_id: string;
+        symbol_ids: string[];
+        topic_ids: string[];
+      }>
+    >`
+      select
+        content.author_actor_id::text as actor_id,
+        content.current_revision_id::text as current_revision_id,
+        content.kind,
+        content.parent_id::text as parent_content_id,
+        content.root_id::text as root_content_id,
+        coalesce((
+          select array_agg(
+            distinct placement.community_id::text
+            order by placement.community_id::text
+          )
+          from (
+            select root.primary_community_id as community_id
+            union
+            select additional.community_id
+            from platform.content_additional_communities as additional
+            where additional.content_id = root.id
+          ) as placement
+          where placement.community_id is not null
+        ), array[]::text[]) as community_ids,
+        coalesce((
+          select array_agg(
+            distinct classification.symbol_id::text
+            order by classification.symbol_id::text
+          )
+          from platform.content_symbols as classification
+          where classification.content_id in (content.id, root.id)
+        ), array[]::text[]) as symbol_ids,
+        coalesce((
+          select array_agg(
+            distinct classification.topic_id::text
+            order by classification.topic_id::text
+          )
+          from platform.content_topics as classification
+          where classification.content_id in (content.id, root.id)
+        ), array[]::text[]) as topic_ids
+      from platform.content_items as content
+      join platform.content_items as root on root.id = content.root_id
+      where content.id = ${input.contentId}
+      limit 1
+    `;
+    const projection = projections[0];
+    if (!projection) throw new Error("Content Outbox projection was not found");
+    const canonicalPayload =
+      input.eventType === "content.published" || input.eventType === "content.reply"
+        ? {
+            actor_id: projection.actor_id,
+            community_ids: projection.community_ids,
+            content_id: input.contentId,
+            kind: projection.kind,
+            parent_content_id: projection.parent_content_id,
+            revision_id: projection.current_revision_id,
+            root_content_id: projection.root_content_id,
+            symbol_ids: projection.symbol_ids,
+            topic_ids: projection.topic_ids,
+          }
+        : input.eventType === "content.revised"
+          ? {
+              actor_id: projection.actor_id,
+              affected_symbol_ids: projection.symbol_ids,
+              affected_topic_ids: projection.topic_ids,
+              changed_groups:
+                input.revisionId === null
+                  ? ["additional_community_ids", "symbols", "topics"]
+                  : ["body_markdown"],
+              community_ids: projection.community_ids,
+              content_id: input.contentId,
+              resource_version: input.resourceVersion,
+              revision_id: input.revisionId,
+              root_content_id: projection.root_content_id,
+              symbol_ids: projection.symbol_ids,
+              topic_ids: projection.topic_ids,
+            }
+          : {
+              actor_id: projection.actor_id,
+              content_id: input.contentId,
+              current_revision_id: projection.current_revision_id,
+              kind: projection.kind,
+              lifecycle_state: "deleted",
+              resource_version: input.resourceVersion,
+              root_content_id: projection.root_content_id,
+            };
+    if (
+      typeof input.payload !== "object" ||
+      input.payload === null ||
+      Array.isArray(input.payload)
+    ) {
+      throw new Error("Content Outbox fixture payload must be an object");
+    }
+    const completePayload = { ...canonicalPayload, ...input.payload };
+    const occurredAt = new Date();
     await transaction`
       insert into system.outbox_events (
         id,
@@ -189,7 +292,10 @@ describeRevisionSchema("Content Revision write schema", () => {
         aggregate_sequence,
         event_type,
         event_version,
-        payload
+        payload,
+        occurred_at,
+        available_at,
+        created_at
       )
       values (
         ${outboxId},
@@ -198,7 +304,10 @@ describeRevisionSchema("Content Revision write schema", () => {
         ${nextSequence},
         ${input.eventType},
         1,
-        ${transaction.json(input.payload)}
+        ${transaction.json(completePayload)},
+        ${occurredAt},
+        ${occurredAt},
+        ${occurredAt}
       )
     `;
     if (input.approvedAction) {
@@ -369,6 +478,7 @@ describeRevisionSchema("Content Revision write schema", () => {
           agent_id,
           credential_id,
           channel,
+          authentication_assurance,
           authorization_snapshot,
           action,
           target_type,
@@ -390,6 +500,7 @@ describeRevisionSchema("Content Revision write schema", () => {
           ${runtimeAgentId},
           ${runtimeCredentialId},
           'rest',
+          'agent_credential',
           '{"decision":"require_approval"}'::jsonb,
           ${input.action},
           ${targetType},
@@ -641,6 +752,45 @@ describeRevisionSchema("Content Revision write schema", () => {
         set current_revision_id = ${revisionId}
         where id = ${contentId}
       `;
+      const occurredAt = new Date();
+      await transaction`
+        insert into system.outbox_events (
+          id,
+          aggregate_type,
+          aggregate_id,
+          aggregate_sequence,
+          event_type,
+          event_version,
+          payload,
+          occurred_at,
+          available_at,
+          max_attempts,
+          created_at
+        )
+        values (
+          ${randomUUID()},
+          'content',
+          ${contentId},
+          1,
+          'content.published',
+          1,
+          ${transaction.json({
+            actor_id: actorId,
+            community_ids: [primaryCommunityId],
+            content_id: contentId,
+            kind: "post",
+            parent_content_id: null,
+            revision_id: revisionId,
+            root_content_id: contentId,
+            symbol_ids: [],
+            topic_ids: [],
+          })},
+          ${occurredAt},
+          ${occurredAt},
+          12,
+          ${occurredAt}
+        )
+      `;
     });
     return { contentId, revisionId };
   }
@@ -812,7 +962,8 @@ describeRevisionSchema("Content Revision write schema", () => {
     await postgres.sql.unsafe(`
       grant execute on function
         platform.audit_json_is_secret_free(jsonb),
-        platform.audit_json_is_secret_free_v2(jsonb)
+        platform.audit_json_is_secret_free_v2(jsonb),
+        system.content_v1_outbox_payload_is_valid(text, text, text, integer, jsonb)
       to ${quoteRole(runtimeRole)}
     `);
   });
@@ -2129,6 +2280,95 @@ describeRevisionSchema("Content Revision write schema", () => {
         active_relations: 1,
         active_sources: 1,
         current_revision_id: revisionId,
+        version: 2,
+      },
+    ]);
+  });
+
+  it("allows a protected Content event after another aggregate event advances its sequence", async () => {
+    const content = await createPost("runtime-sequence-divergence", runtimeActorId);
+    const unrelatedEventAt = new Date();
+    await postgres.sql`
+      insert into system.outbox_events (
+        id,
+        aggregate_type,
+        aggregate_id,
+        aggregate_sequence,
+        event_type,
+        event_version,
+        payload,
+        occurred_at,
+        available_at,
+        max_attempts,
+        created_at
+      )
+      values (
+        ${randomUUID()},
+        'content',
+        ${content.contentId},
+        2,
+        'content.moderation_changed',
+        1,
+        ${postgres.sql.json({ content_id: content.contentId })},
+        ${unrelatedEventAt},
+        ${unrelatedEventAt},
+        12,
+        ${unrelatedEventAt}
+      )
+    `;
+    const idempotencyId = randomUUID();
+
+    await expect(
+      asRuntime(async (transaction) => {
+        await insertInProgressIdempotency(transaction, {
+          id: idempotencyId,
+          key: `runtime-sequence-divergence-${content.contentId}`,
+          operation: "update_content",
+        });
+        await transaction`
+          update platform.content_items
+          set version = 2,
+              current_revision_id = ${content.revisionId}
+          where id = ${content.contentId} and version = 1
+        `;
+        await finishContentCommand(transaction, {
+          action: "content.update_content",
+          contentId: content.contentId,
+          eventType: "content.revised",
+          idempotencyId,
+          operation: "update_content",
+          payload: {
+            actor_id: runtimeActorId,
+            content_id: content.contentId,
+            resource_version: 2,
+            revision_id: null,
+          },
+          resourceVersion: 2,
+          revisionId: null,
+          responseCode: 200,
+        });
+        await transaction`set constraints all immediate`;
+      }),
+    ).resolves.toBeUndefined();
+
+    const persisted = await postgres.sql<
+      { aggregate_sequence: number; event_type: string; version: number }[]
+    >`
+      select
+        content.version::integer as version,
+        event.aggregate_sequence::integer as aggregate_sequence,
+        event.event_type
+      from platform.content_items as content
+      join system.outbox_events as event
+        on event.aggregate_type = 'content'
+       and event.aggregate_id = content.id::text
+       and event.event_type = 'content.revised'
+      where content.id = ${content.contentId}
+    `;
+    expect(persisted).toEqual([
+      {
+        aggregate_sequence: 3,
+        event_type: "content.revised",
         version: 2,
       },
     ]);

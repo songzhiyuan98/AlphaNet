@@ -426,6 +426,35 @@ if [[ "${oauth_runtime_acl_is_usable//[[:space:]]/}" != "t" ]]; then
   exit 1
 fi
 
+# Exercise the Content Outbox CHECK helper through the real table-write path,
+# not only through the verifier's ACL inventory. Roll the probe back so it can
+# never become application data.
+admin_psql \
+  --quiet \
+  --set="runtime_role=${RUNTIME_ROLE}" <<'SQL'
+BEGIN;
+SET LOCAL ROLE :"runtime_role";
+INSERT INTO system.outbox_events (
+  id,
+  aggregate_type,
+  aggregate_id,
+  aggregate_sequence,
+  event_type,
+  event_version,
+  payload
+)
+VALUES (
+  'ffffffff-ffff-4fff-8fff-fffffffffff1',
+  'acl_probe',
+  'runtime-content-helper',
+  1,
+  'acl.probe',
+  1,
+  '{}'::jsonb
+);
+ROLLBACK;
+SQL
+
 object_acl_is_closed="$(admin_psql \
   --tuples-only \
   --no-align \
