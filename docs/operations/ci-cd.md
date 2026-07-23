@@ -2,12 +2,13 @@
 
 ## Workflow inventory
 
-| Workflow            | Trigger                                   | Purpose                                                                                                                   |
-| ------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `CI`                | pull requests to `main`, pushes to `main` | Code/IaC/workflow gates and five container checks; ECR publication and a release manifest only when its switch is enabled |
-| `Manual Deploy`     | manual dispatch from `main`               | Validate a successful CI release manifest, then deploy or roll back its exact ECR digests on ECS                          |
-| `CodeQL`            | pull requests, `main`, weekly             | Opt-in GitHub Code Security analysis                                                                                      |
-| `Dependency Review` | pull requests to `main`                   | Opt-in GitHub Code Security dependency diff review                                                                        |
+| Workflow                    | Trigger                                   | Purpose                                                                                                                   |
+| --------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `CI`                        | pull requests to `main`, pushes to `main` | Code/IaC/workflow gates and five container checks; ECR publication and a release manifest only when its switch is enabled |
+| `Web Release Compatibility` | manual dispatch from `main`               | Validate one exact main SHA in Chrome, Firefox, Safari/WebKit, Edge, and mobile Safari; retain exact-SHA evidence         |
+| `Manual Deploy`             | manual dispatch from `main`               | Validate a successful CI release manifest, then deploy or roll back its exact ECR digests on ECS                          |
+| `CodeQL`                    | pull requests, `main`, weekly             | Opt-in GitHub Code Security analysis                                                                                      |
+| `Dependency Review`         | pull requests to `main`                   | Opt-in GitHub Code Security dependency diff review                                                                        |
 
 There is deliberately no `workflow_run` release workflow. Quality gates, image
 publication, manifest generation, and optional staging deployment all run from
@@ -61,10 +62,20 @@ aggregator.
   proof; the monthly isolated Aurora snapshot/PITR restore remains the
   Production RPO/RTO gate.
 - Build compiles the workspace.
-- Web E2E builds the current production Next.js application and runs 18
+- Web E2E builds the current production Next.js application and runs 24
   Chromium checks against a strict versioned public-API stub with Playwright
   1.61.1. The matching browser cache is version-keyed; Playwright still
   verifies browser and runner system dependencies every run.
+- `Web Release Compatibility` is a cost-controlled manual release-candidate
+  gate, not a per-PR job. It rejects a non-full SHA or a commit that is not
+  reachable from `main`, builds the production Web, and runs the public
+  discovery/discussion, credential-free search, Owner login/open-registration,
+  and mobile-overflow paths in Chrome, Firefox, Safari/WebKit, Edge, and mobile
+  Safari. It writes `web-compatibility.json` only when every expected project
+  passes and retains the raw Playwright JSON and diagnostics for 30 days.
+  Automated axe WCAG A/AA scans and keyboard-visible-focus coverage remain
+  additive; a release still requires the documented manual screen-reader and
+  keyboard spot check because automated rules cannot prove the full experience.
 - The container matrix waits for Quality, Integration, Build, Secret scan, and
   Web E2E, then builds `web`, `api`, `mcp`, `worker`, and `migrate`; a failed
   security or browser gate cannot publish a release image.

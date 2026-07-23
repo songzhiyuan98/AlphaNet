@@ -1,0 +1,82 @@
+name: Web Release Compatibility
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: Full main-branch commit SHA to validate as a release candidate.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-release-compatibility
+  cancel-in-progress: false
+
+env:
+  CI: "true"
+  NODE_VERSION: "22.22.0"
+
+jobs:
+  compatibility:
+    name: Chrome, Firefox, Safari, Edge, and mobile Safari
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check out the requested release candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.release_sha }}
+
+      - name: Verify the exact main-branch release SHA
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+            { echo "::error::release_sha must be a full lowercase commit SHA"; exit 1; }
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA" ||
+            { echo "::error::checkout does not match release_sha"; exit 1; }
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$RELEASE_SHA" origin/main ||
+            { echo "::error::release_sha is not reachable from origin/main"; exit 1; }
+
+      - name: Set up workspace
+        uses: ./.github/actions/setup-pnpm
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Cache version-matched Playwright browsers
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: playwright-release-${{ runner.os }}-${{ runner.arch }}-1.61.1
+          path: ~/.cache/ms-playwright
+
+      - name: Install release browser matrix and runner dependencies
+        run: pnpm exec playwright install --with-deps chromium firefox webkit chrome msedge
+
+      - name: Build production Web and run the release browser matrix
+        run: pnpm test:web:compatibility
+
+      - name: Write exact-SHA compatibility evidence
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          SOURCE_RUN_ID: ${{ github.run_id }}
+        run: node .github/scripts/write-web-compatibility-evidence.mjs
+
+      - name: Upload compatibility evidence and diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: web-compatibility-${{ inputs.release_sha }}
+          overwrite: true
+          path: |
+            artifacts/release/web-compatibility.json
+            artifacts/release/web-compatibility-playwright.json
+            playwright-compatibility-report
+            test-results/web-compatibility
+          if-no-files-found: warn
+          retention-days: 30

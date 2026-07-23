@@ -58,7 +58,15 @@
     {
       "id": "web_compatibility",
       "class": "release_candidate",
-      "description": "Core public, Owner and Admin flows pass keyboard, screen-reader, mobile and four-browser acceptance."
+      "description": "Core public and Owner flows pass automated keyboard, WCAG, mobile and Chrome/Firefox/Safari/Edge acceptance; Admin and manual screen-reader checks remain required before release.",
+      "repository_evidence": [
+        "tests/web-compatibility/core-flows.spec.ts",
+        "tests/web-e2e/accessibility.spec.ts",
+        "playwright.compatibility.config.ts",
+        ".github/workflows/web-compatibility.yml",
+        ".github/scripts/write-web-compatibility-evidence.mjs"
+      ],
+      "verification_command": "pnpm test:web:e2e && pnpm test:web:compatibility"
     },
     {
       "id": "product_spec_alignment",
