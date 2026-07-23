@@ -24,6 +24,8 @@ readonly notifications_v1_checksum="41af3431fa6d8cbaa7ac7aea9aaf35a3791a02ec5407
 readonly content_ranking_v1_checksum="2fc7d315c16559f29e0688fce09a16d4053e2a09b7d7fa1a00a546fd6d572dc9"
 readonly remote_mcp_v1_checksum="a43f96760a7734c6b036f74275f9a349a09f5ef8ae3328ae6c80ff2488d152a5"
 readonly remote_mcp_oauth_hardening_v1_checksum="3e9fa98b188a79866db57d989bcb1b15dec5d1bfa82fff45edea1b87c06d012a"
+readonly remote_mcp_oauth_lifecycle_maintenance_v1_checksum="0361f188331c627cbbce6050311f70ece5e1b767e2543573629d6277610643f4"
+readonly owner_web_social_v1_checksum="77b07de89c8b44de4e933a408408e191b8fdae16476f320fe7a1adb2e61b0e01"
 readonly suffix="${GITHUB_RUN_ID:-local}_${RANDOM}_$$"
 readonly empty_database="alphanet_migration_empty_${suffix}"
 readonly owner_database="alphanet_migration_owner_${suffix}"
@@ -1033,9 +1035,11 @@ for database in \
       --set=notifications_v1_checksum="${notifications_v1_checksum}" \
       --set=content_ranking_v1_checksum="${content_ranking_v1_checksum}" \
       --set=remote_mcp_v1_checksum="${remote_mcp_v1_checksum}" \
-      --set=remote_mcp_oauth_hardening_v1_checksum="${remote_mcp_oauth_hardening_v1_checksum}" <<'SQL'
+      --set=remote_mcp_oauth_hardening_v1_checksum="${remote_mcp_oauth_hardening_v1_checksum}" \
+      --set=remote_mcp_oauth_lifecycle_maintenance_v1_checksum="${remote_mcp_oauth_lifecycle_maintenance_v1_checksum}" \
+      --set=owner_web_social_v1_checksum="${owner_web_social_v1_checksum}" <<'SQL'
 SELECT
-  (SELECT count(*) FROM system.schema_migrations) = 19
+  (SELECT count(*) FROM system.schema_migrations) = 21
   AND EXISTS (
     SELECT 1
     FROM system.schema_migrations
@@ -1136,6 +1140,20 @@ SELECT
     WHERE version = '000019'
       AND name = 'remote_mcp_oauth_hardening_v1'
       AND checksum = :'remote_mcp_oauth_hardening_v1_checksum'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM system.schema_migrations
+    WHERE version = '000020'
+      AND name = 'remote_mcp_oauth_lifecycle_maintenance_v1'
+      AND checksum = :'remote_mcp_oauth_lifecycle_maintenance_v1_checksum'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM system.schema_migrations
+    WHERE version = '000021'
+      AND name = 'owner_web_social_v1'
+      AND checksum = :'owner_web_social_v1_checksum'
   )
   AND (
     SELECT count(*) = 5
@@ -2019,4 +2037,4 @@ SQL
   fi
 done
 
-echo "Empty, Owner-schema, and published Agent-v1 paths all reach the Remote MCP OAuth v1 schema."
+echo "Empty, Owner-schema, and published Agent-v1 paths all reach the current AlphaNet schema."
