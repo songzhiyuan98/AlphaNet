@@ -203,6 +203,7 @@ GRANT SELECT ON TABLE
   platform.reports,
   platform.source_links,
   platform.symbols,
+  platform.topic_community_admin_actions,
   platform.topics
 TO :"runtime_role";
 
@@ -261,6 +262,41 @@ GRANT INSERT (
   action_log_id,
   outbox_event_id
 ) ON TABLE platform.moderation_actions
+TO :"runtime_role";
+
+GRANT INSERT (
+  community_id,
+  topic_id
+) ON TABLE platform.community_topics
+TO :"runtime_role";
+
+GRANT INSERT (
+  id,
+  slug,
+  name,
+  description
+) ON TABLE platform.topics
+TO :"runtime_role";
+
+GRANT INSERT (
+  id,
+  admin_id,
+  permission_used,
+  action,
+  community_id,
+  community_version_before,
+  community_version_after,
+  idempotency_key,
+  request_digest,
+  request_id,
+  authorization_snapshot,
+  before_state,
+  after_state,
+  response_snapshot,
+  action_log_id,
+  outbox_event_id,
+  occurred_at
+) ON TABLE platform.topic_community_admin_actions
 TO :"runtime_role";
 
 GRANT INSERT (
@@ -348,6 +384,21 @@ GRANT UPDATE (
   assigned_admin_id,
   resolution_code
 ) ON TABLE platform.moderation_cases
+TO :"runtime_role";
+
+GRANT UPDATE (
+  name,
+  description,
+  status,
+  version
+) ON TABLE platform.communities
+TO :"runtime_role";
+
+GRANT UPDATE (
+  name,
+  description,
+  updated_at
+) ON TABLE platform.topics
 TO :"runtime_role";
 
 GRANT UPDATE ON TABLE
