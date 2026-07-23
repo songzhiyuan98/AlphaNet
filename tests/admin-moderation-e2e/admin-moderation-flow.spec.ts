@@ -122,7 +122,7 @@ test("real Owner report flows through Admin OIDC MFA, hide, redacted history, an
   const adminContext = await browser.newContext();
   const adminPage = await adminContext.newPage();
   await adminPage.goto("/admin/moderation");
-  await expect(adminPage.getByRole("heading", { name: "社区内容治理" })).toBeVisible();
+  await expect(adminPage.getByRole("heading", { name: "社区管理" })).toBeVisible();
   await adminPage.getByRole("button", { name: "使用 Workforce 身份登录" }).click();
   await expect(
     adminPage.getByRole("heading", { name: "Complete workforce MFA" }),
@@ -338,4 +338,80 @@ test("real Owner report flows through Admin OIDC MFA, hide, redacted history, an
   expect(reportEvents).toEqual([{ report_events: 1 }]);
 
   await Promise.all([adminContext.close(), publicContext.close(), authorContext.close()]);
+});
+
+test("workforce Admin creates, edits, and archives a topic community", async ({
+  page,
+}) => {
+  const slug = "ai-infrastructure-e2e";
+  await page.goto("/admin/communities");
+  await expect(page.getByRole("heading", { name: "社区管理" })).toBeVisible();
+  await page.getByRole("button", { name: "使用 Workforce 身份登录" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Complete workforce MFA" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Approve with MFA" }).click();
+  await page.waitForURL((url) => url.pathname === "/admin/communities", {
+    timeout: 20_000,
+  });
+  await expect(page.getByRole("heading", { name: "主题社区" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "主题社区" })).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+
+  await page.getByText("新建主题社区", { exact: true }).click();
+  await page.getByLabel("名称", { exact: true }).fill("AI Infrastructure");
+  await page.getByLabel("稳定 slug").fill(slug);
+  await page
+    .getByLabel("说明", { exact: true })
+    .fill("AI infrastructure and compute-market research.");
+  await page.getByRole("button", { name: "创建社区" }).click();
+  await expect(page.getByText("主题社区已创建。")).toBeVisible();
+
+  const row = page.locator("article").filter({ hasText: `#${slug}` });
+  await expect(row).toBeVisible();
+  await expect(row.getByText("AI Infrastructure", { exact: true })).toBeVisible();
+  await row.getByText("编辑社区资料", { exact: true }).click();
+  await row.getByLabel("展示名称").fill("AI Infrastructure & Compute");
+  await row
+    .getByLabel("社区说明")
+    .fill("Agent research on compute, datacenters, and AI infrastructure.");
+  await row.getByRole("button", { name: "保存更改" }).click();
+  await expect(page.getByText("社区资料已更新。")).toBeVisible();
+  await expect(
+    row.getByText("AI Infrastructure & Compute", { exact: true }),
+  ).toBeVisible();
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await row.getByRole("button", { name: "归档社区" }).click();
+  await expect(page.getByText("社区已归档。")).toBeVisible();
+  await expect(row.getByText("archived", { exact: true })).toBeVisible();
+
+  const state = await queryDatabase<{
+    action_count: number;
+    community_name: string;
+    community_state: string;
+    community_version: number;
+  }>(
+    `select
+       community.name as community_name,
+       community.status as community_state,
+       community.version::integer as community_version,
+       count(admin_action.id)::integer as action_count
+     from platform.communities as community
+     join platform.topic_community_admin_actions as admin_action
+       on admin_action.community_id = community.id
+     where community.slug = $1::citext
+     group by community.id`,
+    [slug],
+  );
+  expect(state).toEqual([
+    {
+      action_count: 3,
+      community_name: "AI Infrastructure & Compute",
+      community_state: "archived",
+      community_version: 3,
+    },
+  ]);
 });

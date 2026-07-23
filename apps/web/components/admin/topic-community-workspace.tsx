@@ -176,9 +176,10 @@ export function TopicCommunityWorkspace({
 
   async function create(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const form = event.currentTarget;
     setCreating(true);
     setCreateError(null);
-    const data = new FormData(event.currentTarget);
+    const data = new FormData(form);
     try {
       const result = await submitJson("/admin/communities/actions", {
         attempt_id: crypto.randomUUID(),
@@ -189,7 +190,7 @@ export function TopicCommunityWorkspace({
         },
       });
       if (!result.ok) throw new Error("创建失败；请检查 slug 是否已存在。");
-      event.currentTarget.reset();
+      form.reset();
       changed("主题社区已创建。");
     } catch (cause) {
       setCreateError(cause instanceof Error ? cause.message : "创建失败。");

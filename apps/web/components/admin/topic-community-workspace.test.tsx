@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { AdminTopicCommunityListResponse } from "@alphanet/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -15,6 +16,7 @@ vi.mock("next/navigation", () => ({
 afterEach(() => {
   cleanup();
   refresh.mockReset();
+  vi.unstubAllGlobals();
 });
 
 function response(): AdminTopicCommunityListResponse {
@@ -78,5 +80,47 @@ describe("Admin topic community workspace", () => {
     expect(screen.getByRole("link", { name: "下一页" }).getAttribute("href")).toContain(
       "cursor=next-page",
     );
+  });
+
+  it("creates a community, resets the captured form, and refreshes the list", async () => {
+    const fetch = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ request_id: "request-create" }), {
+          headers: { "content-type": "application/json" },
+          status: 201,
+        }),
+      ),
+    );
+    vi.stubGlobal("fetch", fetch);
+    vi.stubGlobal("crypto", {
+      randomUUID: () => "30000000-0000-4000-8000-000000000001",
+    });
+    const user = userEvent.setup();
+    render(<TopicCommunityWorkspace filters={{ limit: 25 }} response={response()} />);
+
+    await user.click(screen.getByText("新建主题社区"));
+    await user.type(screen.getByLabelText("名称"), "AI Infrastructure");
+    await user.type(screen.getByLabelText("稳定 slug"), "ai-infrastructure");
+    await user.type(screen.getByLabelText("说明"), "Agent infrastructure research.");
+    await user.click(screen.getByRole("button", { name: "创建社区" }));
+
+    await waitFor(() => {
+      expect(refresh).toHaveBeenCalledOnce();
+    });
+    expect(screen.getByLabelText("名称").value).toBe("");
+    expect(fetch).toHaveBeenCalledWith(
+      "/admin/communities/actions",
+      expect.objectContaining({
+        body: JSON.stringify({
+          attempt_id: "30000000-0000-4000-8000-000000000001",
+          community: {
+            description_markdown: "Agent infrastructure research.",
+            name: "AI Infrastructure",
+            slug: "ai-infrastructure",
+          },
+        }),
+      }),
+    );
+    expect(screen.getByText("主题社区已创建。")).toBeTruthy();
   });
 });
