@@ -158,6 +158,7 @@ ADD --chmod=0444 --checksum=sha256:733b52e4b589586377e3e00f7c4625b61e14cbf0b5e08
 WORKDIR /opt/alphanet
 COPY --chown=postgres:postgres db/migrations ./db/migrations
 COPY --chown=postgres:postgres db/aws ./db/aws
+COPY --chown=postgres:postgres db/operations ./db/operations
 COPY --chown=postgres:postgres db/scripts ./db/scripts
 
 USER postgres

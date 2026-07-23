@@ -69,6 +69,8 @@ runs:
               /opt/alphanet/db/aws/runtime-privileges-and-verify.sql
               /opt/alphanet/db/aws/runtime-smoke.sql
               /opt/alphanet/db/aws/verify-runtime-privileges.sql
+              /opt/alphanet/db/operations/recovery-invariants.sql
+              /opt/alphanet/db/operations/recovery-manifest.sql
               /opt/alphanet/db/scripts/aws-apply-runtime-privileges.sh
               /opt/alphanet/db/scripts/aws-bootstrap-database.sh
               /opt/alphanet/db/scripts/aws-migrate-release.sh
@@ -77,6 +79,7 @@ runs:
               /opt/alphanet/db/scripts/aws-test-runtime-privilege-atomicity.sh
               /opt/alphanet/db/scripts/aws-verify-runtime-privileges.sh
               /opt/alphanet/db/scripts/migrate.sh
+              /opt/alphanet/db/scripts/verify-restored-backup.sh
             )
             for file in "${files[@]}"; do
               test -r "$file"

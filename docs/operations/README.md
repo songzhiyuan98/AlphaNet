@@ -2,6 +2,10 @@
 
 This directory defines AlphaNet's delivery and recovery baseline.
 
+- [Database backup and recovery verification](./database-backup-recovery.md)
+  defines the automated release proof, monthly isolated Aurora restore and
+  quarterly business recovery drill.
+
 - [CI/CD and repository protection](./ci-cd.md)
 - [Deployment and rollback runbook](./deployment-and-rollback.md)
 - [AWS database identities and release gate](./aws-database-access.md)
