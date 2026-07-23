@@ -1,4 +1,12 @@
 import {
+  AdminTopicCommunityCreateHeadersSchema,
+  AdminTopicCommunityCreateRequestSchema,
+  AdminTopicCommunityListRequestSchema,
+  AdminTopicCommunityListResponseSchema,
+  AdminTopicCommunityMutationResponseSchema,
+  AdminTopicCommunityPatchHeadersSchema,
+  AdminTopicCommunityPatchRequestSchema,
+  AdminTopicCommunityPathParamsSchema,
   AdminModerationCaseDetailRequestSchema,
   AdminModerationCaseDetailResponseSchema,
   AdminModerationCaseListRequestSchema,
@@ -14,6 +22,11 @@ import {
   type AdminModerationCaseListResponse,
   type AdminModerationDecisionRequest,
   type AdminModerationDecisionResponse,
+  type AdminTopicCommunityCreateRequest,
+  type AdminTopicCommunityListRequest,
+  type AdminTopicCommunityListResponse,
+  type AdminTopicCommunityMutationResponse,
+  type AdminTopicCommunityPatchRequest,
   type V1ErrorResponse,
 } from "@alphanet/contracts";
 import { cookies, headers } from "next/headers";
@@ -37,7 +50,7 @@ export interface AdminApiSafeError {
   code: string;
   currentVersion: number | null;
   requestId: string;
-  requiredPermission: "moderation:decide" | "moderation:read" | null;
+  requiredPermission: "community:manage" | "moderation:decide" | "moderation:read" | null;
   retryAfterMs: number | null;
 }
 
@@ -65,7 +78,22 @@ export interface AdminModerationDecisionInput {
   decision: AdminModerationDecisionRequest;
 }
 
+export interface AdminTopicCommunityCreateInput {
+  attemptId: string;
+  community: AdminTopicCommunityCreateRequest;
+}
+
+export interface AdminTopicCommunityUpdateInput {
+  attemptId: string;
+  communityId: string;
+  communityVersion: number;
+  patch: AdminTopicCommunityPatchRequest;
+}
+
 export interface AdminApiClient {
+  createTopicCommunity(
+    input: AdminTopicCommunityCreateInput,
+  ): Promise<AdminApiResult<AdminTopicCommunityMutationResponse>>;
   decideCase(
     input: AdminModerationDecisionInput,
   ): Promise<AdminApiResult<AdminModerationDecisionResponse>>;
@@ -76,6 +104,12 @@ export interface AdminApiClient {
   listCases(
     request?: AdminModerationCaseListRequest,
   ): Promise<AdminApiResult<AdminModerationCaseListResponse>>;
+  listTopicCommunities(
+    request?: AdminTopicCommunityListRequest,
+  ): Promise<AdminApiResult<AdminTopicCommunityListResponse>>;
+  updateTopicCommunity(
+    input: AdminTopicCommunityUpdateInput,
+  ): Promise<AdminApiResult<AdminTopicCommunityMutationResponse>>;
 }
 
 export interface AdminApiClientDependencies {
@@ -146,6 +180,20 @@ function listCasesPath(request: AdminModerationCaseListRequest): string {
   return `/v1/admin/moderation/cases${query.length > 0 ? `?${query}` : ""}`;
 }
 
+function listTopicCommunitiesPath(request: AdminTopicCommunityListRequest): string {
+  const parameters = new URLSearchParams();
+  if (request.states !== undefined) {
+    parameters.set("states", request.states.join(","));
+  }
+  if (request.query !== undefined) parameters.set("query", request.query);
+  if (request.limit !== undefined) parameters.set("limit", String(request.limit));
+  if (request.cursor !== undefined && request.cursor !== null) {
+    parameters.set("cursor", request.cursor);
+  }
+  const query = parameters.toString();
+  return `/v1/admin/topic-communities${query.length > 0 ? `?${query}` : ""}`;
+}
+
 function caseDetailPath(
   caseId: string,
   request: AdminModerationCaseDetailRequest,
@@ -171,6 +219,10 @@ function caseDetailPath(
 
 function decisionPath(caseId: string): string {
   return `/v1/admin/moderation/cases/${encodeURIComponent(caseId)}/actions`;
+}
+
+function topicCommunityPath(communityId: string): string {
+  return `/v1/admin/topic-communities/${encodeURIComponent(communityId)}`;
 }
 
 function parseAdminModerationDecisionInput(
@@ -199,6 +251,60 @@ function parseAdminModerationDecisionInput(
         caseId: path.data.case_id,
         decision: decision.data,
         headers: decisionHeaders.data,
+      }
+    : null;
+}
+
+function parseTopicCommunityCreateInput(input: AdminTopicCommunityCreateInput): {
+  body: AdminTopicCommunityCreateRequest;
+  headers: { "idempotency-key": string };
+} | null {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    typeof input.attemptId !== "string" ||
+    !UUID_PATTERN.test(input.attemptId)
+  ) {
+    return null;
+  }
+  const body = AdminTopicCommunityCreateRequestSchema.safeParse(input.community);
+  const headers = AdminTopicCommunityCreateHeadersSchema.safeParse({
+    "idempotency-key": `topic-community-create-${input.attemptId}`,
+  });
+  return body.success && headers.success
+    ? { body: body.data, headers: headers.data }
+    : null;
+}
+
+function parseTopicCommunityUpdateInput(input: AdminTopicCommunityUpdateInput): {
+  body: AdminTopicCommunityPatchRequest;
+  communityId: string;
+  headers: { "idempotency-key": string; "if-match": string };
+} | null {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    typeof input.attemptId !== "string" ||
+    !UUID_PATTERN.test(input.attemptId) ||
+    typeof input.communityVersion !== "number" ||
+    !Number.isSafeInteger(input.communityVersion) ||
+    input.communityVersion < 1
+  ) {
+    return null;
+  }
+  const path = AdminTopicCommunityPathParamsSchema.safeParse({
+    community_id: input.communityId,
+  });
+  const body = AdminTopicCommunityPatchRequestSchema.safeParse(input.patch);
+  const headers = AdminTopicCommunityPatchHeadersSchema.safeParse({
+    "idempotency-key": `topic-community-update-${input.attemptId}`,
+    "if-match": `"${input.communityVersion}"`,
+  });
+  return path.success && body.success && headers.success
+    ? {
+        body: body.data,
+        communityId: path.data.community_id,
+        headers: headers.data,
       }
     : null;
 }
@@ -278,7 +384,9 @@ function safeError(
   const currentVersion = safePositiveInteger(details?.current_version);
   const permission = details?.required_permission;
   const requiredPermission =
-    permission === "moderation:read" || permission === "moderation:decide"
+    permission === "community:manage" ||
+    permission === "moderation:read" ||
+    permission === "moderation:decide"
       ? permission
       : null;
   const bodyRetryAfter = safePositiveInteger(envelope.error.retry_after_ms);
@@ -346,7 +454,7 @@ export function createAdminApiClient(
     init: {
       body?: string | undefined;
       headers?: Record<string, string> | undefined;
-      method: "GET" | "POST";
+      method: "GET" | "PATCH" | "POST";
       successStatuses: readonly (200 | 201)[];
     },
   ): Promise<AdminApiResult<T>> {
@@ -436,6 +544,23 @@ export function createAdminApiClient(
   }
 
   const client: AdminApiClient = {
+    createTopicCommunity: async (input) => {
+      const parsed = parseTopicCommunityCreateInput(input);
+      if (!parsed) return { error: null, kind: "invalid" };
+      const result = await request(
+        "/v1/admin/topic-communities",
+        AdminTopicCommunityMutationResponseSchema,
+        {
+          body: JSON.stringify(parsed.body),
+          headers: parsed.headers,
+          method: "POST",
+          successStatuses: [200, 201],
+        },
+      );
+      return result.kind === "success" && result.data.community.slug !== parsed.body.slug
+        ? unavailable()
+        : result;
+    },
     decideCase: async (input) => {
       const parsed = parseAdminModerationDecisionInput(input);
       if (!parsed) {
@@ -478,6 +603,32 @@ export function createAdminApiClient(
       return result.kind === "success" &&
         requestData.data.content_id !== undefined &&
         result.data.items.some((item) => item.content_id !== requestData.data.content_id)
+        ? unavailable()
+        : result;
+    },
+    listTopicCommunities: async (candidate = {}) => {
+      const requestData = AdminTopicCommunityListRequestSchema.safeParse(candidate);
+      if (!requestData.success) return { error: null, kind: "invalid" };
+      return request(
+        listTopicCommunitiesPath(requestData.data),
+        AdminTopicCommunityListResponseSchema,
+        { method: "GET", successStatuses: [200] },
+      );
+    },
+    updateTopicCommunity: async (input) => {
+      const parsed = parseTopicCommunityUpdateInput(input);
+      if (!parsed) return { error: null, kind: "invalid" };
+      const result = await request(
+        topicCommunityPath(parsed.communityId),
+        AdminTopicCommunityMutationResponseSchema,
+        {
+          body: JSON.stringify(parsed.body),
+          headers: parsed.headers,
+          method: "PATCH",
+          successStatuses: [200, 201],
+        },
+      );
+      return result.kind === "success" && result.data.community.id !== parsed.communityId
         ? unavailable()
         : result;
     },
@@ -539,4 +690,34 @@ export async function decideAdminModerationCase(
   const client = await defaultAdminApiClient();
   if (!client) return unavailable();
   return client.decideCase(input);
+}
+
+export async function listAdminTopicCommunities(
+  request: AdminTopicCommunityListRequest = {},
+): Promise<AdminApiResult<AdminTopicCommunityListResponse>> {
+  if (!AdminTopicCommunityListRequestSchema.safeParse(request).success) {
+    return { error: null, kind: "invalid" };
+  }
+  const client = await defaultAdminApiClient();
+  return client ? client.listTopicCommunities(request) : unavailable();
+}
+
+export async function createAdminTopicCommunity(
+  input: AdminTopicCommunityCreateInput,
+): Promise<AdminApiResult<AdminTopicCommunityMutationResponse>> {
+  if (!parseTopicCommunityCreateInput(input)) {
+    return { error: null, kind: "invalid" };
+  }
+  const client = await defaultAdminApiClient();
+  return client ? client.createTopicCommunity(input) : unavailable();
+}
+
+export async function updateAdminTopicCommunity(
+  input: AdminTopicCommunityUpdateInput,
+): Promise<AdminApiResult<AdminTopicCommunityMutationResponse>> {
+  if (!parseTopicCommunityUpdateInput(input)) {
+    return { error: null, kind: "invalid" };
+  }
+  const client = await defaultAdminApiClient();
+  return client ? client.updateTopicCommunity(input) : unavailable();
 }

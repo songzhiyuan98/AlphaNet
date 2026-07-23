@@ -16,10 +16,11 @@ MVP 不允许删除、恢复、合并主题社区，不提供 slug 修改或别�
 
 管理接口与公开 Agent API 分离：
 
+- `GET /v1/admin/topic-communities`
 - `POST /v1/admin/topic-communities`
 - `PATCH /v1/admin/topic-communities/{community_id}`
 
-二者只接受通过 MFA 的 Workforce OIDC Bearer 身份，并在请求边界与数据库事务内分别检查 `community:manage`。写请求必须携带 `Idempotency-Key`；更新还必须携带严格的 `If-Match: "<version>"`。
+三个接口只接受通过 MFA 的 Workforce OIDC Bearer 身份，并在请求边界与数据库事务内分别检查 `community:manage`。读取接口支持状态、关键词和签名 keyset 游标，返回稳定 Community ID、版本及受影响内容数。写请求必须携带 `Idempotency-Key`；更新还必须携带严格的 `If-Match: "<version>"`。
 
 创建成功返回 `201`，同一请求的幂等重放返回原始响应并使用 `200`。更新与归档采用相同语义。版本过期返回 `409` 并公开当前资源版本，客户端必须重新读取后再决定是否重试。
 
@@ -74,6 +75,6 @@ API readiness 将该检查视为关键依赖。迁移缺失、漂移或 provenan
 
 ## 7. 后续边界
 
-管理员 Web 的列表、搜索、创建、重命名与归档交互建立在上述 API 上，不直接访问数据库。列表分页与 Web 工作区可以独立演进，但不得改变本 ADR 的稳定身份、权限、幂等、版本和三事实审计约束。
+管理员 Web 的 `/admin/communities` 列表、搜索、创建、重命名与归档交互建立在上述 API 上，不直接访问数据库。浏览器只提交业务字段和一次性 attempt ID；BFF 生成幂等键、版本头并持有 Workforce Bearer 会话。列表采用按创建时间和稳定 ID 排序的签名 keyset 游标，不接受被篡改或跨筛选复用的游标。
 
 P1 的合并、slug 别名、迁移历史和恢复需要新的数据模型与 ADR，不能扩展 PATCH 参数暗中实现。

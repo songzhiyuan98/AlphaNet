@@ -1,4 +1,4 @@
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
 import { appendOutboxEvent, type PostgresClient } from "@alphanet/database";
 import type postgres from "postgres";
@@ -15,6 +15,10 @@ const UUID_PATTERN =
 const SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const ROLE_PATTERN = /^[a-z][a-z0-9_.-]{0,79}$/u;
 const ADMIN_PERMISSION_SET = new Set<string>(ADMIN_PERMISSIONS);
+const DEFAULT_LIST_LIMIT = 25;
+const MAX_CURSOR_LENGTH = 4_096;
+const MAX_LIST_LIMIT = 100;
+const LIST_PURPOSE = "alphanet.admin.topic-community-list.v1" as const;
 
 export interface AdminTopicCommunityContext {
   adminId: string;
@@ -42,8 +46,16 @@ export interface UpdateTopicCommunityInput {
   state?: "archived" | undefined;
 }
 
+export interface ListTopicCommunitiesInput {
+  cursor?: string | null | undefined;
+  limit?: number | undefined;
+  query?: string | undefined;
+  states?: readonly ("active" | "archived")[] | undefined;
+}
+
 export interface TopicCommunityView {
   canonicalTopic: { id: string; slug: string };
+  contentCount: number;
   createdAt: Date;
   descriptionMarkdown: string;
   id: string;
@@ -59,6 +71,16 @@ export interface TopicCommunityView {
   state: "active" | "archived";
   updatedAt: Date;
   version: number;
+}
+
+export interface TopicCommunityPage {
+  asOf: Date;
+  hasMore: boolean;
+  items: TopicCommunityView[];
+  limit: number;
+  nextCursor: string | null;
+  orderingVersion: "topic-community-created-keyset-v1";
+  snapshotId: string;
 }
 
 export interface TopicCommunityMutation {
@@ -81,6 +103,10 @@ export interface TopicCommunityManagementService {
     context: AdminTopicCommunityContext,
     input: CreateTopicCommunityInput,
   ): Promise<TopicCommunityMutation>;
+  list(
+    context: AdminTopicCommunityContext,
+    input: ListTopicCommunitiesInput,
+  ): Promise<TopicCommunityPage>;
   update(
     context: AdminTopicCommunityContext,
     input: UpdateTopicCommunityInput,
@@ -91,6 +117,7 @@ export type TopicCommunityManagementErrorCode =
   | "ADMIN_AUTHENTICATION_REQUIRED"
   | "ADMIN_PERMISSION_REQUIRED"
   | "COMMUNITY_VERSION_CONFLICT"
+  | "CURSOR_INVALID"
   | "IDEMPOTENCY_CONFLICT"
   | "SCHEMA_NOT_READY"
   | "TOPIC_COMMUNITY_ARCHIVED"
@@ -107,6 +134,7 @@ const ERROR_DEFINITIONS = {
   ],
   ADMIN_PERMISSION_REQUIRED: [403, false, "Community management permission is required."],
   COMMUNITY_VERSION_CONFLICT: [409, false, "The community version has changed."],
+  CURSOR_INVALID: [422, false, "The topic-community cursor is invalid."],
   IDEMPOTENCY_CONFLICT: [409, false, "The idempotency key was already used."],
   SCHEMA_NOT_READY: [503, true, "Topic-community management schema is not ready."],
   TOPIC_COMMUNITY_ARCHIVED: [409, false, "The topic community is archived."],
@@ -151,6 +179,7 @@ interface CommunityRow {
   allowed_content: string[];
   community_id: string;
   community_slug: string;
+  content_count: string;
   created_at: Date;
   description: string | null;
   max_posts_per_hour: number;
@@ -162,6 +191,30 @@ interface CommunityRow {
   topic_slug: string;
   updated_at: Date;
   version: string;
+}
+
+interface ListCursorPosition {
+  createdAt: string;
+  id: string;
+}
+
+interface ListCursorEnvelope {
+  asOf: string;
+  filters: {
+    limit: number;
+    query: string | null;
+    states: ("active" | "archived")[];
+  };
+  position: ListCursorPosition;
+  purpose: "alphanet.admin.topic-community-list.v1";
+  snapshotId: string;
+  version: 1;
+}
+
+interface NormalizedListFilters {
+  limit: number;
+  query: string | null;
+  states: ("active" | "archived")[];
 }
 
 interface ReplayRow {
@@ -192,6 +245,16 @@ interface StoredMutationSnapshot {
 
 function sortedUnique<T extends string>(values: readonly T[]): T[] {
   return [...new Set(values)].sort();
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+    .join(",")}}`;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -303,6 +366,98 @@ function normalizeUuid(value: string): string {
   return value.toLowerCase();
 }
 
+function normalizeListFilters(input: ListTopicCommunitiesInput): NormalizedListFilters {
+  const limit = input.limit ?? DEFAULT_LIST_LIMIT;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_LIST_LIMIT) {
+    throw new TopicCommunityManagementError("VALIDATION_ERROR");
+  }
+  const states = input.states ?? ["active", "archived"];
+  if (
+    states.length < 1 ||
+    states.length > 2 ||
+    new Set(states).size !== states.length ||
+    states.some((state) => state !== "active" && state !== "archived")
+  ) {
+    throw new TopicCommunityManagementError("VALIDATION_ERROR");
+  }
+  let query: string | null = null;
+  if (input.query !== undefined) {
+    if (typeof input.query !== "string") {
+      throw new TopicCommunityManagementError("VALIDATION_ERROR");
+    }
+    query = input.query.normalize("NFC").trim();
+    if (query.length < 1 || query.length > 200 || /\p{Cc}/u.test(query)) {
+      throw new TopicCommunityManagementError("VALIDATION_ERROR");
+    }
+  }
+  return {
+    limit,
+    query,
+    states: sortedUnique(states),
+  };
+}
+
+function parseIsoDate(value: unknown): Date | null {
+  if (typeof value !== "string") return null;
+  const date = new Date(value);
+  return Number.isFinite(date.valueOf()) && date.toISOString() === value ? date : null;
+}
+
+function decodeListCursor(
+  cursor: string,
+  signingKey: Buffer,
+  filters: NormalizedListFilters,
+): ListCursorEnvelope {
+  if (
+    typeof cursor !== "string" ||
+    cursor.length < 3 ||
+    cursor.length > MAX_CURSOR_LENGTH ||
+    /\s/u.test(cursor)
+  ) {
+    throw new TopicCommunityManagementError("CURSOR_INVALID");
+  }
+  const [payload, signature, extra] = cursor.split(".");
+  if (!payload || !signature || extra !== undefined) {
+    throw new TopicCommunityManagementError("CURSOR_INVALID");
+  }
+  const expected = createHmac("sha256", signingKey).update(payload).digest();
+  let actual: Buffer;
+  let parsed: unknown;
+  try {
+    actual = Buffer.from(signature, "base64url");
+    parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  } catch {
+    throw new TopicCommunityManagementError("CURSOR_INVALID");
+  }
+  if (
+    actual.length !== expected.length ||
+    !timingSafeEqual(actual, expected) ||
+    !isPlainRecord(parsed) ||
+    Object.keys(parsed).sort().join(",") !==
+      "asOf,filters,position,purpose,snapshotId,version" ||
+    parsed.version !== 1 ||
+    parsed.purpose !== LIST_PURPOSE ||
+    typeof parsed.snapshotId !== "string" ||
+    !UUID_PATTERN.test(parsed.snapshotId) ||
+    parseIsoDate(parsed.asOf) === null ||
+    stableJson(parsed.filters) !== stableJson(filters) ||
+    !isPlainRecord(parsed.position) ||
+    Object.keys(parsed.position).sort().join(",") !== "createdAt,id" ||
+    typeof parsed.position.id !== "string" ||
+    !UUID_PATTERN.test(parsed.position.id) ||
+    parseIsoDate(parsed.position.createdAt) === null
+  ) {
+    throw new TopicCommunityManagementError("CURSOR_INVALID");
+  }
+  return parsed as unknown as ListCursorEnvelope;
+}
+
+function encodeListCursor(envelope: ListCursorEnvelope, signingKey: Buffer): string {
+  const payload = Buffer.from(stableJson(envelope), "utf8").toString("base64url");
+  const signature = createHmac("sha256", signingKey).update(payload).digest("base64url");
+  return `${payload}.${signature}`;
+}
+
 function digestRequest(value: unknown): Buffer {
   return createHash("sha256").update(JSON.stringify(value)).digest();
 }
@@ -315,12 +470,21 @@ function positiveVersion(value: string | number): number {
   return parsed;
 }
 
+function nonnegativeCount(value: string | number): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error("Topic community returned an invalid content count.");
+  }
+  return parsed;
+}
+
 function rowToView(row: CommunityRow): TopicCommunityView {
   if (row.status !== "active" && row.status !== "archived") {
     throw new Error("Topic community returned an unsupported state.");
   }
   return {
     canonicalTopic: { id: row.topic_id, slug: row.topic_slug },
+    contentCount: nonnegativeCount(row.content_count),
     createdAt: new Date(row.created_at),
     descriptionMarkdown: row.description ?? "",
     id: row.community_id,
@@ -377,14 +541,30 @@ function restoreMutation(value: unknown): TopicCommunityMutation {
 }
 
 export class PostgresTopicCommunityManagementService implements TopicCommunityManagementService {
+  readonly #clock: () => Date;
+  readonly #cursorSigningKey: Buffer;
   readonly #idFactory: () => string;
   readonly #sql: PostgresClient;
 
   constructor(
     sql: PostgresClient,
-    options: { idFactory?: (() => string) | undefined } = {},
+    options: {
+      clock?: (() => Date) | undefined;
+      cursorSigningKey: Uint8Array;
+      idFactory?: (() => string) | undefined;
+    },
   ) {
+    if (
+      !(options.cursorSigningKey instanceof Uint8Array) ||
+      options.cursorSigningKey.byteLength < 32
+    ) {
+      throw new Error(
+        "The topic-community cursor signing key must contain at least 32 bytes.",
+      );
+    }
     this.#sql = sql;
+    this.#clock = options.clock ?? (() => new Date());
+    this.#cursorSigningKey = Buffer.from(options.cursorSigningKey);
     this.#idFactory = options.idFactory ?? randomUUID;
   }
 
@@ -406,6 +586,132 @@ export class PostgresTopicCommunityManagementService implements TopicCommunityMa
     `;
     if (rows.length !== 1 || rows[0]?.ready !== true) {
       throw new TopicCommunityManagementError("SCHEMA_NOT_READY");
+    }
+  }
+
+  async list(
+    context: AdminTopicCommunityContext,
+    input: ListTopicCommunitiesInput,
+  ): Promise<TopicCommunityPage> {
+    const admin = validateContext(context);
+    const filters = normalizeListFilters(input);
+    const cursor =
+      input.cursor === undefined || input.cursor === null
+        ? null
+        : decodeListCursor(input.cursor, this.#cursorSigningKey, filters);
+    const asOf = cursor ? new Date(cursor.asOf) : new Date(this.#clock().valueOf());
+    if (!Number.isFinite(asOf.valueOf())) {
+      throw new TopicCommunityManagementError("VALIDATION_ERROR");
+    }
+    const snapshotId = cursor?.snapshotId ?? this.#newId();
+    const position = cursor?.position ?? null;
+
+    try {
+      return await this.#sql.begin(
+        "isolation level repeatable read",
+        async (transaction) => {
+          await transaction`set local statement_timeout = '10s'`;
+          await this.#revalidateAdmin(transaction, admin);
+          const rows = await transaction<CommunityRow[]>`
+            select
+              community.id::text as community_id,
+              community.slug::text as community_slug,
+              community.name,
+              community.description,
+              community.status,
+              community.version::text,
+              community.created_at,
+              community.updated_at,
+              topic.id::text as topic_id,
+              topic.slug::text as topic_slug,
+              array(
+                select jsonb_array_elements_text(
+                  community.posting_rules -> 'allowed_content'
+                )
+              ) as allowed_content,
+              (community.posting_rules ->> 'max_posts_per_hour')::integer
+                as max_posts_per_hour,
+              (community.posting_rules ->> 'requires_sources')::boolean
+                as requires_sources,
+              (community.posting_rules ->> 'replies_open')::boolean
+                as replies_open,
+              (
+                select count(distinct affected.content_id)::text
+                from (
+                  select content.id as content_id
+                  from platform.content_items as content
+                  where content.primary_community_id = community.id
+                  union
+                  select additional.content_id
+                  from platform.content_additional_communities as additional
+                  where additional.community_id = community.id
+                ) as affected
+              ) as content_count
+            from platform.communities as community
+            join platform.community_topics as mapping
+              on mapping.community_id = community.id
+             and mapping.is_primary
+            join platform.topics as topic
+              on topic.id = mapping.topic_id
+             and topic.deleted_at is null
+            where community.kind = 'topic'
+              and community.deleted_at is null
+              and community.created_at <= ${asOf}
+              and community.status = any(${filters.states})
+              and (
+                ${filters.query}::text is null
+                or position(
+                  lower(${filters.query}::text)
+                  in lower(
+                    community.slug::text || ' ' || community.name || ' '
+                    || coalesce(community.description, '')
+                  )
+                ) > 0
+              )
+              and (
+                ${position?.createdAt ?? null}::timestamptz is null
+                or (community.created_at, community.id) <
+                  (
+                    ${position?.createdAt ?? null}::timestamptz,
+                    ${position?.id ?? null}::uuid
+                  )
+              )
+            order by community.created_at desc, community.id desc
+            limit ${filters.limit + 1}
+          `;
+          const hasMore = rows.length > filters.limit;
+          const items = rows.slice(0, filters.limit).map(rowToView);
+          const last = items.at(-1);
+          const nextCursor =
+            hasMore && last
+              ? encodeListCursor(
+                  {
+                    asOf: asOf.toISOString(),
+                    filters,
+                    position: {
+                      createdAt: last.createdAt.toISOString(),
+                      id: last.id,
+                    },
+                    purpose: LIST_PURPOSE,
+                    snapshotId,
+                    version: 1,
+                  },
+                  this.#cursorSigningKey,
+                )
+              : null;
+          return {
+            asOf,
+            hasMore,
+            items,
+            limit: filters.limit,
+            nextCursor,
+            orderingVersion: "topic-community-created-keyset-v1",
+            snapshotId,
+          };
+        },
+      );
+    } catch (error) {
+      throw this.#asUnavailable(error);
     }
   }
 
@@ -479,7 +785,8 @@ export class PostgresTopicCommunityManagementService implements TopicCommunityMa
             (community.posting_rules ->> 'requires_sources')::boolean
               as requires_sources,
             (community.posting_rules ->> 'replies_open')::boolean
-              as replies_open
+              as replies_open,
+            '0'::text as content_count
           from community_insert as community
           join platform.topics as topic on topic.id = ${topicId}
         `;
@@ -860,7 +1167,19 @@ export class PostgresTopicCommunityManagementService implements TopicCommunityMa
         (community.posting_rules ->> 'requires_sources')::boolean
           as requires_sources,
         (community.posting_rules ->> 'replies_open')::boolean
-          as replies_open
+          as replies_open,
+        (
+          select count(distinct affected.content_id)::text
+          from (
+            select content.id as content_id
+            from platform.content_items as content
+            where content.primary_community_id = community.id
+            union
+            select additional.content_id
+            from platform.content_additional_communities as additional
+            where additional.community_id = community.id
+          ) as affected
+        ) as content_count
       from platform.communities as community
       join platform.community_topics as mapping
         on mapping.community_id = community.id

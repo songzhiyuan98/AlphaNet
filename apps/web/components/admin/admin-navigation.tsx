@@ -3,8 +3,9 @@ import Link from "next/link";
 import styles from "./admin-moderation.module.css";
 
 export interface AdminNavigationProps {
-  active: "moderation";
+  active: "communities" | "moderation";
   adminLabel?: string;
+  canManage?: boolean;
   canDecide: boolean;
   logoutPath?: string;
 }
@@ -12,6 +13,7 @@ export interface AdminNavigationProps {
 export function AdminNavigation({
   active,
   adminLabel = "Workforce Admin",
+  canManage = false,
   canDecide,
   logoutPath = "/admin/auth/logout",
 }: AdminNavigationProps) {
@@ -26,7 +28,7 @@ export function AdminNavigation({
         </Link>
         <div className={styles.identityBlock}>
           <span className={styles.permissionBadge}>
-            {canDecide ? "权限实时校验" : "只读审核"}
+            {canDecide || canManage ? "权限实时校验" : "只读审核"}
           </span>
           <span className={styles.adminLabel}>{adminLabel}</span>
           <form action={logoutPath} method="post">
@@ -42,6 +44,12 @@ export function AdminNavigation({
           href="/admin/moderation"
         >
           内容治理
+        </Link>
+        <Link
+          aria-current={active === "communities" ? "page" : undefined}
+          href="/admin/communities"
+        >
+          主题社区
         </Link>
       </nav>
     </>

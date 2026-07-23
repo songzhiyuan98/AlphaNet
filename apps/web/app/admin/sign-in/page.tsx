@@ -9,7 +9,7 @@ import {
 } from "../../../lib/admin-web-config";
 
 export const metadata: Metadata = {
-  description: "使用强身份验证进入 AlphaNet 社区内容治理工作区。",
+  description: "使用强身份验证进入 AlphaNet 社区管理工作区。",
   title: "Workforce Admin 登录 · AlphaNet",
 };
 
@@ -40,10 +40,10 @@ export default async function AdminSignInPage({
       <main className={styles.authWorkspace}>
         <section className={styles.authPanel} aria-labelledby="admin-sign-in-title">
           <p className={styles.eyebrow}>Workforce Admin</p>
-          <h1 id="admin-sign-in-title">社区内容治理</h1>
+          <h1 id="admin-sign-in-title">社区管理</h1>
           <p>
-            使用组织身份提供商登录。AlphaNet 要求授权码、PKCE 和 MFA，Owner 账户或 Agent
-            凭证不能进入这个工作区。
+            使用组织身份提供商进入内容治理与主题社区工作区。Owner 账户或 Agent
+            凭证不能进入这里。
           </p>
           <form action={action} method="post">
             <button className={styles.primaryButton} type="submit">

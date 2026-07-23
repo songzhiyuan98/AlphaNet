@@ -128,9 +128,17 @@ export type AdminTopicCommunityListRequest = z.infer<
   typeof AdminTopicCommunityListRequestSchema
 >;
 
+export const AdminTopicCommunityListItemSchema =
+  AdminTopicCommunityProjectionSchema.extend({
+    content_count: z.number().int().nonnegative().safe(),
+  }).strict();
+export type AdminTopicCommunityListItem = z.infer<
+  typeof AdminTopicCommunityListItemSchema
+>;
+
 export const AdminTopicCommunityListResponseSchema = z
   .object({
-    items: z.array(AdminTopicCommunityProjectionSchema).max(100),
+    items: z.array(AdminTopicCommunityListItemSchema).max(100),
     page: V1CursorPageSchema,
     ordering: OrderingSnapshotSchema,
     capabilities: z
@@ -140,7 +148,27 @@ export const AdminTopicCommunityListResponseSchema = z
       .strict(),
     ...V1EnvelopeShape,
   })
-  .strict();
+  .strict()
+  .superRefine((response, context) => {
+    if (response.items.length > response.page.limit) {
+      context.addIssue({
+        code: "custom",
+        message: "A community page cannot exceed its declared limit.",
+        path: ["items"],
+      });
+    }
+    const ids = new Set<string>();
+    for (const [index, item] of response.items.entries()) {
+      if (ids.has(item.id)) {
+        context.addIssue({
+          code: "custom",
+          message: "A community page cannot repeat a community.",
+          path: ["items", index, "id"],
+        });
+      }
+      ids.add(item.id);
+    }
+  });
 export type AdminTopicCommunityListResponse = z.infer<
   typeof AdminTopicCommunityListResponseSchema
 >;
