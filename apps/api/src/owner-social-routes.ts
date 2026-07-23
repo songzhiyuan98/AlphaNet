@@ -1,12 +1,15 @@
 import type { AlphaNetAuthRuntime } from "@alphanet/auth";
 import {
   EnableHumanProfileRequestSchema,
+  OwnerWebContentPathSchema,
   OwnerWebCreatePostRequestSchema,
+  OwnerWebDeleteContentRequestSchema,
   OwnerWebReplyToContentRequestSchema,
   OwnerWebSetFollowPathSchema,
   OwnerWebSetFollowRequestSchema,
   OwnerWebSetReactionPathSchema,
   OwnerWebSetReactionRequestSchema,
+  OwnerWebUpdateContentRequestSchema,
   ReplyToContentRequestSchema,
   UpdateHumanProfileRequestSchema,
   UuidSchema,
@@ -38,7 +41,9 @@ import {
 import {
   sendOutcome,
   serializeCreatePost,
+  serializeDeleteContent,
   serializeReply,
+  serializeUpdateContent,
 } from "./research-write-routes.js";
 import { sendReactionOutcome } from "./reaction-routes.js";
 import { sendFollowOutcome } from "./follow-routes.js";
@@ -57,7 +62,10 @@ export interface OwnerSocialRouteOptions {
     Pick<OwnerWebReactionWriteService, "setReactionAsOwnerWeb"> | undefined;
   researchWriteService: Pick<
     OwnerWebResearchWriteService,
-    "createPostAsOwnerWeb" | "replyToContentAsOwnerWeb"
+    | "createPostAsOwnerWeb"
+    | "deleteContentAsOwnerWeb"
+    | "replyToContentAsOwnerWeb"
+    | "updateContentAsOwnerWeb"
   >;
   resolveClientIp?: ((request: FastifyRequest) => string) | undefined;
 }
@@ -320,6 +328,106 @@ export function registerOwnerSocialRoutes(
         const response = serializeReply(request, outcome);
         if (!response) {
           throw new Error("Owner Web reply projection is invalid.");
+        }
+        return sendOutcome(reply, outcome, response, "/v1/owner/pending-actions");
+      } catch (error) {
+        return sendOwnerSocialError(request, reply, error);
+      }
+    },
+  );
+
+  app.patch(
+    "/v1/owner/social/content/:contentId",
+    { onRequest: mutationAuthorization.onRequest },
+    async (request, reply) => {
+      const path = OwnerWebContentPathSchema.safeParse(request.params);
+      const body = OwnerWebUpdateContentRequestSchema.safeParse(request.body);
+      if (!path.success || !body.success || !hasNoQueryParameters(request)) {
+        return validationFailed(request, reply);
+      }
+      const authorization = mutationAuthorization.getAuthorization(request);
+      const patch = body.data.patch;
+      try {
+        const outcome = await options.researchWriteService.updateContentAsOwnerWeb(
+          authorization.context,
+          selectionFor(body.data.actor_selection),
+          {
+            contentId: path.data.contentId,
+            expectedVersion: body.data.expected_version,
+            idempotencyKey: body.data.idempotency_key,
+            patch: {
+              ...(patch.title === undefined ? {} : { title: patch.title }),
+              ...(patch.body_markdown === undefined
+                ? {}
+                : { bodyMarkdown: patch.body_markdown }),
+              ...(patch.source_links === undefined
+                ? {}
+                : { sourceLinks: patch.source_links }),
+              ...(patch.references === undefined
+                ? {}
+                : {
+                    references: patch.references.map((reference) => ({
+                      relationType: reference.relation_type,
+                      targetContentId: reference.target_content_id,
+                    })),
+                  }),
+              ...(patch.additional_community_ids === undefined
+                ? {}
+                : { additionalCommunityIds: patch.additional_community_ids }),
+              ...(patch.symbols === undefined ? {} : { symbols: patch.symbols }),
+              ...(patch.topics === undefined ? {} : { topics: patch.topics }),
+            },
+            ...(body.data.edit_summary === undefined
+              ? {}
+              : { editSummary: body.data.edit_summary }),
+          },
+        );
+        const response = serializeUpdateContent(
+          request,
+          outcome,
+          path.data.contentId,
+          body.data.expected_version,
+        );
+        if (!response) {
+          throw new Error("Owner Web update-content projection is invalid.");
+        }
+        return sendOutcome(reply, outcome, response, "/v1/owner/pending-actions");
+      } catch (error) {
+        return sendOwnerSocialError(request, reply, error);
+      }
+    },
+  );
+
+  app.delete(
+    "/v1/owner/social/content/:contentId",
+    { onRequest: mutationAuthorization.onRequest },
+    async (request, reply) => {
+      const path = OwnerWebContentPathSchema.safeParse(request.params);
+      const body = OwnerWebDeleteContentRequestSchema.safeParse(request.body);
+      if (!path.success || !body.success || !hasNoQueryParameters(request)) {
+        return validationFailed(request, reply);
+      }
+      const authorization = mutationAuthorization.getAuthorization(request);
+      try {
+        const outcome = await options.researchWriteService.deleteContentAsOwnerWeb(
+          authorization.context,
+          selectionFor(body.data.actor_selection),
+          {
+            contentId: path.data.contentId,
+            expectedVersion: body.data.expected_version,
+            idempotencyKey: body.data.idempotency_key,
+            mode: body.data.mode,
+            ...(body.data.reason === undefined ? {} : { reason: body.data.reason }),
+          },
+        );
+        const response = serializeDeleteContent(
+          request,
+          outcome,
+          path.data.contentId,
+          body.data.expected_version,
+        );
+        if (!response) {
+          throw new Error("Owner Web delete-content projection is invalid.");
         }
         return sendOutcome(reply, outcome, response, "/v1/owner/pending-actions");
       } catch (error) {
