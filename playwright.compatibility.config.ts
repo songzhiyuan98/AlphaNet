@@ -60,6 +60,7 @@ export default defineConfig({
       command: "node tests/web-e2e/public-api-stub.mjs",
       env: {
         ...process.env,
+        E2E_WEB_PORT: String(webPort),
         HOSTNAME: "127.0.0.1",
         PORT: String(publicApiPort),
         SSR_INTERNAL_REQUEST_SECRET: ssrInternalRequestSecret,
