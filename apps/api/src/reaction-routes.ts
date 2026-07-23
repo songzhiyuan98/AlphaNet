@@ -55,12 +55,18 @@ function publicError(error: ReactionWriteOutcome["error"]): V1ErrorDetail | null
   };
 }
 
-function serializeOutcome(
+export interface ReactionOutcomeProjectionInput {
+  active: boolean;
+  contentId: string;
+  reaction: SetReactionPathParams["reaction"];
+}
+
+export function serializeReactionOutcome(
   request: FastifyRequest,
   outcome: ReactionWriteOutcome,
-  expected: AgentSetReactionInput,
+  expected: ReactionOutcomeProjectionInput,
 ): SetReactionWriteResult | null {
-  const expectedContentId = expected.content_id.normalize("NFC").toLowerCase();
+  const expectedContentId = expected.contentId.normalize("NFC").toLowerCase();
   if (
     outcome.result !== null &&
     (outcome.result.contentId !== expectedContentId ||
@@ -90,7 +96,7 @@ function serializeOutcome(
 
 export type AgentSetReactionInput = SetReactionPathParams & SetReactionRequest;
 
-function statusForError(code: ReactionWriteErrorCode | undefined): number {
+export function statusForReactionError(code: ReactionWriteErrorCode | undefined): number {
   switch (code) {
     case "AUTHORIZATION_CONTEXT_STALE":
       return 401;
@@ -157,6 +163,27 @@ function sendThrownError(
   );
 }
 
+export function sendReactionOutcome(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  outcome: ReactionWriteOutcome,
+  expected: ReactionOutcomeProjectionInput,
+): FastifyReply {
+  const response = serializeReactionOutcome(request, outcome, expected);
+  if (response === null) {
+    request.log.error(
+      { decision: outcome.decision, status: outcome.status },
+      "Reaction result violated its response contract",
+    );
+    return sendThrownError(request, reply, new Error("projection invalid"));
+  }
+  if (outcome.status === "succeeded") {
+    return reply.code(200).send(response);
+  }
+  applyRetryAfter(reply, outcome.error?.retryAfterMs ?? null);
+  return reply.code(statusForReactionError(outcome.error?.code)).send(response);
+}
+
 export async function handleAgentSetReaction(
   request: FastifyRequest,
   reply: FastifyReply,
@@ -176,19 +203,11 @@ export async function handleAgentSetReaction(
       },
       { channel, requestId: request.id },
     );
-    const response = serializeOutcome(request, outcome, input);
-    if (response === null) {
-      request.log.error(
-        { decision: outcome.decision, status: outcome.status },
-        "Reaction result violated its Agent response contract",
-      );
-      return sendThrownError(request, reply, new Error("projection invalid"));
-    }
-    if (outcome.status === "succeeded") {
-      return reply.code(200).send(response);
-    }
-    applyRetryAfter(reply, outcome.error?.retryAfterMs ?? null);
-    return reply.code(statusForError(outcome.error?.code)).send(response);
+    return sendReactionOutcome(request, reply, outcome, {
+      active: input.active,
+      contentId: input.content_id,
+      reaction: input.reaction,
+    });
   } catch (error) {
     return sendThrownError(request, reply, error);
   }

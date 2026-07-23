@@ -3219,6 +3219,162 @@ footer {
   max-width: 760px;
 }
 
+.contentReactionControl {
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 22px;
+  max-width: 760px;
+  padding-top: 16px;
+}
+
+.contentReactionControl--compact {
+  border-top: 0;
+  margin-top: 12px;
+  padding-top: 0;
+}
+
+.contentReactionTrigger {
+  min-width: 132px;
+}
+
+.contentReactionPanel {
+  background:
+    linear-gradient(135deg, rgba(183, 243, 67, 0.055), transparent 48%),
+    rgba(9, 12, 9, 0.92);
+  border: 1px solid rgba(183, 243, 67, 0.18);
+  border-radius: var(--radius-panel);
+  box-shadow: inset 0 1px 0 rgba(220, 255, 156, 0.035);
+  margin-top: 12px;
+  padding: 16px;
+}
+
+.contentReactionPanel .socialComposerIdentity,
+.contentReactionPanel .socialComposerStatus {
+  margin-top: 0;
+}
+
+.contentReactionActions {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 14px;
+}
+
+.contentReactionActions button {
+  align-items: center;
+  background: #080b08;
+  border: 1px solid #2b312a;
+  border-radius: var(--radius-control);
+  color: #a8b1a5;
+  cursor: pointer;
+  display: flex;
+  font: inherit;
+  font-size: 11px;
+  gap: 12px;
+  justify-content: space-between;
+  min-height: 42px;
+  padding: 0 12px;
+}
+
+.contentReactionActions button:hover:not(:disabled),
+.contentReactionActions button.isActive {
+  border-color: rgba(183, 243, 67, 0.42);
+  color: #dce8d2;
+}
+
+.contentReactionActions button.isActive {
+  background: rgba(183, 243, 67, 0.075);
+}
+
+.contentReactionActions button:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
+.contentReactionActions strong {
+  color: var(--accent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+}
+
+.contentReactionPanel .formMessage {
+  margin-top: 12px;
+}
+
+.contentReactionStatus {
+  color: #bcdc80;
+  font-size: 10px;
+  margin: 12px 0 0;
+}
+
+.followControl {
+  margin-top: 16px;
+  max-width: 520px;
+}
+
+.followControl--compact {
+  display: grid;
+  justify-items: start;
+}
+
+.followControlTrigger {
+  min-width: 88px;
+}
+
+.followControlPanel {
+  background:
+    linear-gradient(135deg, rgba(183, 243, 67, 0.05), transparent 52%),
+    rgba(9, 12, 9, 0.93);
+  border: 1px solid rgba(183, 243, 67, 0.17);
+  border-radius: var(--radius-panel);
+  display: grid;
+  gap: 12px;
+  margin-top: 10px;
+  min-width: min(430px, calc(100vw - 48px));
+  padding: 15px;
+  position: relative;
+  z-index: 2;
+}
+
+.followControlPanel .socialComposerIdentity,
+.followControlPanel .socialComposerStatus {
+  margin-top: 0;
+}
+
+.followControlLevel {
+  display: grid;
+  gap: 7px;
+}
+
+.followControlLevel > span {
+  color: #dce2d8;
+  font-size: 11px;
+  font-weight: 590;
+}
+
+.followControlLevel select {
+  background: #070a07;
+  border: 1px solid #30352f;
+  border-radius: var(--radius-control);
+  color: var(--foreground-primary);
+  font: inherit;
+  font-size: 12px;
+  min-height: 42px;
+  padding: 0 12px;
+  width: 100%;
+}
+
+.followControlPanel > .submitButton,
+.followControlPanel > .secondaryButton {
+  min-height: 42px;
+  width: 100%;
+}
+
+.followControlStatus {
+  color: #bcdc80;
+  font-size: 10px;
+  margin: 0;
+}
+
 .humanProfilePanel .ownerForm {
   margin-top: 22px;
 }
@@ -3288,6 +3444,10 @@ footer {
   .socialComposerActions .submitButton,
   .socialComposerTrigger {
     width: 100%;
+  }
+
+  .contentReactionActions {
+    grid-template-columns: 1fr;
   }
 }
 

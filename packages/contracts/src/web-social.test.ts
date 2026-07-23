@@ -6,6 +6,10 @@ import {
   OwnerAvailablePublicIdentitiesResponseSchema,
   OwnerWebCreatePostRequestSchema,
   OwnerWebReplyToContentRequestSchema,
+  OwnerWebSetReactionPathSchema,
+  OwnerWebSetReactionRequestSchema,
+  OwnerWebSetFollowPathSchema,
+  OwnerWebSetFollowRequestSchema,
   PublicHumanProfileResponseSchema,
   UpdateHumanProfileRequestSchema,
   WEB_SOCIAL_SCHEMA_VERSION,
@@ -337,6 +341,84 @@ describe("Web social write envelope", () => {
           agent_id: ids.agent,
           credential_id: ids.agentActor,
         },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("binds Owner Web reactions to a strict path and explicit Actor selection", () => {
+    const path = {
+      contentId: ids.otherAgent,
+      reaction: "helpful",
+    } as const;
+    const body = {
+      actor_selection: { actor_kind: "human", actor_id: ids.humanActor },
+      active: true,
+      idempotency_key: "owner-web-reaction-key",
+    } as const;
+
+    expect(OwnerWebSetReactionPathSchema.parse(path)).toEqual(path);
+    expect(OwnerWebSetReactionRequestSchema.parse(body)).toEqual(body);
+    expect(
+      OwnerWebSetReactionPathSchema.safeParse({
+        content_id: ids.otherAgent,
+        reaction: "helpful",
+      }).success,
+    ).toBe(false);
+    expect(
+      OwnerWebSetReactionRequestSchema.safeParse({
+        ...body,
+        reaction: "agree",
+      }).success,
+    ).toBe(false);
+    expect(
+      OwnerWebSetReactionRequestSchema.safeParse({
+        ...body,
+        actor_selection: {
+          actor_kind: "human",
+          actor_id: ids.humanActor,
+          owner_id: ids.agent,
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("validates canonical Owner Web Follow paths and explicit Actor authority", () => {
+    const body = {
+      actor_selection: { actor_kind: "agent", agent_id: ids.agent },
+      active: true,
+      idempotency_key: "owner-web-follow-key",
+      notification_level: "new_posts",
+    } as const;
+
+    expect(
+      OwnerWebSetFollowPathSchema.parse({
+        targetId: "MU",
+        targetType: "symbol",
+      }),
+    ).toEqual({ targetId: "MU", targetType: "symbol" });
+    expect(
+      OwnerWebSetFollowPathSchema.parse({
+        targetId: ids.otherAgent,
+        targetType: "content",
+      }),
+    ).toEqual({ targetId: ids.otherAgent, targetType: "content" });
+    expect(OwnerWebSetFollowRequestSchema.parse(body)).toEqual(body);
+    expect(
+      OwnerWebSetFollowPathSchema.safeParse({
+        targetId: "MU$",
+        targetType: "symbol",
+      }).success,
+    ).toBe(false);
+    expect(
+      OwnerWebSetFollowPathSchema.safeParse({
+        targetId: "Data Center",
+        targetType: "topic",
+      }).success,
+    ).toBe(false);
+    expect(
+      OwnerWebSetFollowRequestSchema.safeParse({
+        ...body,
+        target_id: ids.otherAgent,
       }).success,
     ).toBe(false);
   });

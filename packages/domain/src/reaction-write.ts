@@ -9,11 +9,18 @@ import type {
   AgentPolicyTier,
   AgentScope,
 } from "./agent-connection.js";
+import type { OwnerWebMutationContext } from "./owner-web-session-context.js";
 import {
   AGENT_POLICY_CONTROL_MIGRATION_CHECKSUM,
   CONTENT_REACTIONS_MIGRATION_CHECKSUM,
   FOLLOW_GRAPH_MIGRATION_CHECKSUM,
 } from "./schema-migrations.js";
+import {
+  evaluateOwnerDirectOperation,
+  type WebSocialAuthority,
+  type WebSocialAuthorityResolver,
+  type WebSocialAuthoritySelection,
+} from "./web-social-authority.js";
 
 const CONTENT_REACTIONS_MIGRATION_NAME = "content_reactions";
 const CONTENT_REACTIONS_MIGRATION_VERSION = "000009";
@@ -119,10 +126,19 @@ export interface ReactionWriteService {
   ): Promise<ReactionWriteOutcome>;
 }
 
+export interface OwnerWebReactionWriteService {
+  setReactionAsOwnerWeb(
+    context: OwnerWebMutationContext,
+    selection: WebSocialAuthoritySelection,
+    input: SetReactionInput,
+  ): Promise<ReactionWriteOutcome>;
+}
+
 export interface PostgresReactionWriteOptions {
   clock?: (() => Date) | undefined;
   idFactory?: (() => string) | undefined;
   idempotencyRetentionMs?: number | undefined;
+  webSocialAuthorityResolver?: WebSocialAuthorityResolver | undefined;
 }
 
 export class ReactionWriteError extends Error {
@@ -217,6 +233,21 @@ interface ReactionAggregateRow {
 interface ReactionRateRow {
   reaction_count: number;
   retry_at: Date | null;
+}
+
+interface ReactionWritePrincipal {
+  actorId: string;
+  actorKind: "agent" | "human";
+  activatedAt: Date;
+  agentId: string | null;
+  approvalMethod: "human_direct" | "owner_direct" | "policy_auto";
+  authenticationAssurance: "agent_credential" | "fresh_owner_session" | "owner_session";
+  authorizationSnapshot(decisionId: string): postgres.JSONValue;
+  credentialId: string | null;
+  evaluation: AgentOperationEvaluation;
+  ownerId: string;
+  policyVersion: string | null;
+  principalScopeKey: string;
 }
 
 interface PersistedReactionOutcome {
@@ -399,6 +430,161 @@ function policySnapshot(
     reason: evaluation.reason,
     required_scopes: [...evaluation.requiredScopes],
     scope_satisfied: evaluation.scopeSatisfied,
+  };
+}
+
+function agentReactionPrincipal(
+  context: AgentCredentialContext,
+  authorization: AuthorizationRow,
+  evaluation: AgentOperationEvaluation,
+): ReactionWritePrincipal {
+  return {
+    actorId: authorization.actor_id,
+    actorKind: "agent",
+    activatedAt: new Date(authorization.agent_activated_at.valueOf()),
+    agentId: context.agent.id,
+    approvalMethod: "policy_auto",
+    authenticationAssurance: "agent_credential",
+    authorizationSnapshot: (decisionId) =>
+      policySnapshot(authorization, evaluation, decisionId),
+    credentialId: context.credential.id,
+    evaluation,
+    ownerId: context.owner.id,
+    policyVersion: authorization.policy_version,
+    principalScopeKey: `credential:${context.credential.id}`,
+  };
+}
+
+function ownerWebReactionPrincipal(
+  authority: WebSocialAuthority,
+): ReactionWritePrincipal {
+  if (authority.kind === "human_direct") {
+    const evaluation = humanDirectReactionEvaluation();
+    return {
+      actorId: authority.actor.id,
+      actorKind: "human",
+      activatedAt: new Date(authority.actor.createdAt.valueOf()),
+      agentId: null,
+      approvalMethod: "human_direct",
+      authenticationAssurance: authority.requestContext.authenticationAssurance,
+      authorizationSnapshot: (decisionId) => ({
+        actor_id: authority.actor.id,
+        actor_kind: "human",
+        approval_method: "human_direct",
+        approved_by_owner_id: authority.owner.id,
+        authenticated_at: authority.requestContext.authenticatedAt.toISOString(),
+        authentication_assurance: authority.requestContext.authenticationAssurance,
+        authority_checked_at: authority.authorityCheckedAt.toISOString(),
+        csrf_validated: true,
+        decision: evaluation.decision,
+        decision_id: decisionId,
+        human_direct: true,
+        owner_id: authority.owner.id,
+        principal_scope_key: authority.principalScopeKey,
+      }),
+      credentialId: null,
+      evaluation,
+      ownerId: authority.owner.id,
+      policyVersion: null,
+      principalScopeKey: authority.principalScopeKey,
+    };
+  }
+
+  const direct = evaluateOwnerDirectOperation(authority, "set_reaction");
+  const policyRuleSource =
+    authority.currentPolicy.tier === "custom"
+      ? "custom_override"
+      : authority.currentPolicy.tier === "assisted"
+        ? "assisted_inheritance"
+        : "tier_default";
+  const evaluation: AgentOperationEvaluation = {
+    credentialCeilingDecision: "allow",
+    decision: direct.decision,
+    matchedScope: null,
+    ownerPolicyDecision: direct.ownerPolicyDecision,
+    policyRuleSource,
+    reason:
+      direct.reason === "POLICY_DENIED" || direct.reason === "POLICY_RULES_UNAVAILABLE"
+        ? direct.reason
+        : direct.ownerPolicyDecision === "require_approval"
+          ? "OWNER_APPROVAL_REQUIRED"
+          : "ALLOWED_BY_POLICY",
+    requiredScopes: [],
+    scopeSatisfied: true,
+  };
+  return {
+    actorId: authority.actor.id,
+    actorKind: "agent",
+    activatedAt: new Date(authority.agent.activatedAt.valueOf()),
+    agentId: authority.agent.id,
+    approvalMethod: "owner_direct",
+    authenticationAssurance: authority.requestContext.authenticationAssurance,
+    authorizationSnapshot: (decisionId) => ({
+      actor_id: authority.actor.id,
+      actor_kind: "agent",
+      agent_id: authority.agent.id,
+      approval_method: "owner_direct",
+      approved_by_owner_id: authority.owner.id,
+      authenticated_at: authority.requestContext.authenticatedAt.toISOString(),
+      authentication_assurance: authority.requestContext.authenticationAssurance,
+      authority_checked_at: authority.authorityCheckedAt.toISOString(),
+      csrf_validated: true,
+      decision: evaluation.decision,
+      decision_id: decisionId,
+      owner_id: authority.owner.id,
+      owner_policy_decision: evaluation.ownerPolicyDecision,
+      policy: {
+        defaults_version: authority.currentPolicy.defaultsVersion,
+        id: authority.currentPolicy.id,
+        rule_source: evaluation.policyRuleSource,
+        rules: authority.currentPolicy.rules,
+        schema_version: authority.currentPolicy.schemaVersion,
+        tier: authority.currentPolicy.tier,
+        version: authority.currentPolicy.version,
+      },
+      principal_scope_key: authority.principalScopeKey,
+    }),
+    credentialId: null,
+    evaluation,
+    ownerId: authority.owner.id,
+    policyVersion: authority.currentPolicy.version,
+    principalScopeKey: authority.principalScopeKey,
+  };
+}
+
+function humanDirectReactionEvaluation(): AgentOperationEvaluation {
+  return {
+    credentialCeilingDecision: "allow",
+    decision: "allow",
+    matchedScope: null,
+    ownerPolicyDecision: "allow",
+    policyRuleSource: "tier_default",
+    reason: "ALLOWED_BY_POLICY",
+    requiredScopes: [],
+    scopeSatisfied: true,
+  };
+}
+
+function normalizeReactionInput(input: SetReactionInput): SetReactionInput {
+  assertUuid(input.contentId, "content_id");
+  if (!REACTION_TYPES.includes(input.reaction)) {
+    throw new ReactionWriteError(
+      "VALIDATION_ERROR",
+      "The reaction must be helpful, agree, or disagree.",
+      { details: { field: "reaction" } },
+    );
+  }
+  if (typeof input.active !== "boolean") {
+    throw new ReactionWriteError(
+      "VALIDATION_ERROR",
+      "The active target state must be a boolean.",
+      { details: { field: "active" } },
+    );
+  }
+  validateIdempotencyKey(input.idempotencyKey);
+  return {
+    ...input,
+    contentId: input.contentId.toLocaleLowerCase("en-US"),
   };
 }
 
@@ -657,11 +843,14 @@ function parsePersistedOutcome(
   };
 }
 
-export class PostgresReactionWriteService implements ReactionWriteService {
+export class PostgresReactionWriteService
+  implements ReactionWriteService, OwnerWebReactionWriteService
+{
   readonly #clock: () => Date;
   readonly #idFactory: () => string;
   readonly #idempotencyRetentionMs: number;
   readonly #sql: PostgresClient;
+  readonly #webSocialAuthorityResolver: WebSocialAuthorityResolver | null;
 
   constructor(sql: PostgresClient, options: PostgresReactionWriteOptions = {}) {
     this.#sql = sql;
@@ -669,6 +858,7 @@ export class PostgresReactionWriteService implements ReactionWriteService {
     this.#idFactory = options.idFactory ?? randomUUID;
     this.#idempotencyRetentionMs =
       options.idempotencyRetentionMs ?? DEFAULT_IDEMPOTENCY_RETENTION_MS;
+    this.#webSocialAuthorityResolver = options.webSocialAuthorityResolver ?? null;
     if (
       !Number.isSafeInteger(this.#idempotencyRetentionMs) ||
       this.#idempotencyRetentionMs < IDEMPOTENCY_MIN_RETENTION_MS
@@ -773,29 +963,9 @@ export class PostgresReactionWriteService implements ReactionWriteService {
 
     let currentEvaluation = preliminary;
     try {
-      assertUuid(input.contentId, "content_id");
-      if (!REACTION_TYPES.includes(input.reaction)) {
-        throw new ReactionWriteError(
-          "VALIDATION_ERROR",
-          "The reaction must be helpful, agree, or disagree.",
-          { details: { field: "reaction" } },
-        );
-      }
-      if (typeof input.active !== "boolean") {
-        throw new ReactionWriteError(
-          "VALIDATION_ERROR",
-          "The active target state must be a boolean.",
-          { details: { field: "active" } },
-        );
-      }
-      validateIdempotencyKey(input.idempotencyKey);
-      const command: SetReactionInput = {
-        ...input,
-        contentId: input.contentId.toLocaleLowerCase("en-US"),
-      };
+      const command = normalizeReactionInput(input);
       const channel = validateRequestContext(request);
       const digest = digestInput(command);
-      const principalScopeKey = `credential:${context.credential.id}`;
 
       return await this.#sql.begin(async (transaction) => {
         await transaction`set local statement_timeout = '10s'`;
@@ -820,158 +990,200 @@ export class PostgresReactionWriteService implements ReactionWriteService {
             "The Agent credential lacks the reaction:write scope.",
           );
         }
-
-        await this.#lockIdempotency(
-          transaction,
-          principalScopeKey,
-          command.idempotencyKey,
-        );
-        const existing = await this.#findIdempotency(
-          transaction,
-          principalScopeKey,
-          command.idempotencyKey,
-        );
-        if (existing) {
-          if (!sameDigest(existing.request_digest, digest)) {
-            throw new ReactionWriteError(
-              "IDEMPOTENCY_CONFLICT",
-              "This idempotency key was already used with different normalized input.",
-            );
-          }
-          if (
-            existing.status === "admission_reserved" ||
-            existing.status === "in_progress"
-          ) {
-            throw new ReactionWriteError(
-              "IDEMPOTENCY_IN_PROGRESS",
-              "The original reaction write is still in progress.",
-              { retryable: true },
-            );
-          }
-          return parsePersistedOutcome(existing.response_body, {
-            contentId: command.contentId,
-            resourceId: existing.resource_id,
-            responseCode: existing.response_code,
-            status: existing.status,
-          });
-        }
-
-        const now = new Date(this.#clock().valueOf());
-        if (!Number.isFinite(now.valueOf())) {
-          throw new Error("The reaction write clock returned an invalid Date.");
-        }
-        const decisionId = this.#newId("decision_id");
-
-        if (currentEvaluation.decision === "deny") {
-          const idempotencyId = this.#newId("idempotency_record_id");
-          await this.#insertIdempotency(transaction, {
-            authorization,
-            context,
-            digest,
-            id: idempotencyId,
-            idempotencyKey: command.idempotencyKey,
-            principalScopeKey,
-          });
-          const denied = errorOutcome(
-            currentEvaluation,
-            new ReactionWriteError(
-              "POLICY_DENIED",
-              "The Agent policy does not permit reactions.",
-              { details: { reason: currentEvaluation.reason } },
-            ),
-          );
-          await this.#commitFailure(transaction, {
-            authorization,
-            channel,
-            context,
-            decisionId,
-            evaluation: currentEvaluation,
-            idempotencyId,
-            input: command,
-            now,
-            outcome: denied,
-            rateRuleApplied: false,
-            requestId: request.requestId,
-          });
-          return denied;
-        }
-
-        try {
-          await this.#enforceReactionRate(
-            transaction,
-            authorization,
-            context.agent.id,
-            now,
-          );
-        } catch (error) {
-          if (error instanceof ReactionWriteError && error.code === "RATE_LIMITED") {
-            const denied = rateLimitedOutcome(error);
-            await this.#commitTransientRateLimit(transaction, {
-              authorization,
-              channel,
-              context,
-              decisionId,
-              evaluation: currentEvaluation,
-              input: command,
-              now,
-              outcome: denied,
-              requestId: request.requestId,
-            });
-            return denied;
-          }
-          throw error;
-        }
-
-        const idempotencyId = this.#newId("idempotency_record_id");
-        await this.#insertIdempotency(transaction, {
-          authorization,
+        const principal = agentReactionPrincipal(
           context,
+          authorization,
+          currentEvaluation,
+        );
+        return this.#executeReaction(transaction, {
+          channel,
+          command,
           digest,
-          id: idempotencyId,
-          idempotencyKey: command.idempotencyKey,
-          principalScopeKey,
+          principal,
+          requestId: request.requestId,
         });
-
-        try {
-          return await transaction.savepoint(
-            "reaction_write_admission",
-            async (admissionTransaction) =>
-              this.#commitReaction(admissionTransaction, {
-                authorization,
-                channel,
-                context,
-                decisionId,
-                evaluation: currentEvaluation,
-                idempotencyId,
-                input: command,
-                now,
-                requestId: request.requestId,
-              }),
-          );
-        } catch (error) {
-          if (error instanceof ReactionWriteError) {
-            const failed = errorOutcome(currentEvaluation, error);
-            await this.#commitFailure(transaction, {
-              authorization,
-              channel,
-              context,
-              decisionId,
-              evaluation: currentEvaluation,
-              idempotencyId,
-              input: command,
-              now,
-              outcome: failed,
-              rateRuleApplied: true,
-              requestId: request.requestId,
-            });
-            return failed;
-          }
-          throw error;
-        }
       });
     } catch (error) {
       if (error instanceof ReactionWriteError) {
         return errorOutcome(currentEvaluation, error);
+      }
+      throw error;
+    }
+  }
+
+  async setReactionAsOwnerWeb(
+    context: OwnerWebMutationContext,
+    selection: WebSocialAuthoritySelection,
+    input: SetReactionInput,
+  ): Promise<ReactionWriteOutcome> {
+    const resolver = this.#webSocialAuthorityResolver;
+    if (!resolver) {
+      throw new Error("The Owner Web social authority resolver is unavailable.");
+    }
+    let currentEvaluation = humanDirectReactionEvaluation();
+    try {
+      const command = normalizeReactionInput(input);
+      const digest = digestInput(command);
+      return await this.#sql.begin(async (transaction) => {
+        await transaction`set local statement_timeout = '10s'`;
+        const authority = await resolver.resolveAuthorityInTransaction(
+          transaction,
+          context,
+          selection,
+        );
+        const principal = ownerWebReactionPrincipal(authority);
+        currentEvaluation = principal.evaluation;
+        return this.#executeReaction(transaction, {
+          channel: "web",
+          command,
+          digest,
+          principal,
+          requestId: context.requestId,
+        });
+      });
+    } catch (error) {
+      if (error instanceof ReactionWriteError) {
+        return errorOutcome(currentEvaluation, error);
+      }
+      throw error;
+    }
+  }
+
+  async #executeReaction(
+    transaction: TransactionSql,
+    input: {
+      channel: string;
+      command: SetReactionInput;
+      digest: Buffer;
+      principal: ReactionWritePrincipal;
+      requestId: string;
+    },
+  ): Promise<ReactionWriteOutcome> {
+    const { command, principal } = input;
+    await this.#lockIdempotency(
+      transaction,
+      principal.principalScopeKey,
+      command.idempotencyKey,
+    );
+    const existing = await this.#findIdempotency(
+      transaction,
+      principal.principalScopeKey,
+      command.idempotencyKey,
+    );
+    if (existing) {
+      if (!sameDigest(existing.request_digest, input.digest)) {
+        throw new ReactionWriteError(
+          "IDEMPOTENCY_CONFLICT",
+          "This idempotency key was already used with different normalized input.",
+        );
+      }
+      if (existing.status === "admission_reserved" || existing.status === "in_progress") {
+        throw new ReactionWriteError(
+          "IDEMPOTENCY_IN_PROGRESS",
+          "The original reaction write is still in progress.",
+          { retryable: true },
+        );
+      }
+      return parsePersistedOutcome(existing.response_body, {
+        contentId: command.contentId,
+        resourceId: existing.resource_id,
+        responseCode: existing.response_code,
+        status: existing.status,
+      });
+    }
+
+    const now = new Date(this.#clock().valueOf());
+    if (!Number.isFinite(now.valueOf())) {
+      throw new Error("The reaction write clock returned an invalid Date.");
+    }
+    const decisionId = this.#newId("decision_id");
+
+    if (principal.evaluation.decision === "deny") {
+      const idempotencyId = this.#newId("idempotency_record_id");
+      await this.#insertIdempotency(transaction, {
+        digest: input.digest,
+        id: idempotencyId,
+        idempotencyKey: command.idempotencyKey,
+        principal,
+      });
+      const denied = errorOutcome(
+        principal.evaluation,
+        new ReactionWriteError(
+          "POLICY_DENIED",
+          "The selected Agent policy does not permit reactions.",
+          { details: { reason: principal.evaluation.reason } },
+        ),
+      );
+      await this.#commitFailure(transaction, {
+        channel: input.channel,
+        decisionId,
+        idempotencyId,
+        input: command,
+        now,
+        outcome: denied,
+        principal,
+        rateRuleApplied: false,
+        requestId: input.requestId,
+      });
+      return denied;
+    }
+
+    try {
+      await this.#enforceReactionRate(transaction, principal, now);
+    } catch (error) {
+      if (error instanceof ReactionWriteError && error.code === "RATE_LIMITED") {
+        const denied = rateLimitedOutcome(error);
+        await this.#commitTransientRateLimit(transaction, {
+          channel: input.channel,
+          decisionId,
+          input: command,
+          now,
+          outcome: denied,
+          principal,
+          requestId: input.requestId,
+        });
+        return denied;
+      }
+      throw error;
+    }
+
+    const idempotencyId = this.#newId("idempotency_record_id");
+    await this.#insertIdempotency(transaction, {
+      digest: input.digest,
+      id: idempotencyId,
+      idempotencyKey: command.idempotencyKey,
+      principal,
+    });
+
+    try {
+      return await transaction.savepoint(
+        "reaction_write_admission",
+        async (admissionTransaction) =>
+          this.#commitReaction(admissionTransaction, {
+            channel: input.channel,
+            decisionId,
+            idempotencyId,
+            input: command,
+            now,
+            principal,
+            requestId: input.requestId,
+          }),
+      );
+    } catch (error) {
+      if (error instanceof ReactionWriteError) {
+        const failed = errorOutcome(principal.evaluation, error);
+        await this.#commitFailure(transaction, {
+          channel: input.channel,
+          decisionId,
+          idempotencyId,
+          input: command,
+          now,
+          outcome: failed,
+          principal,
+          rateRuleApplied: true,
+          requestId: input.requestId,
+        });
+        return failed;
       }
       throw error;
     }
@@ -1098,12 +1310,10 @@ export class PostgresReactionWriteService implements ReactionWriteService {
   async #insertIdempotency(
     transaction: TransactionSql,
     input: {
-      authorization: AuthorizationRow;
-      context: AgentCredentialContext;
       digest: Buffer;
       id: string;
       idempotencyKey: string;
-      principalScopeKey: string;
+      principal: ReactionWritePrincipal;
     },
   ): Promise<void> {
     await transaction`
@@ -1124,11 +1334,11 @@ export class PostgresReactionWriteService implements ReactionWriteService {
       )
       select
         ${input.id},
-        ${input.principalScopeKey},
-        ${input.context.owner.id},
-        ${input.context.agent.id},
-        ${input.authorization.actor_id},
-        ${input.context.credential.id},
+        ${input.principal.principalScopeKey},
+        ${input.principal.ownerId},
+        ${input.principal.agentId},
+        ${input.principal.actorId},
+        ${input.principal.credentialId},
         'set_reaction',
         ${input.idempotencyKey},
         ${input.digest},
@@ -1205,13 +1415,15 @@ export class PostgresReactionWriteService implements ReactionWriteService {
 
   async #enforceReactionRate(
     transaction: TransactionSql,
-    authorization: AuthorizationRow,
-    agentId: string,
+    principal: ReactionWritePrincipal,
     now: Date,
   ): Promise<void> {
     await transaction`
       select pg_catalog.pg_advisory_xact_lock(
-        pg_catalog.hashtextextended(${`alphanet:reaction-rate:${agentId}`}, 0)
+        pg_catalog.hashtextextended(
+          ${`alphanet:reaction-rate:${principal.actorId}`},
+          0
+        )
       )
     `;
     const windowStart = new Date(now.valueOf() - REACTION_RATE_WINDOW_MS);
@@ -1223,7 +1435,7 @@ export class PostgresReactionWriteService implements ReactionWriteService {
         count(*)::integer as reaction_count,
         min(action.occurred_at) + interval '1 hour' as retry_at
       from platform.action_logs as action
-      where action.agent_id = ${agentId}
+      where action.actor_id = ${principal.actorId}
         and action.action = 'reaction.set'
         and action.outcome = 'succeeded'
         and action.occurred_at >= ${windowStart}
@@ -1233,8 +1445,7 @@ export class PostgresReactionWriteService implements ReactionWriteService {
       throw new Error("Reaction quota projection returned invalid data.");
     }
     const isNewAgent =
-      now.valueOf() - new Date(authorization.agent_activated_at).valueOf() <
-      NEW_AGENT_WINDOW_MS;
+      now.valueOf() - principal.activatedAt.valueOf() < NEW_AGENT_WINDOW_MS;
     const limit = isNewAgent
       ? NEW_AGENT_REACTIONS_PER_HOUR
       : ESTABLISHED_AGENT_REACTIONS_PER_HOUR;
@@ -1243,11 +1454,14 @@ export class PostgresReactionWriteService implements ReactionWriteService {
       const retryAfterMs = Math.max(1, retryAt - now.valueOf());
       throw new ReactionWriteError(
         "RATE_LIMITED",
-        "The Agent reaction limit for this rolling hour has been reached.",
+        "The Actor reaction limit for this rolling hour has been reached.",
         {
           details: {
             limit,
-            limit_dimension: "agent_reaction_hour",
+            limit_dimension:
+              principal.actorKind === "agent"
+                ? "agent_reaction_hour"
+                : "human_reaction_hour",
             new_agent_window: isNewAgent,
             rule_version: REACTION_RATE_RULE_VERSION,
           },
@@ -1261,19 +1475,17 @@ export class PostgresReactionWriteService implements ReactionWriteService {
   async #commitReaction(
     transaction: TransactionSql,
     input: {
-      authorization: AuthorizationRow;
       channel: string;
-      context: AgentCredentialContext;
       decisionId: string;
-      evaluation: AgentOperationEvaluation;
       idempotencyId: string;
       input: SetReactionInput;
       now: Date;
+      principal: ReactionWritePrincipal;
       requestId: string;
     },
   ): Promise<ReactionWriteOutcome> {
     const target = await this.#loadTarget(transaction, input.input.contentId);
-    if (input.input.active && target.author_actor_id === input.authorization.actor_id) {
+    if (input.input.active && target.author_actor_id === input.principal.actorId) {
       throw new ReactionWriteError(
         "SELF_REACTION_NOT_ALLOWED",
         "Actors cannot react to their own content.",
@@ -1290,7 +1502,7 @@ export class PostgresReactionWriteService implements ReactionWriteService {
           created_at
         )
         values (
-          ${input.authorization.actor_id},
+          ${input.principal.actorId},
           ${input.input.contentId},
           ${input.input.reaction},
           ${input.now}
@@ -1302,7 +1514,7 @@ export class PostgresReactionWriteService implements ReactionWriteService {
     } else {
       const deleted = await transaction<{ actor_id: string }[]>`
         delete from platform.reactions
-        where actor_id = ${input.authorization.actor_id}
+        where actor_id = ${input.principal.actorId}
           and content_id = ${input.input.contentId}
           and reaction_type = ${input.input.reaction}
         returning actor_id::text as actor_id
@@ -1312,7 +1524,7 @@ export class PostgresReactionWriteService implements ReactionWriteService {
 
     const aggregate = await this.#reactionAggregate(
       transaction,
-      input.authorization.actor_id,
+      input.principal.actorId,
       input.input.contentId,
     );
     const outcome: ReactionWriteOutcome = {
@@ -1344,22 +1556,20 @@ export class PostgresReactionWriteService implements ReactionWriteService {
       occurredAt: input.now,
       payload: {
         active: input.input.active,
-        actor_id: input.authorization.actor_id,
+        actor_id: input.principal.actorId,
         changed,
         content_id: input.input.contentId,
         reaction: input.input.reaction,
       },
     });
     await this.#writeActionLog(transaction, {
-      authorization: input.authorization,
       channel: input.channel,
-      context: input.context,
       decisionId: input.decisionId,
       errorCode: null,
-      evaluation: input.evaluation,
       decision: "allow",
       outcome: "succeeded",
       outboxId,
+      principal: input.principal,
       state: {
         active: input.input.active,
         active_reactions: aggregate.active_reactions,
@@ -1436,15 +1646,13 @@ export class PostgresReactionWriteService implements ReactionWriteService {
   async #commitFailure(
     transaction: TransactionSql,
     input: {
-      authorization: AuthorizationRow;
       channel: string;
-      context: AgentCredentialContext;
       decisionId: string;
-      evaluation: AgentOperationEvaluation;
       idempotencyId: string;
       input: SetReactionInput;
       now: Date;
       outcome: ReactionWriteOutcome;
+      principal: ReactionWritePrincipal;
       rateRuleApplied: boolean;
       requestId: string;
     },
@@ -1454,15 +1662,13 @@ export class PostgresReactionWriteService implements ReactionWriteService {
       throw new Error("A failed reaction outcome requires an error.");
     }
     await this.#writeActionLog(transaction, {
-      authorization: input.authorization,
       channel: input.channel,
-      context: input.context,
       decisionId: input.decisionId,
       errorCode: error.code,
-      evaluation: input.evaluation,
       decision: input.outcome.decision,
       outcome: input.outcome.status === "denied" ? "denied" : "failed",
       outboxId: null,
+      principal: input.principal,
       state: {
         active: input.input.active,
         error_code: error.code,
@@ -1488,14 +1694,12 @@ export class PostgresReactionWriteService implements ReactionWriteService {
   async #commitTransientRateLimit(
     transaction: TransactionSql,
     input: {
-      authorization: AuthorizationRow;
       channel: string;
-      context: AgentCredentialContext;
       decisionId: string;
-      evaluation: AgentOperationEvaluation;
       input: SetReactionInput;
       now: Date;
       outcome: ReactionWriteOutcome;
+      principal: ReactionWritePrincipal;
       requestId: string;
     },
   ): Promise<void> {
@@ -1508,15 +1712,13 @@ export class PostgresReactionWriteService implements ReactionWriteService {
       throw new Error("A transient reaction denial requires RATE_LIMITED.");
     }
     await this.#writeActionLog(transaction, {
-      authorization: input.authorization,
       channel: input.channel,
-      context: input.context,
       decision: "deny",
       decisionId: input.decisionId,
       errorCode: error.code,
-      evaluation: input.evaluation,
       outcome: "denied",
       outboxId: null,
+      principal: input.principal,
       state: {
         active: input.input.active,
         error_code: error.code,
@@ -1533,16 +1735,14 @@ export class PostgresReactionWriteService implements ReactionWriteService {
   async #writeActionLog(
     transaction: TransactionSql,
     event: {
-      authorization: AuthorizationRow;
       channel: string;
-      context: AgentCredentialContext;
       decision: ReactionWriteDecision;
       decisionId: string;
       errorCode: ReactionWriteErrorCode | null;
-      evaluation: AgentOperationEvaluation;
       now: Date;
       outcome: "succeeded" | "denied" | "failed";
       outboxId: string | null;
+      principal: ReactionWritePrincipal;
       requestId: string;
       state: postgres.JSONValue;
       targetId: string;
@@ -1560,6 +1760,7 @@ export class PostgresReactionWriteService implements ReactionWriteService {
         credential_id,
         channel,
         approval_method,
+        approved_by_owner_id,
         authentication_assurance,
         authorization_snapshot,
         action,
@@ -1578,17 +1779,22 @@ export class PostgresReactionWriteService implements ReactionWriteService {
         ${this.#newId("audit_id")},
         'domain_write',
         ${event.now},
-        ${event.authorization.actor_id},
-        'agent',
-        ${event.context.owner.id},
-        ${event.context.agent.id},
-        ${event.context.credential.id},
+        ${event.principal.actorId},
+        ${event.principal.actorKind},
+        ${event.principal.ownerId},
+        ${event.principal.agentId},
+        ${event.principal.credentialId},
         ${event.channel},
-        ${event.evaluation.decision === "allow" ? "policy_auto" : null},
-        'agent_credential',
-        ${transaction.json(
-          policySnapshot(event.authorization, event.evaluation, event.decisionId),
-        )},
+        ${
+          event.principal.credentialId === null
+            ? event.principal.approvalMethod
+            : event.decision === "allow"
+              ? "policy_auto"
+              : null
+        },
+        ${event.principal.credentialId === null ? event.principal.ownerId : null},
+        ${event.principal.authenticationAssurance},
+        ${transaction.json(event.principal.authorizationSnapshot(event.decisionId))},
         'reaction.set',
         'content',
         ${event.targetId},
@@ -1596,10 +1802,12 @@ export class PostgresReactionWriteService implements ReactionWriteService {
         ${event.outcome},
         ${event.errorCode},
         ${event.outboxId},
-        ${event.authorization.policy_version},
+        ${event.principal.policyVersion},
         ${event.requestId},
         ${transaction.json(event.state)},
-        ${(event.errorCode ?? event.evaluation.reason).toLocaleLowerCase("en-US")}
+        ${(event.errorCode ?? event.principal.evaluation.reason).toLocaleLowerCase(
+          "en-US",
+        )}
       )
     `;
   }

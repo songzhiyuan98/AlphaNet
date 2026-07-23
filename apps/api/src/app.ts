@@ -25,7 +25,9 @@ import type {
   FollowService,
   NotificationService,
   OwnerSocialIdentityService,
+  OwnerWebFollowService,
   OwnerWebContextIssuer,
+  OwnerWebReactionWriteService,
   OwnerWebResearchWriteService,
   OwnerPendingActionService,
   PendingActionStatusService,
@@ -95,7 +97,9 @@ export interface ApiAppOptions {
   ownerPendingActionService?: OwnerPendingActionService;
   ownerSocialIdentityService?: OwnerSocialIdentityService;
   ownerWebContextIssuer?: OwnerWebContextIssuer;
+  ownerWebFollowService?: OwnerWebFollowService;
   ownerWebResearchWriteService?: OwnerWebResearchWriteService;
+  ownerWebReactionWriteService?: OwnerWebReactionWriteService;
   ownerWebSocialAuthorityResolver?: Pick<WebSocialAuthorityResolver, "checkReady">;
   pendingActionStatusService?: PendingActionStatusService;
   reactionWriteService?: ReactionWriteService;
@@ -975,7 +979,13 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
         authRuntime,
         contextIssuer: options.ownerWebContextIssuer,
         identityService: options.ownerSocialIdentityService,
+        ...(options.ownerWebFollowService
+          ? { followService: options.ownerWebFollowService }
+          : {}),
         ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
+        ...(options.ownerWebReactionWriteService
+          ? { reactionWriteService: options.ownerWebReactionWriteService }
+          : {}),
         researchWriteService: options.ownerWebResearchWriteService,
         resolveClientIp,
       });

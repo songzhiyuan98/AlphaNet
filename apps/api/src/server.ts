@@ -141,14 +141,6 @@ async function start(): Promise<void> {
     queryTimeoutMilliseconds: Math.min(environment.SEARCH_EMBEDDING_TIMEOUT_MS, 10_000),
   });
   const contentReportService = new PostgresContentReportService(postgres.sql);
-  const followService = new PostgresFollowService(postgres.sql, {
-    cursorSigningKey: createHmac(
-      "sha256",
-      Buffer.from(environment.COMMUNITY_CURSOR_SIGNING_KEY, "utf8"),
-    )
-      .update("alphanet.follow-list.cursor.v1", "utf8")
-      .digest(),
-  });
   const notificationService = new PostgresNotificationService(postgres.sql, {
     cursorSigningKey: createHmac(
       "sha256",
@@ -169,6 +161,15 @@ async function start(): Promise<void> {
     postgres.sql,
     ownerWebContextAuthority.verifier,
   );
+  const followService = new PostgresFollowService(postgres.sql, {
+    cursorSigningKey: createHmac(
+      "sha256",
+      Buffer.from(environment.COMMUNITY_CURSOR_SIGNING_KEY, "utf8"),
+    )
+      .update("alphanet.follow-list.cursor.v1", "utf8")
+      .digest(),
+    webSocialAuthorityResolver: ownerWebSocialAuthorityResolver,
+  });
   const pendingActionKeys: Record<number, Uint8Array> = Object.fromEntries([
     ...Object.entries(environment.PENDING_ACTION_PREVIOUS_ENCRYPTION_KEYS).map(
       ([version, key]) => [Number(version), Buffer.from(key, "hex")] as const,
@@ -185,7 +186,9 @@ async function start(): Promise<void> {
     },
     webSocialAuthorityResolver: ownerWebSocialAuthorityResolver,
   });
-  const reactionWriteService = new PostgresReactionWriteService(postgres.sql);
+  const reactionWriteService = new PostgresReactionWriteService(postgres.sql, {
+    webSocialAuthorityResolver: ownerWebSocialAuthorityResolver,
+  });
   const ownerPendingActionService = new PostgresOwnerPendingActionService(postgres.sql, {
     cursorSigningKey: createHmac(
       "sha256",
@@ -355,7 +358,9 @@ async function start(): Promise<void> {
       ownerPendingActionService,
       ownerSocialIdentityService,
       ownerWebContextIssuer: ownerWebContextAuthority.issuer,
+      ownerWebFollowService: followService,
       ownerWebResearchWriteService: researchWriteService,
+      ownerWebReactionWriteService: reactionWriteService,
       ownerWebSocialAuthorityResolver,
       pendingActionStatusService,
       reactionWriteService,

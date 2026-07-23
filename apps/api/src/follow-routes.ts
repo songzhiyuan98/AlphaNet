@@ -77,23 +77,30 @@ function publicError(error: FollowWriteOutcome["error"]): V1ErrorDetail | null {
   };
 }
 
-function serializeWriteOutcome(
+export interface FollowOutcomeProjectionInput {
+  active: boolean;
+  notificationLevel?: SetFollowRequest["notification_level"] | undefined;
+  targetId: string;
+  targetType: SetFollowPathParams["target_type"];
+}
+
+export function serializeFollowOutcome(
   request: FastifyRequest,
   outcome: FollowWriteOutcome,
-  expected: AgentSetFollowInput,
+  expected: FollowOutcomeProjectionInput,
 ): SetFollowWriteResult | null {
   const expectedTargetId =
-    expected.target_type === "symbol"
-      ? expected.target_id.toUpperCase()
-      : expected.target_id.toLowerCase();
+    expected.targetType === "symbol"
+      ? expected.targetId.toUpperCase()
+      : expected.targetId.toLowerCase();
   if (
     outcome.result !== null &&
-    (outcome.result.targetType !== expected.target_type ||
+    (outcome.result.targetType !== expected.targetType ||
       outcome.result.targetId !== expectedTargetId ||
       outcome.result.active !== expected.active ||
       (expected.active &&
-        expected.notification_level !== undefined &&
-        outcome.result.notificationLevel !== expected.notification_level))
+        expected.notificationLevel !== undefined &&
+        outcome.result.notificationLevel !== expected.notificationLevel))
   ) {
     return null;
   }
@@ -149,7 +156,7 @@ function serializeListPage(
   return parsed.success ? parsed.data : null;
 }
 
-function statusForError(code: FollowErrorCode | undefined): number {
+export function statusForFollowError(code: FollowErrorCode | undefined): number {
   switch (code) {
     case "AUTHORIZATION_CONTEXT_STALE":
       return 401;
@@ -224,6 +231,27 @@ function sendFollowError(
   );
 }
 
+export function sendFollowOutcome(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  outcome: FollowWriteOutcome,
+  expected: FollowOutcomeProjectionInput,
+): FastifyReply {
+  const response = serializeFollowOutcome(request, outcome, expected);
+  if (response === null) {
+    request.log.error(
+      { decision: outcome.decision, status: outcome.status },
+      "Follow write violated its response contract",
+    );
+    return sendFollowError(request, reply, new Error("projection invalid"));
+  }
+  if (outcome.status === "succeeded") {
+    return reply.code(200).send(response);
+  }
+  applyRetryAfter(reply, outcome.error?.retryAfterMs ?? null);
+  return reply.code(statusForFollowError(outcome.error?.code)).send(response);
+}
+
 export async function handleAgentListFollows(
   request: FastifyRequest,
   reply: FastifyReply,
@@ -273,19 +301,14 @@ export async function handleAgentSetFollow(
       },
       { channel, requestId: request.id },
     );
-    const response = serializeWriteOutcome(request, outcome, input);
-    if (response === null) {
-      request.log.error(
-        { decision: outcome.decision, status: outcome.status },
-        "Follow write violated its Agent response contract",
-      );
-      return sendFollowError(request, reply, new Error("projection invalid"));
-    }
-    if (outcome.status === "succeeded") {
-      return reply.code(200).send(response);
-    }
-    applyRetryAfter(reply, outcome.error?.retryAfterMs ?? null);
-    return reply.code(statusForError(outcome.error?.code)).send(response);
+    return sendFollowOutcome(request, reply, outcome, {
+      active: input.active,
+      ...(input.notification_level === undefined
+        ? {}
+        : { notificationLevel: input.notification_level }),
+      targetId: input.target_id,
+      targetType: input.target_type,
+    });
   } catch (error) {
     return sendFollowError(request, reply, error);
   }

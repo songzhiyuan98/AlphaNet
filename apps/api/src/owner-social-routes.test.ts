@@ -4,6 +4,8 @@ import {
   HumanProfileMutationResponseSchema,
   OwnerAvailablePublicIdentitiesResponseSchema,
   ReplyToContentWriteResultSchema,
+  SetFollowWriteResultSchema,
+  SetReactionWriteResultSchema,
   V1ErrorResponseSchema,
 } from "@alphanet/contracts";
 import {
@@ -12,7 +14,9 @@ import {
   type OwnerAgentPublicIdentityView,
   type OwnerHumanPublicIdentityView,
   type OwnerSocialIdentityService,
+  type OwnerWebFollowService,
   type OwnerWebResearchWriteService,
+  type OwnerWebReactionWriteService,
 } from "@alphanet/domain";
 import Fastify from "fastify";
 import { describe, expect, it, vi } from "vitest";
@@ -144,6 +148,40 @@ function createApp(options: { session?: OwnerSession | null } = {}) {
       status: "succeeded",
     }),
   );
+  const setReactionAsOwnerWeb = vi.fn<
+    OwnerWebReactionWriteService["setReactionAsOwnerWeb"]
+  >(() =>
+    Promise.resolve({
+      decision: "allow",
+      error: null,
+      operation: "set_reaction",
+      pendingAction: null,
+      replayed: false,
+      result: {
+        contentId: ids.content,
+        reactionCounts: { agree: 0, disagree: 0, helpful: 1 },
+        viewerState: { following: false, reactions: ["helpful"] },
+      },
+      status: "succeeded",
+    }),
+  );
+  const setFollowAsOwnerWeb = vi.fn<OwnerWebFollowService["setFollowAsOwnerWeb"]>(() =>
+    Promise.resolve({
+      decision: "allow",
+      error: null,
+      operation: "set_follow",
+      pendingAction: null,
+      replayed: false,
+      result: {
+        active: true,
+        notificationLevel: "new_posts",
+        targetId: ids.content,
+        targetType: "content",
+        updatedAt: new Date("2026-07-22T18:05:00.000Z"),
+      },
+      status: "succeeded",
+    }),
+  );
   const contextAuthority = createOwnerWebContextAuthority();
   const app = Fastify({ logger: false });
   registerOwnerSocialRoutes(app, {
@@ -155,10 +193,12 @@ function createApp(options: { session?: OwnerSession | null } = {}) {
       listOwnerPublicIdentities,
       updateHumanProfile,
     },
+    followService: { setFollowAsOwnerWeb },
     researchWriteService: {
       createPostAsOwnerWeb,
       replyToContentAsOwnerWeb,
     },
+    reactionWriteService: { setReactionAsOwnerWeb },
   });
   return {
     app,
@@ -167,6 +207,8 @@ function createApp(options: { session?: OwnerSession | null } = {}) {
     getOwnerSession,
     listOwnerPublicIdentities,
     replyToContentAsOwnerWeb,
+    setReactionAsOwnerWeb,
+    setFollowAsOwnerWeb,
     updateHumanProfile,
   };
 }
@@ -284,6 +326,118 @@ describe("Owner Web social routes", () => {
     expect(replyToContentAsOwnerWeb.mock.calls[0]?.[2]).toMatchObject({
       parentContentId: ids.content,
     });
+  });
+
+  it("sets a reaction as the explicitly selected Human Actor", async () => {
+    const { app, setReactionAsOwnerWeb } = createApp();
+    const response = await app.inject({
+      body: {
+        actor_selection: { actor_kind: "human", actor_id: ids.humanActor },
+        active: true,
+        idempotency_key: "owner-web-reaction-01",
+      },
+      headers: ownerMutationHeaders,
+      method: "PUT",
+      url: `/v1/owner/social/content/${ids.content}/reactions/helpful`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(SetReactionWriteResultSchema.parse(response.json())).toMatchObject({
+      decision: "allow",
+      result: {
+        content_id: ids.content,
+        reaction_counts: { helpful: 1 },
+        viewer_state: { reactions: ["helpful"] },
+      },
+      status: "succeeded",
+    });
+    expect(setReactionAsOwnerWeb.mock.calls[0]?.[1]).toEqual({
+      actorId: ids.humanActor,
+      kind: "human_direct",
+    });
+    expect(setReactionAsOwnerWeb.mock.calls[0]?.[2]).toEqual({
+      active: true,
+      contentId: ids.content,
+      idempotencyKey: "owner-web-reaction-01",
+      reaction: "helpful",
+    });
+  });
+
+  it("rejects forged Owner Web reaction fields before the domain service", async () => {
+    const { app, setReactionAsOwnerWeb } = createApp();
+    const response = await app.inject({
+      body: {
+        actor_selection: { actor_kind: "agent", agent_id: ids.agent },
+        active: true,
+        content_id: ids.reply,
+        idempotency_key: "owner-web-reaction-02",
+      },
+      headers: ownerMutationHeaders,
+      method: "PUT",
+      url: `/v1/owner/social/content/${ids.content}/reactions/helpful`,
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
+      "INVALID_ARGUMENT",
+    );
+    expect(setReactionAsOwnerWeb).not.toHaveBeenCalled();
+  });
+
+  it("follows a path-bound content target as the explicitly selected Agent", async () => {
+    const { app, setFollowAsOwnerWeb } = createApp();
+    const response = await app.inject({
+      body: {
+        actor_selection: { actor_kind: "agent", agent_id: ids.agent },
+        active: true,
+        idempotency_key: "owner-web-follow-01",
+        notification_level: "new_posts",
+      },
+      headers: ownerMutationHeaders,
+      method: "PUT",
+      url: `/v1/owner/social/follows/content/${ids.content}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(SetFollowWriteResultSchema.parse(response.json())).toMatchObject({
+      decision: "allow",
+      result: {
+        active: true,
+        notification_level: "new_posts",
+        target_id: ids.content,
+        target_type: "content",
+      },
+      status: "succeeded",
+    });
+    expect(setFollowAsOwnerWeb.mock.calls[0]?.[1]).toEqual({
+      agentId: ids.agent,
+      kind: "owner_direct",
+    });
+    expect(setFollowAsOwnerWeb.mock.calls[0]?.[2]).toEqual({
+      active: true,
+      idempotencyKey: "owner-web-follow-01",
+      notificationLevel: "new_posts",
+      targetId: ids.content,
+      targetType: "content",
+    });
+  });
+
+  it("rejects non-canonical Follow targets and body target overrides", async () => {
+    const { app, setFollowAsOwnerWeb } = createApp();
+    const response = await app.inject({
+      body: {
+        actor_selection: { actor_kind: "human", actor_id: ids.humanActor },
+        active: true,
+        idempotency_key: "owner-web-follow-02",
+        target_id: ids.reply,
+      },
+      headers: ownerMutationHeaders,
+      method: "PUT",
+      url: "/v1/owner/social/follows/symbol/mu",
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(setFollowAsOwnerWeb).not.toHaveBeenCalled();
   });
 
   it.each([

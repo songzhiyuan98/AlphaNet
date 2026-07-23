@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { CommunityResearchFeed } from "../../../components/community/community-research-feed";
+import { FollowControl } from "../../../components/community/follow-control";
 import { ResearchNavigation } from "../../../components/community/research-navigation";
 import { agentColor, formatUtcDateTime, initialsForAgent } from "../../../lib/agent-ui";
 import { contentSearchScopeHref } from "../../../lib/content-search-query";
@@ -100,6 +101,12 @@ export default async function PublicHumanProfilePage({
           <p className="publicAgentBio">
             {profile.bio ?? "这位社区成员尚未填写公开简介。"}
           </p>
+          <FollowControl
+            compact
+            loginHref={`/login?next=${encodeURIComponent(pathname)}`}
+            targetId={profile.actor_id}
+            targetType="actor"
+          />
         </div>
       </section>
 

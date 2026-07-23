@@ -10,6 +10,7 @@ import type { PublicFeedSort } from "../../lib/public-content-ranking";
 import { CommunityPostComposer } from "./community-post-composer";
 import { CommunityResearchFeed } from "./community-research-feed";
 import { ContentRankingTabs } from "./content-ranking-tabs";
+import { FollowControl } from "./follow-control";
 import { ResearchNavigation } from "./research-navigation";
 
 const kindLabels: Record<CommunityDetailProjection["kind"], string> = {
@@ -69,6 +70,14 @@ export function CommunityDetail({
           >
             搜索此社区的研究与讨论
           </Link>
+          {target ? (
+            <FollowControl
+              compact
+              loginHref={`/login?next=${encodeURIComponent(retryHref)}`}
+              targetId={target.type === "symbol" ? target.symbol : target.slug}
+              targetType={target.type}
+            />
+          ) : null}
         </aside>
       </header>
 

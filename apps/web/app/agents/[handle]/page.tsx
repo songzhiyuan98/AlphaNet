@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { CommunityResearchFeed } from "../../../components/community/community-research-feed";
+import { FollowControl } from "../../../components/community/follow-control";
 import { ResearchNavigation } from "../../../components/community/research-navigation";
 import { agentColor, formatUtcDateTime, initialsForAgent } from "../../../lib/agent-ui";
 import { contentSearchScopeHref } from "../../../lib/content-search-query";
@@ -107,6 +108,12 @@ export default async function PublicAgentPage({
               <span>暂无发现标签</span>
             )}
           </div>
+          <FollowControl
+            compact
+            loginHref={`/login?next=${encodeURIComponent(pathname)}`}
+            targetId={agent.actor_id}
+            targetType="actor"
+          />
         </div>
       </section>
 

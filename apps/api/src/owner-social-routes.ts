@@ -3,16 +3,24 @@ import {
   EnableHumanProfileRequestSchema,
   OwnerWebCreatePostRequestSchema,
   OwnerWebReplyToContentRequestSchema,
+  OwnerWebSetFollowPathSchema,
+  OwnerWebSetFollowRequestSchema,
+  OwnerWebSetReactionPathSchema,
+  OwnerWebSetReactionRequestSchema,
   ReplyToContentRequestSchema,
   UpdateHumanProfileRequestSchema,
   UuidSchema,
 } from "@alphanet/contracts";
 import {
   OwnerSocialIdentityError,
+  FollowError,
+  ReactionWriteError,
   ResearchWriteError,
   WebSocialAuthorityError,
   type OwnerSocialIdentityService,
   type OwnerWebContextIssuer,
+  type OwnerWebFollowService,
+  type OwnerWebReactionWriteService,
   type OwnerWebResearchWriteService,
   type WebSocialAuthoritySelection,
 } from "@alphanet/domain";
@@ -32,6 +40,8 @@ import {
   serializeCreatePost,
   serializeReply,
 } from "./research-write-routes.js";
+import { sendReactionOutcome } from "./reaction-routes.js";
+import { sendFollowOutcome } from "./follow-routes.js";
 
 export interface OwnerSocialRouteOptions {
   allowedOrigins: readonly string[];
@@ -41,7 +51,10 @@ export interface OwnerSocialRouteOptions {
     OwnerSocialIdentityService,
     "enableHumanProfile" | "listOwnerPublicIdentities" | "updateHumanProfile"
   >;
+  followService?: Pick<OwnerWebFollowService, "setFollowAsOwnerWeb"> | undefined;
   rateLimiter?: OwnerRequestRateLimiter | undefined;
+  reactionWriteService?:
+    Pick<OwnerWebReactionWriteService, "setReactionAsOwnerWeb"> | undefined;
   researchWriteService: Pick<
     OwnerWebResearchWriteService,
     "createPostAsOwnerWeb" | "replyToContentAsOwnerWeb"
@@ -78,10 +91,17 @@ function sendOwnerSocialError(
 ): FastifyReply {
   if (
     error instanceof OwnerSocialIdentityError ||
+    error instanceof FollowError ||
     error instanceof WebSocialAuthorityError ||
-    error instanceof ResearchWriteError
+    error instanceof ResearchWriteError ||
+    error instanceof ReactionWriteError
   ) {
-    const retryAfterMs = error instanceof ResearchWriteError ? error.retryAfterMs : null;
+    const retryAfterMs =
+      error instanceof FollowError ||
+      error instanceof ResearchWriteError ||
+      error instanceof ReactionWriteError
+        ? error.retryAfterMs
+        : null;
     if (retryAfterMs !== null) {
       void reply.header(
         "retry-after",
@@ -96,7 +116,11 @@ function sendOwnerSocialError(
         ...(retryAfterMs === null
           ? {}
           : { retryAt: new Date(Date.now() + retryAfterMs) }),
-        ...(error instanceof ResearchWriteError ? { details: error.details } : {}),
+        ...(error instanceof FollowError ||
+        error instanceof ResearchWriteError ||
+        error instanceof ReactionWriteError
+          ? { details: error.details }
+          : {}),
       }),
     );
   }
@@ -303,4 +327,78 @@ export function registerOwnerSocialRoutes(
       }
     },
   );
+
+  if (options.reactionWriteService) {
+    app.put(
+      "/v1/owner/social/content/:contentId/reactions/:reaction",
+      { onRequest: mutationAuthorization.onRequest },
+      async (request, reply) => {
+        const path = OwnerWebSetReactionPathSchema.safeParse(request.params);
+        const body = OwnerWebSetReactionRequestSchema.safeParse(request.body);
+        if (!path.success || !body.success || !hasNoQueryParameters(request)) {
+          return validationFailed(request, reply);
+        }
+        const authorization = mutationAuthorization.getAuthorization(request);
+        try {
+          const outcome = await options.reactionWriteService!.setReactionAsOwnerWeb(
+            authorization.context,
+            selectionFor(body.data.actor_selection),
+            {
+              active: body.data.active,
+              contentId: path.data.contentId,
+              idempotencyKey: body.data.idempotency_key,
+              reaction: path.data.reaction,
+            },
+          );
+          return sendReactionOutcome(request, reply, outcome, {
+            active: body.data.active,
+            contentId: path.data.contentId,
+            reaction: path.data.reaction,
+          });
+        } catch (error) {
+          return sendOwnerSocialError(request, reply, error);
+        }
+      },
+    );
+  }
+
+  if (options.followService) {
+    app.put(
+      "/v1/owner/social/follows/:targetType/:targetId",
+      { onRequest: mutationAuthorization.onRequest },
+      async (request, reply) => {
+        const path = OwnerWebSetFollowPathSchema.safeParse(request.params);
+        const body = OwnerWebSetFollowRequestSchema.safeParse(request.body);
+        if (!path.success || !body.success || !hasNoQueryParameters(request)) {
+          return validationFailed(request, reply);
+        }
+        const authorization = mutationAuthorization.getAuthorization(request);
+        try {
+          const outcome = await options.followService!.setFollowAsOwnerWeb(
+            authorization.context,
+            selectionFor(body.data.actor_selection),
+            {
+              active: body.data.active,
+              idempotencyKey: body.data.idempotency_key,
+              ...(body.data.notification_level === undefined
+                ? {}
+                : { notificationLevel: body.data.notification_level }),
+              targetId: path.data.targetId,
+              targetType: path.data.targetType,
+            },
+          );
+          return sendFollowOutcome(request, reply, outcome, {
+            active: body.data.active,
+            ...(body.data.notification_level === undefined
+              ? {}
+              : { notificationLevel: body.data.notification_level }),
+            targetId: path.data.targetId,
+            targetType: path.data.targetType,
+          });
+        } catch (error) {
+          return sendOwnerSocialError(request, reply, error);
+        }
+      },
+    );
+  }
 }

@@ -12,6 +12,9 @@ import {
   V1_SCHEMA_VERSION,
 } from "./agent.ts";
 import { CreatePostRequestSchema, ReplyToContentRequestSchema } from "./content-write.ts";
+import { FollowTargetTypeSchema, ReactionTypeSchema } from "./content.ts";
+import { OpaqueIdSchema, SymbolSchema, TopicSchema } from "./community.ts";
+import { SetFollowRequestSchema } from "./follow.ts";
 import { IdempotencyKeySchema } from "./write-primitives.ts";
 
 export const WEB_SOCIAL_SCHEMA_VERSION = V1_SCHEMA_VERSION;
@@ -254,3 +257,49 @@ export const OwnerWebReplyToContentRequestSchema = z
 export type OwnerWebReplyToContentRequest = z.infer<
   typeof OwnerWebReplyToContentRequestSchema
 >;
+
+export const OwnerWebSetReactionRequestSchema = z
+  .object({
+    actor_selection: WebActorSelectionSchema,
+    active: z.boolean(),
+    idempotency_key: IdempotencyKeySchema,
+  })
+  .strict();
+export type OwnerWebSetReactionRequest = z.infer<typeof OwnerWebSetReactionRequestSchema>;
+
+export const OwnerWebSetReactionPathSchema = z
+  .object({
+    contentId: UuidSchema,
+    reaction: ReactionTypeSchema,
+  })
+  .strict();
+export type OwnerWebSetReactionPath = z.infer<typeof OwnerWebSetReactionPathSchema>;
+
+export const OwnerWebSetFollowRequestSchema = SetFollowRequestSchema.extend({
+  actor_selection: WebActorSelectionSchema,
+}).strict();
+export type OwnerWebSetFollowRequest = z.infer<typeof OwnerWebSetFollowRequestSchema>;
+
+export const OwnerWebSetFollowPathSchema = z
+  .object({
+    targetId: OpaqueIdSchema,
+    targetType: FollowTargetTypeSchema,
+  })
+  .strict()
+  .superRefine((path, context) => {
+    const targetSchema =
+      path.targetType === "symbol"
+        ? SymbolSchema
+        : path.targetType === "topic"
+          ? TopicSchema
+          : UuidSchema;
+    const parsed = targetSchema.safeParse(path.targetId);
+    if (!parsed.success) {
+      context.addIssue({
+        code: "custom",
+        path: ["targetId"],
+        message: "The Follow target is not canonical for its target type.",
+      });
+    }
+  });
+export type OwnerWebSetFollowPath = z.infer<typeof OwnerWebSetFollowPathSchema>;
