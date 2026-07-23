@@ -838,7 +838,7 @@ function authorizationCodeDigest(
     .update(PROVIDER_AUTHORIZATION_CODE_DIGEST_DOMAIN, "utf8")
     .update(input.authorizationCode, "utf8")
     .digest("base64url");
-  // Better Auth 1.6.23 applies the runtime's verification.storeIdentifier
+  // Better Auth 1.7 applies the runtime's verification.storeIdentifier
   // transform after the OAuth Provider storeTokens hook. AlphaNet configures
   // that transform as SHA-256, so the transaction lock must locate exactly the
   // doubly protected identifier persisted by the real Provider runtime.

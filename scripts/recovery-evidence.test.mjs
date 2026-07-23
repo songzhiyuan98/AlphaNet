@@ -8,7 +8,7 @@ import {
 
 const verificationOutput = `
 AlphaNet recovery verification passed.
-migration_version=000026
+migration_version=000027
 relation_count=44
 row_count=1234
 manifest_sha256=${"a".repeat(64)}
@@ -19,7 +19,7 @@ test("parses only aggregate recovery verifier output", () => {
   assert.deepEqual(parseRecoveryVerification(verificationOutput), {
     elapsedSeconds: 92,
     manifestSha256: "a".repeat(64),
-    migrationVersion: "000026",
+    migrationVersion: "000027",
     relationCount: 44,
     rowCount: 1234,
   });

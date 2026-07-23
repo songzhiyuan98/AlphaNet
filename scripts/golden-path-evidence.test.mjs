@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { buildGoldenPathEvidence } from "./run-golden-path-evidence.mjs";
+import {
+  buildGoldenPathEvidence,
+  requireRemoteDependencyUrls,
+} from "./run-golden-path-evidence.mjs";
 
 test("records the two-owner bidirectional Web, REST and Remote MCP loop", () => {
   const evidence = buildGoldenPathEvidence({
@@ -30,4 +33,38 @@ test("rejects local harness results as release evidence", () => {
       }),
     /requires a non-local environment/u,
   );
+});
+
+test("requires encrypted non-local release dependencies", () => {
+  assert.deepEqual(
+    requireRemoteDependencyUrls({
+      databaseUrl:
+        "postgresql://candidate:secret@alphanet.cluster.us-west-2.rds.amazonaws.com/alphanet?sslmode=require",
+      redisUrl: "rediss://candidate.cache.amazonaws.com:6379",
+    }),
+    {
+      databaseHostname: "alphanet.cluster.us-west-2.rds.amazonaws.com",
+      redisHostname: "candidate.cache.amazonaws.com",
+    },
+  );
+
+  for (const [databaseUrl, redisUrl] of [
+    [
+      "postgresql://candidate:secret@localhost/alphanet",
+      "rediss://candidate.cache.amazonaws.com:6379",
+    ],
+    [
+      "postgresql://candidate:secret@alphanet.cluster.us-west-2.rds.amazonaws.com/alphanet",
+      "redis://candidate.cache.amazonaws.com:6379",
+    ],
+    [
+      "postgresql://candidate:secret@alphanet.cluster.us-west-2.rds.amazonaws.com/alphanet",
+      "rediss://127.0.0.1:6379",
+    ],
+  ]) {
+    assert.throws(
+      () => requireRemoteDependencyUrls({ databaseUrl, redisUrl }),
+      /non-local|rediss/u,
+    );
+  }
 });

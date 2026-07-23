@@ -413,8 +413,8 @@ describeRemoteMcpOAuthStore("Remote MCP OAuth PostgreSQL security store", () => 
     await pool.query(
       `insert into auth.oauth_refresh_tokens (
          id, token, client_id, user_id, reference_id, expires_at,
-         created_at, auth_time, scopes
-       ) values ($1, $2, $3, $4, $5, $6, $7, $7, $8::jsonb)`,
+         created_at, auth_time, resources, scopes
+       ) values ($1, $2, $3, $4, $5, $6, $7, $7, $8::jsonb, $9::jsonb)`,
       [
         randomUUID(),
         storedRefreshDigest,
@@ -423,6 +423,7 @@ describeRemoteMcpOAuthStore("Remote MCP OAuth PostgreSQL security store", () => 
         grantId,
         new Date(refreshCreatedAt.valueOf() + 24 * 60 * 60 * 1_000),
         refreshCreatedAt,
+        JSON.stringify([resource]),
         JSON.stringify(providerScopes),
       ],
     );

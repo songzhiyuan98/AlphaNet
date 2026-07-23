@@ -476,6 +476,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
         client_id,
         user_id,
         reference_id,
+        resources,
         scopes,
         created_at,
         updated_at
@@ -485,6 +486,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
         ${authorityClientId},
         ${primary.authUserId},
         ${grant.grantId},
+        ${postgres.sql.json([resource])},
         ${postgres.sql.json([...providerScopes])},
         ${consentedAt},
         ${consentedAt}
@@ -639,6 +641,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
           "expires_at",
           "created_at",
           "scopes",
+          "resources",
         ],
         table_name: "oauth_access_tokens",
       },
@@ -674,6 +677,8 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
           "require_pkce",
           "reference_id",
           "metadata",
+          "jwks",
+          "jwksUri",
         ],
         table_name: "oauth_clients",
       },
@@ -686,6 +691,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
           "scopes",
           "created_at",
           "updated_at",
+          "resources",
         ],
         table_name: "oauth_consents",
       },
@@ -706,6 +712,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
           "revoked",
           "auth_time",
           "scopes",
+          "resources",
         ],
         table_name: "oauth_refresh_tokens",
       },
@@ -1438,6 +1445,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
         client_id,
         user_id,
         reference_id,
+        resources,
         scopes,
         created_at,
         updated_at
@@ -1447,6 +1455,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
         ${lifecycleClientId},
         ${secondary.authUserId},
         ${originalGrant.grantId},
+        ${postgres.sql.json([resource])},
         ${postgres.sql.json([...providerScopes])},
         ${consentedAt},
         ${consentedAt}
@@ -1611,6 +1620,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
         client_id,
         user_id,
         reference_id,
+        resources,
         scopes,
         created_at,
         updated_at
@@ -1620,6 +1630,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
         ${absoluteClientId},
         ${secondary.authUserId},
         ${grantId},
+        ${postgres.sql.json([resource])},
         ${postgres.sql.json([...providerScopes])},
         ${consentedAt},
         ${consentedAt}
@@ -1652,6 +1663,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
         expires_at,
         created_at,
         auth_time,
+        resources,
         scopes
       )
       values (
@@ -1664,6 +1676,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
         ${new Date(initialCreatedAt.getTime() + 30 * 24 * 60 * 60 * 1_000)},
         ${initialCreatedAt},
         ${authTime},
+        ${postgres.sql.json([resource])},
         ${postgres.sql.json([...providerScopes])}
       )
     `;
@@ -1695,6 +1708,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
             expires_at,
             created_at,
             auth_time,
+            resources,
             scopes
           )
           values (
@@ -1707,6 +1721,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
             ${new Date(rotatedAt.getTime() + 30 * 24 * 60 * 60 * 1_000)},
             ${rotatedAt},
             ${authTime},
+            ${transaction.json([resource])},
             ${transaction.json([...providerScopes])}
           )
         `;
@@ -1762,6 +1777,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
             expires_at,
             created_at,
             auth_time,
+            resources,
             scopes
           )
           values (
@@ -1774,6 +1790,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
             clock_timestamp() + interval '30 days',
             clock_timestamp(),
             ${authTime},
+            ${transaction.json([resource])},
             ${transaction.json([...providerScopes])}
           )
         `;
@@ -1900,6 +1917,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
         client_id,
         user_id,
         reference_id,
+        resources,
         scopes,
         created_at,
         updated_at
@@ -1909,6 +1927,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
         ${clientId},
         ${primary.authUserId},
         ${grantId},
+        ${postgres.sql.json([resource])},
         ${postgres.sql.json([...providerScopes])},
         ${consentedAt},
         ${consentedAt}
@@ -2020,6 +2039,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
         expires_at,
         created_at,
         auth_time,
+        resources,
         scopes
       )
       values (
@@ -2032,6 +2052,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
         ${new Date(grantExpiresAt.getTime() + 1_000)},
         ${firstRefreshCreatedAt},
         ${providerSessionAuthTime},
+        ${postgres.sql.json([resource])},
         ${postgres.sql.json([...providerScopes])}
       )
     `;
@@ -2057,6 +2078,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
           expires_at,
           created_at,
           auth_time,
+          resources,
           scopes
         )
         values (
@@ -2068,6 +2090,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
           ${grantExpiresAt},
           ${firstRefreshCreatedAt},
           ${providerSessionAuthTime},
+          ${postgres.sql.json([resource])},
           ${postgres.sql.json([...providerScopes])}
         )
       `,
@@ -2084,6 +2107,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
           expires_at,
           created_at,
           auth_time,
+          resources,
           scopes
         )
         values (
@@ -2095,6 +2119,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
           ${grantExpiresAt},
           ${firstRefreshCreatedAt},
           ${providerSessionAuthTime},
+          ${postgres.sql.json([resource])},
           ${postgres.sql.json([...domainScopes])}
         )
       `,
@@ -2111,6 +2136,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
         expires_at,
         created_at,
         auth_time,
+        resources,
         scopes
       )
       values (
@@ -2123,6 +2149,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
         ${grantExpiresAt},
         ${firstRefreshCreatedAt},
         ${providerSessionAuthTime},
+        ${postgres.sql.json([resource])},
         ${postgres.sql.json([...providerScopes])}
       )
     `;
@@ -2149,6 +2176,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
         expires_at,
         created_at,
         auth_time,
+        resources,
         scopes
       )
       values (
@@ -2161,6 +2189,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
         ${grantExpiresAt},
         ${secondRefreshCreatedAt},
         ${providerSessionAuthTime},
+        ${postgres.sql.json([resource])},
         ${postgres.sql.json([...providerScopes])}
       )
     `;
@@ -2193,6 +2222,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
         refresh_id,
         expires_at,
         created_at,
+        resources,
         scopes
       )
       values (
@@ -2205,6 +2235,7 @@ describeRemoteMcpOAuth("Remote MCP OAuth schema", () => {
         ${secondRefreshId},
         ${new Date(opaqueAccessCreatedAt.getTime() + 9 * 60 * 1_000)},
         ${opaqueAccessCreatedAt},
+        ${postgres.sql.json([resource])},
         ${postgres.sql.json([...providerScopes])}
       )
     `;

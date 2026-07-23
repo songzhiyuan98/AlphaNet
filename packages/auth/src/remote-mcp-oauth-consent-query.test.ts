@@ -30,12 +30,6 @@ function signedConsentQuery(
     ba_iat: "1784721600123",
   });
   mutate?.(parameters);
-
-  const signedNames = [...new Set([...parameters.keys(), "ba_param"])]
-    .filter((name) => name !== "sig")
-    .sort();
-  parameters.delete("ba_param");
-  for (const name of signedNames) parameters.append("ba_param", name);
   parameters.set("sig", `${"A".repeat(43)}=`);
   return parameters;
 }
@@ -59,7 +53,7 @@ function expectStructuralError(
 }
 
 describe("parseRemoteMcpOAuthConsentQuery", () => {
-  it("extracts only AlphaNet's standard authorize fields from Better Auth 1.6.23 transport", () => {
+  it("extracts only AlphaNet's standard authorize fields from Better Auth 1.7 transport", () => {
     const query = signedConsentQuery((parameters) => {
       parameters.set("ba_pl", "30000000-0000-4000-8000-000000000003");
     });
@@ -76,28 +70,21 @@ describe("parseRemoteMcpOAuthConsentQuery", () => {
     });
   });
 
-  it("reconstructs only the configured singleton resource when Provider 1.6.23 omits it", () => {
+  it("requires the configured singleton resource in Provider 1.7 signed transport", () => {
     const query = signedConsentQuery();
     query.delete("resource");
-    const declared = query.getAll("ba_param");
-    query.delete("ba_param");
-    for (const name of declared.filter((name) => name !== "resource")) {
-      query.append("ba_param", name);
-    }
 
-    expect(parseRemoteMcpOAuthConsentQuery(query.toString(), { resource })).toEqual({
-      clientId: "alphanet-research-client",
-      codeChallenge,
-      codeChallengeMethod: "S256",
-      canonicalScope: "research:read offline_access",
-      redirectUri: "https://client.example/callback",
-      requestedScopes: ["research:read", "offline_access"],
-      resource,
-      responseType: "code",
-    });
+    expect(() =>
+      parseRemoteMcpOAuthConsentQuery(query.toString(), { resource }),
+    ).toThrowError(
+      expect.objectContaining<Partial<RemoteMcpOAuthGuardError>>({
+        code: "PARAMETER_MISSING",
+        parameter: "resource",
+      }),
+    );
   });
 
-  it.each(["sig", "exp", "ba_iat", "ba_param"] as const)(
+  it.each(["sig", "exp", "ba_iat"] as const)(
     "requires the %s signed-transport parameter",
     (name) => {
       const query = signedConsentQuery();
@@ -123,24 +110,6 @@ describe("parseRemoteMcpOAuthConsentQuery", () => {
     expectStructuralError(query.toString(), "PARAMETER_UNSUPPORTED", "nonce");
   });
 
-  it("requires ba_param to describe exactly every field covered by the signature", () => {
-    const missing = signedConsentQuery();
-    const declared = missing.getAll("ba_param");
-    missing.delete("ba_param");
-    for (const name of declared.filter((name) => name !== "resource")) {
-      missing.append("ba_param", name);
-    }
-    expectStructuralError(missing.toString(), "SIGNED_PARAMETER_INVALID", "ba_param");
-
-    const extra = signedConsentQuery();
-    extra.append("ba_param", "ba_pl");
-    expectStructuralError(extra.toString(), "SIGNED_PARAMETER_INVALID", "ba_param");
-
-    const duplicate = signedConsentQuery();
-    duplicate.append("ba_param", "resource");
-    expectStructuralError(duplicate.toString(), "SIGNED_PARAMETER_INVALID", "ba_param");
-  });
-
   it("validates Better Auth control-field encodings", () => {
     const badSignature = signedConsentQuery();
     badSignature.set("sig", "not-base64url-or-base64");
@@ -160,7 +129,7 @@ describe("parseRemoteMcpOAuthConsentQuery", () => {
 
     const excessive = signedConsentQuery();
     while ([...excessive].length <= REMOTE_MCP_OAUTH_CONSENT_QUERY_MAX_PARAMETERS) {
-      excessive.append("ba_param", `padding-${[...excessive].length}`);
+      excessive.append("padding", `${[...excessive].length}`);
     }
     expectStructuralError(excessive.toString(), "QUERY_TOO_MANY_PARAMETERS");
   });

@@ -318,23 +318,25 @@ describeIntegration("Remote MCP OAuth lifecycle maintenance", () => {
     const expiresAt = new Date(issuedAt.valueOf() + 9 * 60 * 1_000);
     await postgres.sql`
       insert into auth.oauth_consents (
-        id, client_id, user_id, reference_id, scopes, created_at, updated_at
+        id, client_id, user_id, reference_id, resources, scopes, created_at,
+        updated_at
       ) values (
         ${randomUUID()}, ${fixture.clientId}, ${owner.authUserId},
-        ${fixture.grantId}, ${postgres.sql.json([...fixture.protocolScopes])},
-        ${issuedAt}, ${issuedAt}
+        ${fixture.grantId}, ${postgres.sql.json([resource])},
+        ${postgres.sql.json([...fixture.protocolScopes])}, ${issuedAt}, ${issuedAt}
       )
     `;
     if (fixture.offlineAccess) {
       await postgres.sql`
         insert into auth.oauth_refresh_tokens (
           id, token, client_id, user_id, reference_id, expires_at, created_at,
-          auth_time, scopes
+          auth_time, resources, scopes
         ) values (
           ${randomUUID()}, ${protocolDigest()}, ${fixture.clientId},
           ${owner.authUserId}, ${fixture.grantId},
           ${new Date(issuedAt.valueOf() + 24 * 60 * 60 * 1_000)}, ${issuedAt},
-          ${issuedAt}, ${postgres.sql.json([...fixture.protocolScopes])}
+          ${issuedAt}, ${postgres.sql.json([resource])},
+          ${postgres.sql.json([...fixture.protocolScopes])}
         )
       `;
     }
@@ -342,10 +344,11 @@ describeIntegration("Remote MCP OAuth lifecycle maintenance", () => {
       await postgres.sql`
         insert into auth.oauth_access_tokens (
           id, token, client_id, user_id, reference_id, expires_at, created_at,
-          scopes
+          resources, scopes
         ) values (
           ${randomUUID()}, ${protocolDigest()}, ${fixture.clientId},
           ${owner.authUserId}, ${fixture.grantId}, ${expiresAt}, ${issuedAt},
+          ${postgres.sql.json([resource])},
           ${postgres.sql.json([...fixture.protocolScopes])}
         )
       `;

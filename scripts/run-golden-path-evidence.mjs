@@ -16,6 +16,39 @@ function requiredSecretEnvironment(value, name) {
   }
 }
 
+function serviceUrl(value, name, protocols) {
+  requiredSecretEnvironment(value, name);
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${name} must be an absolute service URL.`);
+  }
+  if (!protocols.includes(url.protocol)) {
+    throw new Error(`${name} must use ${protocols.join(" or ")}.`);
+  }
+  const hostname = url.hostname.toLowerCase();
+  if (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname.endsWith(".localhost") ||
+    hostname.endsWith(".local")
+  ) {
+    throw new Error(`${name} must use a non-local release dependency.`);
+  }
+  return url;
+}
+
+export function requireRemoteDependencyUrls({ databaseUrl, redisUrl }) {
+  const database = serviceUrl(databaseUrl, "DATABASE_URL", ["postgres:", "postgresql:"]);
+  const redis = serviceUrl(redisUrl, "REDIS_URL", ["rediss:"]);
+  return {
+    databaseHostname: database.hostname,
+    redisHostname: redis.hostname,
+  };
+}
+
 export function buildGoldenPathEvidence({
   durationMilliseconds,
   observedAt,
@@ -95,8 +128,10 @@ async function runGoldenPathTest(environment) {
 }
 
 export async function runGoldenPathEvidence(config) {
-  requiredSecretEnvironment(process.env.DATABASE_URL, "DATABASE_URL");
-  requiredSecretEnvironment(process.env.REDIS_URL, "REDIS_URL");
+  requireRemoteDependencyUrls({
+    databaseUrl: process.env.DATABASE_URL,
+    redisUrl: process.env.REDIS_URL,
+  });
   const durationMilliseconds = await runGoldenPathTest(process.env);
   return buildGoldenPathEvidence({
     durationMilliseconds,

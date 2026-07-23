@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import pg from "pg";
 
 const workspace = process.cwd();
-const expectedPath = resolve(workspace, "schema/better-auth-1.6.23.sql");
+const expectedPath = resolve(workspace, "schema/better-auth-1.7.0-beta.4.sql");
 const temporaryDirectory = await mkdtemp(join(tmpdir(), "alphanet-auth-schema-"));
 const actualPath = join(temporaryDirectory, "generated.sql");
 const generationSchema = `auth_schema_check_${randomBytes(8).toString("hex")}`;
@@ -59,11 +59,11 @@ try {
     // pinned CLI currently emits none. Only that EOF representation is ignored.
     if (expected.trimEnd() !== actual.trimEnd()) {
       process.stderr.write(
-        "Better Auth schema drift detected. Regenerate with auth@1.6.23, review the SQL, and add a forward AlphaNet migration.\n",
+        "Better Auth schema drift detected. Regenerate with auth@1.7.0-beta.4, review the SQL, and add a forward AlphaNet migration.\n",
       );
       process.exitCode = 1;
     } else {
-      process.stdout.write("Better Auth 1.6.23 schema snapshot is current.\n");
+      process.stdout.write("Better Auth 1.7.0-beta.4 schema snapshot is current.\n");
     }
   }
 } finally {

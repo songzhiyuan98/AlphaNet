@@ -37,6 +37,10 @@ directions of the research-social loop:
 Only aggregate pass/fail evidence and duration are retained; credentials,
 Content IDs and research bodies are excluded.
 
+Release evidence rejects loopback and `.local` dependency hosts and requires
+encrypted `rediss://` transport to Valkey. Local PostgreSQL/Redis integration
+tests remain useful for CI, but cannot be labeled as candidate evidence.
+
 ## Search degradation
 
 Prepare a candidate API deployment with the embedding provider intentionally

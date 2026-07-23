@@ -23,11 +23,9 @@ const SIGNED_TRANSPORT_PARAMETERS = new Set([
   "exp",
   "ba_iat",
   "ba_pl",
-  "ba_param",
   "sig",
 ]);
-const REPEATABLE_TRANSPORT_PARAMETERS = new Set(["ba_param"]);
-const REQUIRED_TRANSPORT_PARAMETERS = ["exp", "ba_iat", "ba_param", "sig"] as const;
+const REQUIRED_TRANSPORT_PARAMETERS = ["exp", "ba_iat", "sig"] as const;
 const POSITIVE_DECIMAL_INTEGER = /^[1-9][0-9]*$/u;
 const BETTER_AUTH_HMAC_SHA256_BASE64 = /^[A-Za-z0-9+/]{43}=$/u;
 const PRINTABLE_ASCII = /^[\x21-\x7e]+$/u;
@@ -83,30 +81,6 @@ function assertPositiveSafeInteger(value: string, parameter: "ba_iat" | "exp"): 
   }
 }
 
-function assertSignedParameterManifest(parameters: URLSearchParams): void {
-  const declaredNames = parameters.getAll("ba_param");
-  if (declaredNames.length === 0) fail("PARAMETER_MISSING", "ba_param");
-
-  const declaredNameSet = new Set(declaredNames);
-  if (declaredNameSet.size !== declaredNames.length) {
-    fail("SIGNED_PARAMETER_INVALID", "ba_param");
-  }
-
-  const actualSignedNames = new Set(
-    [...parameters.keys()].filter((name) => name !== "sig"),
-  );
-  for (const name of actualSignedNames) {
-    if (!declaredNameSet.has(name)) {
-      fail("SIGNED_PARAMETER_INVALID", "ba_param");
-    }
-  }
-  for (const name of declaredNameSet) {
-    if (!actualSignedNames.has(name)) {
-      fail("SIGNED_PARAMETER_INVALID", "ba_param");
-    }
-  }
-}
-
 function validateSignedTransport(parameters: URLSearchParams): void {
   const entries = [...parameters.entries()];
   if (entries.length === 0) fail("QUERY_INVALID");
@@ -119,7 +93,7 @@ function validateSignedTransport(parameters: URLSearchParams): void {
     if (!SIGNED_TRANSPORT_PARAMETERS.has(name)) {
       fail("PARAMETER_UNSUPPORTED", name);
     }
-    if (seen.has(name) && !REPEATABLE_TRANSPORT_PARAMETERS.has(name)) {
+    if (seen.has(name)) {
       fail("PARAMETER_DUPLICATE", name);
     }
     seen.add(name);
@@ -145,8 +119,6 @@ function validateSignedTransport(parameters: URLSearchParams): void {
   ) {
     fail("SIGNED_PARAMETER_INVALID", "ba_pl");
   }
-
-  assertSignedParameterManifest(parameters);
 }
 
 function extractAuthorizeParameters(parameters: URLSearchParams): URLSearchParams {
@@ -160,7 +132,7 @@ function extractAuthorizeParameters(parameters: URLSearchParams): URLSearchParam
 
 /**
  * Parse the exact signed-query shape emitted by @better-auth/oauth-provider
- * 1.6.23 for its consent redirect. Cryptographic verification remains at the
+ * 1.7.0-beta.4 for its consent redirect. Cryptographic verification remains at the
  * Better Auth consent endpoint; this parser prevents unsigned or extension
  * fields from entering AlphaNet's authorization-request binding.
  */
@@ -179,15 +151,6 @@ export function parseRemoteMcpOAuthConsentQuery(
   const parameters = new URLSearchParams(oauthQuery);
   validateSignedTransport(parameters);
   const authorization = extractAuthorizeParameters(parameters);
-  // @better-auth/oauth-provider 1.6.23 intentionally strips the RFC 8707
-  // extension from its signed post-login/consent transport. The raw authorize
-  // boundary already required the exact singleton resource and persisted that
-  // binding before Provider dispatch. Reconstruct only that immutable trusted
-  // value here; a future Provider version that signs `resource` still has to
-  // match it exactly in validateRemoteMcpAuthorizeQuery.
-  if (!authorization.has("resource")) {
-    authorization.set("resource", options.resource);
-  }
   return validateRemoteMcpAuthorizeQuery(authorization, {
     resource: options.resource,
   });
