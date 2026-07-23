@@ -128,6 +128,14 @@ async function start(): Promise<void> {
   });
   const topicCommunityManagementService = new PostgresTopicCommunityManagementService(
     postgres.sql,
+    {
+      cursorSigningKey: createHmac(
+        "sha256",
+        Buffer.from(environment.COMMUNITY_CURSOR_SIGNING_KEY, "utf8"),
+      )
+        .update("alphanet.topic-community-management.cursor.v1", "utf8")
+        .digest(),
+    },
   );
   const contentSearchService = new PostgresContentSearchService(postgres.sql, {
     activityDigestKey: createHmac(

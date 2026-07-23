@@ -1,6 +1,8 @@
 import {
   AdminTopicCommunityCreateHeadersSchema,
   AdminTopicCommunityCreateRequestSchema,
+  AdminTopicCommunityListRequestSchema,
+  AdminTopicCommunityListResponseSchema,
   AdminTopicCommunityMutationResponseSchema,
   AdminTopicCommunityPatchHeadersSchema,
   AdminTopicCommunityPatchRequestSchema,
@@ -10,8 +12,10 @@ import {
 import {
   TopicCommunityManagementError,
   type AdminTopicCommunityContext,
+  type TopicCommunityPage,
   type TopicCommunityManagementService,
   type TopicCommunityMutation,
+  type TopicCommunityView,
 } from "@alphanet/domain";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
@@ -24,11 +28,40 @@ import { v1Error } from "./agent-routes.js";
 
 export interface AdminTopicCommunityRouteOptions {
   adminRuntime: AdminRequestRuntime;
-  service: Pick<TopicCommunityManagementService, "create" | "update">;
+  service: Pick<TopicCommunityManagementService, "create" | "list" | "update">;
 }
+
+const listQueryNames = new Set(["states", "query", "limit", "cursor"]);
 
 function noQuery(request: FastifyRequest): boolean {
   return new URL(request.url, "http://alphanet.invalid").searchParams.size === 0;
+}
+
+function listRequest(request: FastifyRequest) {
+  const parameters = new URL(request.url, "http://alphanet.invalid").searchParams;
+  for (const name of parameters.keys()) {
+    if (!listQueryNames.has(name) || parameters.getAll(name).length !== 1) return null;
+  }
+  const rawLimit = parameters.get("limit");
+  const limit =
+    rawLimit === null
+      ? undefined
+      : /^[1-9][0-9]*$/u.test(rawLimit)
+        ? Number(rawLimit)
+        : null;
+  if (limit === null || (limit !== undefined && !Number.isSafeInteger(limit))) {
+    return null;
+  }
+  const rawStates = parameters.get("states");
+  const states = rawStates === null ? undefined : rawStates.split(",");
+  if (states !== undefined && states.some((state) => state.length === 0)) return null;
+  const parsed = AdminTopicCommunityListRequestSchema.safeParse({
+    ...(parameters.has("cursor") ? { cursor: parameters.get("cursor") } : {}),
+    ...(limit === undefined ? {} : { limit }),
+    ...(parameters.has("query") ? { query: parameters.get("query") } : {}),
+    ...(states === undefined ? {} : { states }),
+  });
+  return parsed.success ? parsed.data : null;
 }
 
 function createHeaders(request: FastifyRequest) {
@@ -75,6 +108,29 @@ function adminContext(
   };
 }
 
+function communityProjection(community: TopicCommunityView) {
+  return {
+    canonical_topic: {
+      id: community.canonicalTopic.id,
+      slug: community.canonicalTopic.slug,
+    },
+    created_at: community.createdAt.toISOString(),
+    description_markdown: community.descriptionMarkdown,
+    id: community.id,
+    kind: community.kind,
+    name: community.name,
+    posting_policy: {
+      allowed_content: community.postingPolicy.allowedContent,
+      max_posts_per_hour: community.postingPolicy.maxPostsPerHour,
+      requires_sources: community.postingPolicy.requiresSources,
+    },
+    slug: community.slug,
+    state: community.state,
+    updated_at: community.updatedAt.toISOString(),
+    version: community.version,
+  };
+}
+
 function responseProjection(request: FastifyRequest, mutation: TopicCommunityMutation) {
   const parsed = AdminTopicCommunityMutationResponseSchema.safeParse({
     action: {
@@ -86,25 +142,29 @@ function responseProjection(request: FastifyRequest, mutation: TopicCommunityMut
       occurred_at: mutation.action.occurredAt.toISOString(),
       permission_used: mutation.action.permissionUsed,
     },
-    community: {
-      canonical_topic: {
-        id: mutation.community.canonicalTopic.id,
-        slug: mutation.community.canonicalTopic.slug,
-      },
-      created_at: mutation.community.createdAt.toISOString(),
-      description_markdown: mutation.community.descriptionMarkdown,
-      id: mutation.community.id,
-      kind: mutation.community.kind,
-      name: mutation.community.name,
-      posting_policy: {
-        allowed_content: mutation.community.postingPolicy.allowedContent,
-        max_posts_per_hour: mutation.community.postingPolicy.maxPostsPerHour,
-        requires_sources: mutation.community.postingPolicy.requiresSources,
-      },
-      slug: mutation.community.slug,
-      state: mutation.community.state,
-      updated_at: mutation.community.updatedAt.toISOString(),
-      version: mutation.community.version,
+    community: communityProjection(mutation.community),
+    request_id: request.id,
+    schema_version: "1",
+  });
+  return parsed.success ? parsed.data : null;
+}
+
+function listProjection(request: FastifyRequest, page: TopicCommunityPage) {
+  const parsed = AdminTopicCommunityListResponseSchema.safeParse({
+    capabilities: { can_manage: true },
+    items: page.items.map((community) => ({
+      ...communityProjection(community),
+      content_count: community.contentCount,
+    })),
+    ordering: {
+      as_of: page.asOf.toISOString(),
+      ordering_version: page.orderingVersion,
+      snapshot_id: page.snapshotId,
+    },
+    page: {
+      has_more: page.hasMore,
+      limit: page.limit,
+      next_cursor: page.nextCursor,
     },
     request_id: request.id,
     schema_version: "1",
@@ -188,15 +248,46 @@ export function registerAdminTopicCommunityRoutes(
   app: FastifyInstance,
   options: AdminTopicCommunityRouteOptions,
 ): void {
-  const authorization = createAdminRequestAuthorizationBoundary({
+  const readAuthorization = createAdminRequestAuthorizationBoundary({
+    ...options.adminRuntime,
+    mode: "read",
+    permission: "community:manage",
+  });
+  const mutationAuthorization = createAdminRequestAuthorizationBoundary({
     ...options.adminRuntime,
     mode: "mutation",
     permission: "community:manage",
   });
 
+  app.get(
+    "/v1/admin/topic-communities",
+    { onRequest: readAuthorization.onRequest },
+    async (request, reply) => {
+      const query = listRequest(request);
+      if (!query || request.body !== undefined) return invalid(request, reply);
+      try {
+        const page = await options.service.list(
+          adminContext(request, readAuthorization.getAuthorization(request)),
+          {
+            ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
+            ...(query.limit === undefined ? {} : { limit: query.limit }),
+            ...(query.query === undefined ? {} : { query: query.query }),
+            ...(query.states === undefined ? {} : { states: query.states }),
+          },
+        );
+        const response = listProjection(request, page);
+        return response
+          ? reply.code(200).send(response)
+          : sendError(request, reply, new Error("Invalid list projection."));
+      } catch (error) {
+        return sendError(request, reply, error);
+      }
+    },
+  );
+
   app.post(
     "/v1/admin/topic-communities",
-    { onRequest: authorization.onRequest },
+    { onRequest: mutationAuthorization.onRequest },
     async (request, reply) => {
       const headers = createHeaders(request);
       const body = AdminTopicCommunityCreateRequestSchema.safeParse(request.body);
@@ -205,7 +296,7 @@ export function registerAdminTopicCommunityRoutes(
       }
       try {
         const mutation = await options.service.create(
-          adminContext(request, authorization.getAuthorization(request)),
+          adminContext(request, mutationAuthorization.getAuthorization(request)),
           {
             ...(body.data.description_markdown === undefined
               ? {}
@@ -224,7 +315,7 @@ export function registerAdminTopicCommunityRoutes(
 
   app.patch(
     "/v1/admin/topic-communities/:community_id",
-    { onRequest: authorization.onRequest },
+    { onRequest: mutationAuthorization.onRequest },
     async (request, reply) => {
       const path = AdminTopicCommunityPathParamsSchema.safeParse(request.params);
       const headers = patchHeaders(request);
@@ -234,7 +325,7 @@ export function registerAdminTopicCommunityRoutes(
       }
       try {
         const mutation = await options.service.update(
-          adminContext(request, authorization.getAuthorization(request)),
+          adminContext(request, mutationAuthorization.getAuthorization(request)),
           {
             communityId: path.data.community_id,
             ...(body.data.description_markdown === undefined

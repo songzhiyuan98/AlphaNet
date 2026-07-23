@@ -24,7 +24,9 @@ const dependencies: HealthDependency[] = [];
 
 describeIntegration("PostgresTopicCommunityManagementService", () => {
   const postgres = createPostgresDependency(databaseUrl ?? "");
-  const service = new PostgresTopicCommunityManagementService(postgres.sql);
+  const service = new PostgresTopicCommunityManagementService(postgres.sql, {
+    cursorSigningKey: Buffer.alloc(32, 7),
+  });
   dependencies.push(postgres);
 
   const marker = randomUUID().replaceAll("-", "").slice(0, 12);
@@ -103,6 +105,47 @@ describeIntegration("PostgresTopicCommunityManagementService", () => {
     expect(replay.replayed).toBe(true);
     expect(replay.action.actionId).toBe(created.action.actionId);
     expect(replay.community).toEqual(created.community);
+
+    await service.create(context, {
+      idempotencyKey: `create-chips-${marker}`,
+      name: "AI Chips",
+      slug: `ai-chips-${marker}`,
+    });
+    const firstPage = await service.list(context, {
+      limit: 1,
+      query: marker,
+      states: ["active"],
+    });
+    expect(firstPage).toMatchObject({
+      hasMore: true,
+      limit: 1,
+      orderingVersion: "topic-community-created-keyset-v1",
+    });
+    expect(firstPage.items).toHaveLength(1);
+    expect(firstPage.items[0]?.contentCount).toBe(0);
+    expect(firstPage.nextCursor).not.toBeNull();
+
+    const secondPage = await service.list(context, {
+      cursor: firstPage.nextCursor,
+      limit: 1,
+      query: marker,
+      states: ["active"],
+    });
+    expect(secondPage).toMatchObject({
+      hasMore: false,
+      nextCursor: null,
+      snapshotId: firstPage.snapshotId,
+    });
+    expect(secondPage.items).toHaveLength(1);
+    expect(secondPage.items[0]?.id).not.toBe(firstPage.items[0]?.id);
+    await expect(
+      service.list(context, {
+        cursor: `${firstPage.nextCursor}tampered`,
+        limit: 1,
+        query: marker,
+        states: ["active"],
+      }),
+    ).rejects.toMatchObject({ code: "CURSOR_INVALID" });
 
     await expect(
       service.update(context, {

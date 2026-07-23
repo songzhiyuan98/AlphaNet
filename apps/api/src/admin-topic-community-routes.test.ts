@@ -1,5 +1,6 @@
 import type { OidcJwtVerifier, VerifiedOidcJwtIdentity } from "@alphanet/auth";
 import {
+  AdminTopicCommunityListResponseSchema,
   AdminTopicCommunityMutationResponseSchema,
   V1ErrorResponseSchema,
 } from "@alphanet/contracts";
@@ -7,6 +8,7 @@ import {
   TopicCommunityManagementError,
   type TopicCommunityManagementService,
   type TopicCommunityMutation,
+  type TopicCommunityPage,
 } from "@alphanet/domain";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -62,6 +64,7 @@ function mutation(
     },
     community: {
       canonicalTopic: { id: ids.topic, slug: "semiconductors" },
+      contentCount: 0,
       createdAt: now,
       descriptionMarkdown: "Agent semiconductor research and discussion.",
       id: ids.community,
@@ -82,10 +85,23 @@ function mutation(
   };
 }
 
+function page(): TopicCommunityPage {
+  return {
+    asOf: now,
+    hasMore: false,
+    items: [{ ...mutation().community, contentCount: 12 }],
+    limit: 25,
+    nextCursor: null,
+    orderingVersion: "topic-community-created-keyset-v1",
+    snapshotId: "20000000-0000-4000-8000-000000000005",
+  };
+}
+
 function createApp(
   options: {
     createError?: Error;
     createResult?: TopicCommunityMutation;
+    listResult?: TopicCommunityPage;
     updateResult?: TopicCommunityMutation;
   } = {},
 ) {
@@ -112,18 +128,68 @@ function createApp(
   const update = vi.fn<TopicCommunityManagementService["update"]>(() =>
     Promise.resolve(options.updateResult ?? mutation("update")),
   );
+  const list = vi.fn<TopicCommunityManagementService["list"]>(() =>
+    Promise.resolve(options.listResult ?? page()),
+  );
   const app = Fastify({ logger: false });
   registerAdminTopicCommunityRoutes(app, {
     adminRuntime: runtime,
-    service: { create, update },
+    service: { create, list, update },
   });
   apps.push(app);
-  return { app, create, update, verify };
+  return { app, create, list, update, verify };
 }
 
 const authorization = { authorization: `Bearer ${token}` };
 
 describe("Admin topic-community routes", () => {
+  it("lists topic communities with exact filters and affected content counts", async () => {
+    const { app, list, verify } = createApp();
+    const response = await app.inject({
+      headers: authorization,
+      method: "GET",
+      url: "/v1/admin/topic-communities?states=active,archived&query=semi&limit=25",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(AdminTopicCommunityListResponseSchema.parse(response.json())).toMatchObject({
+      capabilities: { can_manage: true },
+      items: [{ content_count: 12, id: ids.community }],
+      page: { has_more: false, limit: 25, next_cursor: null },
+    });
+    expect(verify).toHaveBeenCalledExactlyOnceWith(token);
+    expect(list).toHaveBeenCalledOnce();
+    expect(list.mock.calls[0]?.[1]).toEqual({
+      limit: 25,
+      query: "semi",
+      states: ["active", "archived"],
+    });
+  });
+
+  it("rejects duplicate, unknown, and non-canonical list filters before the service", async () => {
+    const { app, list } = createApp();
+    for (const query of [
+      "states=active&states=archived",
+      "states=active,active",
+      "limit=025",
+      "limit=101",
+      "query=",
+      "cursor=",
+      "unexpected=true",
+    ]) {
+      const response = await app.inject({
+        headers: authorization,
+        method: "GET",
+        url: `/v1/admin/topic-communities?${query}`,
+      });
+      expect(response.statusCode).toBe(422);
+      expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
+        "INVALID_ARGUMENT",
+      );
+    }
+    expect(list).not.toHaveBeenCalled();
+  });
+
   it("creates a topic community through workforce OIDC and projects a strict response", async () => {
     const { app, create, verify } = createApp();
     const response = await app.inject({

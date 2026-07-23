@@ -297,6 +297,7 @@
 
 .filterGrid select,
 .filterGrid input,
+.formField input,
 .formField select,
 .formField textarea {
   background: var(--surface-canvas, #080a09);
@@ -313,10 +314,191 @@
 
 .filterGrid select:focus,
 .filterGrid input:focus,
+.formField input:focus,
 .formField select:focus,
 .formField textarea:focus {
   border-color: var(--accent, #b7f343);
   box-shadow: 0 0 0 3px rgba(183, 243, 67, 0.09);
+}
+
+.communityControls {
+  display: grid;
+  gap: 16px;
+  margin-bottom: 28px;
+}
+
+.communitySearch,
+.createCommunity {
+  background:
+    linear-gradient(135deg, rgba(183, 243, 67, 0.045), transparent 34%),
+    rgba(9, 12, 10, 0.94);
+  border: 1px solid rgba(183, 243, 67, 0.16);
+  border-radius: var(--radius-panel, 14px);
+  padding: 20px;
+}
+
+.communitySearch {
+  align-items: end;
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(240px, 1fr) minmax(150px, 0.3fr) auto;
+}
+
+.createCommunity > summary,
+.communityEditor > summary {
+  color: var(--foreground-primary, #f4f7f1);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.createCommunity[open] > summary,
+.communityEditor[open] > summary {
+  margin-bottom: 18px;
+}
+
+.createCommunity form,
+.communityEditor form {
+  display: grid;
+  gap: 14px;
+}
+
+.communityCreateGrid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.communityList {
+  border-top: 1px solid var(--border-subtle, #202720);
+}
+
+.communityRow {
+  border-bottom: 1px solid var(--border-subtle, #202720);
+  padding: 26px 2px;
+}
+
+.communityIdentity {
+  align-items: start;
+  display: flex;
+  gap: 24px;
+  justify-content: space-between;
+}
+
+.communityTitleLine {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+}
+
+.communityTitleLine h2 {
+  font-size: 19px;
+  letter-spacing: -0.025em;
+  margin: 0;
+}
+
+.communityIdentity p,
+.communityDescription {
+  color: var(--foreground-secondary, #b3bdb0);
+}
+
+.communityIdentity p {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  margin: 6px 0 0;
+}
+
+.communityDescription {
+  line-height: 1.65;
+  margin: 16px 0 10px;
+  max-width: 78ch;
+}
+
+.communityMetrics {
+  display: flex;
+  gap: 24px;
+  margin: 0;
+}
+
+.communityMetrics div {
+  min-width: 54px;
+}
+
+.communityMetrics dt {
+  color: var(--foreground-muted, #899586);
+  font-size: 11px;
+}
+
+.communityMetrics dd {
+  font-size: 17px;
+  font-weight: 700;
+  margin: 4px 0 0;
+}
+
+.communityId {
+  color: var(--foreground-muted, #899586);
+  display: block;
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.communityEditor {
+  border-top: 1px solid rgba(183, 243, 67, 0.08);
+  margin-top: 18px;
+  padding-top: 14px;
+}
+
+.primaryAction,
+.secondaryAction,
+.dangerAction {
+  border-radius: var(--radius-control, 9px);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 720;
+  min-height: 42px;
+  padding: 0 16px;
+}
+
+.primaryAction {
+  background: var(--accent, #b7f343);
+  border: 1px solid var(--accent, #b7f343);
+  color: #0a0d09;
+  justify-self: start;
+}
+
+.secondaryAction {
+  background: var(--surface-canvas, #080a09);
+  border: 1px solid var(--border-strong, #364137);
+  color: var(--foreground-primary, #f4f7f1);
+}
+
+.dangerAction {
+  background: transparent;
+  border: 1px solid rgba(233, 133, 127, 0.45);
+  color: var(--danger, #e9857f);
+}
+
+.primaryAction:disabled,
+.dangerAction:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.successNotice,
+.inlineError {
+  border-left: 2px solid var(--accent, #b7f343);
+  color: var(--foreground-secondary, #b3bdb0);
+  font-size: 13px;
+  margin: 0 0 20px;
+  padding: 9px 12px;
+}
+
+.inlineError {
+  border-color: var(--danger, #e9857f);
+  color: var(--danger, #e9857f);
+  margin: 0;
 }
 
 .filterGrid select[multiple] {
@@ -920,6 +1102,14 @@
 }
 
 @media (max-width: 1020px) {
+  .communitySearch {
+    grid-template-columns: minmax(0, 1fr) minmax(150px, 0.35fr);
+  }
+
+  .communitySearch .secondaryAction {
+    justify-self: start;
+  }
+
   .filterGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -960,8 +1150,15 @@
   }
 
   .filterGrid,
-  .metadataGrid {
+  .metadataGrid,
+  .communityCreateGrid,
+  .communitySearch {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .communityIdentity {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .queueItem {

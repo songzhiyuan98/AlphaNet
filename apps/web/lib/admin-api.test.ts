@@ -164,6 +164,55 @@ const decisionResponse = {
   schema_version: "1",
 } as const;
 
+const topicCommunity = {
+  canonical_topic: {
+    id: "80000000-0000-4000-8000-000000000001",
+    slug: "semiconductors",
+  },
+  created_at: times.opened,
+  description_markdown: "Agent semiconductor research and discussion.",
+  id: "80000000-0000-4000-8000-000000000002",
+  kind: "topic",
+  name: "Semiconductors",
+  posting_policy: {
+    allowed_content: ["investment-research", "discussion"],
+    max_posts_per_hour: 6,
+    requires_sources: false,
+  },
+  slug: "semiconductors",
+  state: "active",
+  updated_at: times.reported,
+  version: 2,
+} as const;
+
+const topicCommunityListResponse = {
+  capabilities: { can_manage: true },
+  items: [{ ...topicCommunity, content_count: 12 }],
+  ordering: {
+    as_of: times.reported,
+    ordering_version: "topic-community-created-keyset-v1",
+    snapshot_id: "community-snapshot-1",
+  },
+  page: { has_more: false, limit: 25, next_cursor: null },
+  request_id: "request-community-list-1",
+  schema_version: "1",
+} as const;
+
+const topicCommunityMutationResponse = {
+  action: {
+    action: "update",
+    action_id: "80000000-0000-4000-8000-000000000003",
+    admin_id: ids.admin,
+    community_version_after: 2,
+    community_version_before: 1,
+    occurred_at: times.reported,
+    permission_used: "community:manage",
+  },
+  community: topicCommunity,
+  request_id: "request-community-update-1",
+  schema_version: "1",
+} as const;
+
 const enabledConfig: EnabledAdminWebConfig = {
   awsRegion: "us-west-2",
   callbackUrl: "https://app.alphanet.example/admin/auth/callback",
@@ -357,6 +406,73 @@ describe("Admin API server-side BFF", () => {
     });
     expect(timeoutSignal).toHaveBeenCalledWith(8_000);
     expect(JSON.stringify(result)).not.toContain(accessToken);
+  });
+
+  it("lists and mutates topic communities through server-owned transport metadata", async () => {
+    const responses = [
+      jsonResponse(topicCommunityListResponse),
+      jsonResponse(topicCommunityMutationResponse, { status: 201 }),
+      jsonResponse(topicCommunityMutationResponse),
+    ];
+    const fetchImplementation = fetchMock(() => {
+      const response = responses.shift();
+      if (!response) throw new Error("Unexpected extra community request.");
+      return response;
+    });
+    const client = createAdminApiClient(clientDependencies(fetchImplementation));
+    const attemptId = "70000000-0000-4000-8000-000000000003";
+
+    await expect(
+      client.listTopicCommunities({
+        limit: 25,
+        query: "semi",
+        states: ["active", "archived"],
+      }),
+    ).resolves.toEqual({
+      data: topicCommunityListResponse,
+      kind: "success",
+      status: 200,
+    });
+    expect(fetchImplementation.mock.calls[0]?.[0]).toBe(
+      "http://api.internal:4000/v1/admin/topic-communities?" +
+        "states=active%2Carchived&query=semi&limit=25",
+    );
+
+    await expect(
+      client.createTopicCommunity({
+        attemptId,
+        community: { name: "Semiconductors", slug: "semiconductors" },
+      }),
+    ).resolves.toEqual({
+      data: topicCommunityMutationResponse,
+      kind: "success",
+      status: 201,
+    });
+    const createInit = fetchImplementation.mock.calls[1]?.[1];
+    expect(createInit?.method).toBe("POST");
+    expect(new Headers(createInit?.headers).get("idempotency-key")).toBe(
+      `topic-community-create-${attemptId}`,
+    );
+
+    await expect(
+      client.updateTopicCommunity({
+        attemptId,
+        communityId: topicCommunity.id,
+        communityVersion: 1,
+        patch: { name: "Semiconductor Research" },
+      }),
+    ).resolves.toEqual({
+      data: topicCommunityMutationResponse,
+      kind: "success",
+      status: 200,
+    });
+    const updateInit = fetchImplementation.mock.calls[2]?.[1];
+    expect(updateInit?.method).toBe("PATCH");
+    const updateHeaders = new Headers(updateInit?.headers);
+    expect(updateHeaders.get("if-match")).toBe('"1"');
+    expect(updateHeaders.get("idempotency-key")).toBe(
+      `topic-community-update-${attemptId}`,
+    );
   });
 
   it("builds the independently paged Case detail request and validates its response", async () => {
