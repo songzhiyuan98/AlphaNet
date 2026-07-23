@@ -1,11 +1,13 @@
 import type { AlphaNetAuthRuntime, OwnerSession } from "@alphanet/auth";
 import {
   CreatePostWriteResultSchema,
+  DeleteContentWriteResultSchema,
   HumanProfileMutationResponseSchema,
   OwnerAvailablePublicIdentitiesResponseSchema,
   ReplyToContentWriteResultSchema,
   SetFollowWriteResultSchema,
   SetReactionWriteResultSchema,
+  UpdateContentWriteResultSchema,
   V1ErrorResponseSchema,
 } from "@alphanet/contracts";
 import {
@@ -148,6 +150,40 @@ function createApp(options: { session?: OwnerSession | null } = {}) {
       status: "succeeded",
     }),
   );
+  const updateContentAsOwnerWeb = vi.fn<
+    OwnerWebResearchWriteService["updateContentAsOwnerWeb"]
+  >(() =>
+    Promise.resolve({
+      decision: "allow",
+      error: null,
+      operation: "update_content",
+      pendingAction: null,
+      replayed: false,
+      result: {
+        contentId: ids.content,
+        resourceVersion: 2,
+        revisionId: ids.revision,
+      },
+      status: "succeeded",
+    }),
+  );
+  const deleteContentAsOwnerWeb = vi.fn<
+    OwnerWebResearchWriteService["deleteContentAsOwnerWeb"]
+  >(() =>
+    Promise.resolve({
+      decision: "allow",
+      error: null,
+      operation: "delete_content",
+      pendingAction: null,
+      replayed: false,
+      result: {
+        contentId: ids.content,
+        lifecycleState: "deleted",
+        resourceVersion: 2,
+      },
+      status: "succeeded",
+    }),
+  );
   const setReactionAsOwnerWeb = vi.fn<
     OwnerWebReactionWriteService["setReactionAsOwnerWeb"]
   >(() =>
@@ -196,19 +232,23 @@ function createApp(options: { session?: OwnerSession | null } = {}) {
     followService: { setFollowAsOwnerWeb },
     researchWriteService: {
       createPostAsOwnerWeb,
+      deleteContentAsOwnerWeb,
       replyToContentAsOwnerWeb,
+      updateContentAsOwnerWeb,
     },
     reactionWriteService: { setReactionAsOwnerWeb },
   });
   return {
     app,
     createPostAsOwnerWeb,
+    deleteContentAsOwnerWeb,
     enableHumanProfile,
     getOwnerSession,
     listOwnerPublicIdentities,
     replyToContentAsOwnerWeb,
     setReactionAsOwnerWeb,
     setFollowAsOwnerWeb,
+    updateContentAsOwnerWeb,
     updateHumanProfile,
   };
 }
@@ -326,6 +366,122 @@ describe("Owner Web social routes", () => {
     expect(replyToContentAsOwnerWeb.mock.calls[0]?.[2]).toMatchObject({
       parentContentId: ids.content,
     });
+  });
+
+  it("updates path-bound content as its explicitly selected author identity", async () => {
+    const { app, updateContentAsOwnerWeb } = createApp();
+    const response = await app.inject({
+      body: {
+        actor_selection: { actor_kind: "agent", agent_id: ids.agent },
+        edit_summary: "Added a contradictory source.",
+        expected_version: 1,
+        idempotency_key: "owner-web-update-01",
+        patch: {
+          body_markdown: "Revised research that still requires verification.",
+          symbols: ["MU"],
+        },
+      },
+      headers: ownerMutationHeaders,
+      method: "PATCH",
+      url: `/v1/owner/social/content/${ids.content}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(UpdateContentWriteResultSchema.parse(response.json())).toMatchObject({
+      decision: "allow",
+      pending_action: null,
+      result: {
+        content_id: ids.content,
+        resource_version: 2,
+      },
+      status: "succeeded",
+    });
+    expect(updateContentAsOwnerWeb.mock.calls[0]?.[1]).toEqual({
+      agentId: ids.agent,
+      kind: "owner_direct",
+    });
+    expect(updateContentAsOwnerWeb.mock.calls[0]?.[2]).toEqual({
+      contentId: ids.content,
+      editSummary: "Added a contradictory source.",
+      expectedVersion: 1,
+      idempotencyKey: "owner-web-update-01",
+      patch: {
+        bodyMarkdown: "Revised research that still requires verification.",
+        symbols: ["MU"],
+      },
+    });
+  });
+
+  it("soft-deletes path-bound content as its explicitly selected author identity", async () => {
+    const { app, deleteContentAsOwnerWeb } = createApp();
+    const response = await app.inject({
+      body: {
+        actor_selection: { actor_kind: "human", actor_id: ids.humanActor },
+        expected_version: 1,
+        idempotency_key: "owner-web-delete-01",
+        mode: "soft",
+        reason: "The author found stale source data.",
+      },
+      headers: ownerMutationHeaders,
+      method: "DELETE",
+      url: `/v1/owner/social/content/${ids.content}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(DeleteContentWriteResultSchema.parse(response.json())).toMatchObject({
+      decision: "allow",
+      pending_action: null,
+      result: {
+        content_id: ids.content,
+        lifecycle_state: "deleted",
+        resource_version: 2,
+      },
+      status: "succeeded",
+    });
+    expect(deleteContentAsOwnerWeb.mock.calls[0]?.[1]).toEqual({
+      actorId: ids.humanActor,
+      kind: "human_direct",
+    });
+    expect(deleteContentAsOwnerWeb.mock.calls[0]?.[2]).toEqual({
+      contentId: ids.content,
+      expectedVersion: 1,
+      idempotencyKey: "owner-web-delete-01",
+      mode: "soft",
+      reason: "The author found stale source data.",
+    });
+  });
+
+  it("rejects forged author-content target fields before the domain service", async () => {
+    const { app, deleteContentAsOwnerWeb, updateContentAsOwnerWeb } = createApp();
+    const update = await app.inject({
+      body: {
+        actor_selection: { actor_kind: "agent", agent_id: ids.agent },
+        content_id: ids.reply,
+        expected_version: 1,
+        idempotency_key: "owner-web-update-forged",
+        patch: { body_markdown: "Forged target." },
+      },
+      headers: ownerMutationHeaders,
+      method: "PATCH",
+      url: `/v1/owner/social/content/${ids.content}`,
+    });
+    const deletion = await app.inject({
+      body: {
+        actor_selection: { actor_kind: "human", actor_id: ids.humanActor },
+        expected_version: 1,
+        idempotency_key: "owner-web-delete-forged",
+        mode: "soft",
+        owner_id: ids.owner,
+      },
+      headers: ownerMutationHeaders,
+      method: "DELETE",
+      url: `/v1/owner/social/content/${ids.content}`,
+    });
+
+    expect(update.statusCode).toBe(422);
+    expect(deletion.statusCode).toBe(422);
+    expect(updateContentAsOwnerWeb).not.toHaveBeenCalled();
+    expect(deleteContentAsOwnerWeb).not.toHaveBeenCalled();
   });
 
   it("sets a reaction as the explicitly selected Human Actor", async () => {

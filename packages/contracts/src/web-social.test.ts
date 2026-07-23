@@ -4,12 +4,15 @@ import {
   EnableHumanProfileRequestSchema,
   HumanProfilePublicSummarySchema,
   OwnerAvailablePublicIdentitiesResponseSchema,
+  OwnerWebContentPathSchema,
   OwnerWebCreatePostRequestSchema,
+  OwnerWebDeleteContentRequestSchema,
   OwnerWebReplyToContentRequestSchema,
   OwnerWebSetReactionPathSchema,
   OwnerWebSetReactionRequestSchema,
   OwnerWebSetFollowPathSchema,
   OwnerWebSetFollowRequestSchema,
+  OwnerWebUpdateContentRequestSchema,
   PublicHumanProfileResponseSchema,
   UpdateHumanProfileRequestSchema,
   WEB_SOCIAL_SCHEMA_VERSION,
@@ -341,6 +344,45 @@ describe("Web social write envelope", () => {
           agent_id: ids.agent,
           credential_id: ids.agentActor,
         },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("binds strict author updates and soft deletes to the content path", () => {
+    const actorSelection = {
+      actor_selection: { actor_kind: "human", actor_id: ids.humanActor },
+      expected_version: 3,
+      idempotency_key: "owner-web-author-write-key",
+    } as const;
+    const update = {
+      ...actorSelection,
+      edit_summary: "Added a contradictory source.",
+      patch: {
+        body_markdown: "Revised research that remains subject to verification.",
+      },
+    } as const;
+    const deletion = {
+      ...actorSelection,
+      mode: "soft",
+      reason: "The author found stale source data.",
+    } as const;
+
+    expect(OwnerWebContentPathSchema.parse({ contentId: ids.otherAgent })).toEqual({
+      contentId: ids.otherAgent,
+    });
+    expect(OwnerWebUpdateContentRequestSchema.parse(update)).toEqual(update);
+    expect(OwnerWebDeleteContentRequestSchema.parse(deletion)).toEqual(deletion);
+    expect(
+      OwnerWebUpdateContentRequestSchema.safeParse({
+        ...update,
+        content_id: ids.otherAgent,
+      }).success,
+    ).toBe(false);
+    expect(
+      OwnerWebDeleteContentRequestSchema.safeParse({
+        ...deletion,
+        mode: "permanent",
+        owner_id: ids.agent,
       }).success,
     ).toBe(false);
   });

@@ -340,6 +340,16 @@ export interface OwnerWebResearchWriteService {
     selection: WebSocialAuthoritySelection,
     input: ReplyResearchWriteInput,
   ): Promise<ReplyResearchWriteOutcome>;
+  updateContentAsOwnerWeb(
+    context: OwnerWebMutationContext,
+    selection: WebSocialAuthoritySelection,
+    input: UpdateContentResearchWriteInput,
+  ): Promise<UpdateContentResearchWriteOutcome>;
+  deleteContentAsOwnerWeb(
+    context: OwnerWebMutationContext,
+    selection: WebSocialAuthoritySelection,
+    input: DeleteContentResearchWriteInput,
+  ): Promise<DeleteContentResearchWriteOutcome>;
 }
 
 export type ApprovedResearchExecutionDisposition = "invalidate" | "retry";
@@ -1095,7 +1105,7 @@ function policySnapshot(
 
 function ownerWebWritePrincipal(
   authority: WebSocialAuthority,
-  operation: "create_post" | "reply_to_content",
+  operation: ResearchWriteOperation,
 ): OwnerWebWritePrincipal {
   if (authority.kind === "human_direct") {
     return {
@@ -2660,11 +2670,47 @@ export class PostgresResearchWriteService
     return outcome;
   }
 
+  async updateContentAsOwnerWeb(
+    context: OwnerWebMutationContext,
+    selection: WebSocialAuthoritySelection,
+    input: UpdateContentResearchWriteInput,
+  ): Promise<UpdateContentResearchWriteOutcome> {
+    const outcome = await this.#dispatchOwnerWeb(
+      context,
+      selection,
+      "update_content",
+      () => normalizeUpdateContentCommand(input),
+      input.idempotencyKey,
+    );
+    if (outcome.operation !== "update_content") {
+      throw new Error("Owner Web update-content dispatch returned the wrong operation.");
+    }
+    return outcome;
+  }
+
+  async deleteContentAsOwnerWeb(
+    context: OwnerWebMutationContext,
+    selection: WebSocialAuthoritySelection,
+    input: DeleteContentResearchWriteInput,
+  ): Promise<DeleteContentResearchWriteOutcome> {
+    const outcome = await this.#dispatchOwnerWeb(
+      context,
+      selection,
+      "delete_content",
+      () => normalizeDeleteContentCommand(input),
+      input.idempotencyKey,
+    );
+    if (outcome.operation !== "delete_content") {
+      throw new Error("Owner Web delete-content dispatch returned the wrong operation.");
+    }
+    return outcome;
+  }
+
   async #dispatchOwnerWeb(
     context: OwnerWebMutationContext,
     selection: WebSocialAuthoritySelection,
-    operation: "create_post" | "reply_to_content",
-    normalize: () => NewResearchCommand,
+    operation: ResearchWriteOperation,
+    normalize: () => NormalizedResearchCommand,
     idempotencyKey: string,
   ): Promise<ResearchWriteOutcome> {
     const resolver = this.#webSocialAuthorityResolver;
@@ -2705,7 +2751,7 @@ export class PostgresResearchWriteService
   async #writeOwnerWebInTransaction(
     transaction: TransactionSql,
     principal: OwnerWebWritePrincipal,
-    command: NewResearchCommand,
+    command: NormalizedResearchCommand,
     idempotencyKey: string,
   ): Promise<ResearchWriteOutcome> {
     validateIdempotencyKey(idempotencyKey);
@@ -2748,6 +2794,27 @@ export class PostgresResearchWriteService
       throw new Error("The research write clock returned an invalid Date.");
     }
     const decisionId = this.#newId("decision_id");
+    if (command.operation === "delete_content" && command.mode === "permanent") {
+      return this.#commitOwnerWebStableDenial(transaction, {
+        auditDigests,
+        command,
+        decisionId,
+        digestBytes,
+        error: new ResearchWriteError(
+          "POLICY_DENIED",
+          "Community content cannot be permanently erased through Owner Web.",
+          {
+            details: {
+              mode: "permanent",
+              rule_version: CONTENT_DELETE_RULE_VERSION,
+            },
+          },
+        ),
+        idempotencyKey,
+        now,
+        principal,
+      });
+    }
     if (principal.evaluation.decision === "deny") {
       return this.#commitOwnerWebStableDenial(transaction, {
         auditDigests,
@@ -2759,6 +2826,31 @@ export class PostgresResearchWriteService
           "The selected Agent policy does not permit this Web operation.",
           { details: { reason: principal.evaluation.reason } },
         ),
+        idempotencyKey,
+        now,
+        principal,
+      });
+    }
+
+    if (command.operation === "update_content") {
+      return this.#writeOwnerWebContentUpdate(transaction, {
+        auditDigests,
+        command,
+        decisionId,
+        digestBytes,
+        idempotencyKey,
+        mentionHandles,
+        now,
+        principal,
+      });
+    }
+
+    if (command.operation === "delete_content") {
+      return this.#writeOwnerWebContentDelete(transaction, {
+        auditDigests,
+        command,
+        decisionId,
+        digestBytes,
         idempotencyKey,
         now,
         principal,
@@ -3019,6 +3111,374 @@ export class PostgresResearchWriteService
       persisted.contentId,
     );
     return outcome;
+  }
+
+  async #writeOwnerWebContentUpdate(
+    transaction: TransactionSql,
+    input: {
+      auditDigests: ResearchActionAuditDigests;
+      command: NormalizedUpdateContentCommand;
+      decisionId: string;
+      digestBytes: Buffer;
+      idempotencyKey: string;
+      mentionHandles: string[];
+      now: Date;
+      principal: OwnerWebWritePrincipal;
+    },
+  ): Promise<UpdateContentResearchWriteOutcome> {
+    const idempotencyId = this.#newId("idempotency_record_id");
+    await this.#insertIdempotency(transaction, {
+      actorId: input.principal.actorId,
+      agentId: input.principal.agentId,
+      credentialId: null,
+      digestBytes: input.digestBytes,
+      id: idempotencyId,
+      idempotencyKey: input.idempotencyKey,
+      operation: input.command.operation,
+      ownerId: input.principal.ownerId,
+      principalScopeKey: input.principal.principalScopeKey,
+    });
+
+    try {
+      return await transaction.savepoint(
+        "owner_web_content_update_mutation",
+        async (mutationTransaction) => {
+          const prepared = await this.#loadContentUpdateTarget(
+            mutationTransaction,
+            input.command,
+            input.principal.actorId,
+          );
+          let admissions = await this.#inspectCommunities(
+            mutationTransaction,
+            prepared.communityIds,
+          );
+          this.#enforceCommunityRules(
+            admissions,
+            prepared.kind === "post" ? "investment-research" : "discussion",
+            prepared.sourceLinks.length > 0,
+            prepared.kind === "reply",
+            false,
+          );
+          this.#enforceNewCommunityPlacementCapacity(
+            admissions,
+            prepared.newlyAddedCommunityIds,
+          );
+          await this.#materializeCatalogCommunities(mutationTransaction, admissions);
+          admissions = await this.#inspectCommunities(
+            mutationTransaction,
+            prepared.communityIds,
+          );
+          if (
+            admissions.some((admission) => admission.materialization !== "materialized")
+          ) {
+            throw new ResearchWriteError(
+              "COMMUNITY_NOT_FOUND",
+              "The catalog Community could not be materialized safely.",
+            );
+          }
+          this.#enforceCommunityRules(
+            admissions,
+            prepared.kind === "post" ? "investment-research" : "discussion",
+            prepared.sourceLinks.length > 0,
+            prepared.kind === "reply",
+            false,
+          );
+          this.#enforceNewCommunityPlacementCapacity(
+            admissions,
+            prepared.newlyAddedCommunityIds,
+          );
+          await this.#enforcePostRates(
+            mutationTransaction,
+            input.principal.actorId,
+            this.#newCommunityAdmissions(admissions, prepared.newlyAddedCommunityIds),
+            input.now,
+          );
+
+          const facts = await this.#resolveWriteFacts(
+            mutationTransaction,
+            {
+              references: input.command.patch.references ?? [],
+              symbols: input.command.patch.symbols ?? [],
+              topics: input.command.patch.topics ?? [],
+            },
+            input.command.patch.bodyMarkdown === undefined ? [] : input.mentionHandles,
+          );
+          if (
+            prepared.revisionChanged &&
+            input.command.patch.bodyMarkdown === undefined
+          ) {
+            facts.mentionActorIds = [...prepared.currentMentionActorIds];
+          }
+
+          await this.#enforceUpdateRates(
+            mutationTransaction,
+            input.principal.actorId,
+            prepared.contentId,
+            input.now,
+          );
+          const persisted = await this.#persistContentUpdate(mutationTransaction, {
+            actorId: input.principal.actorId,
+            command: input.command,
+            facts,
+            now: input.now,
+            prepared,
+          });
+          await this.#writeOwnerWebActionLog(mutationTransaction, {
+            after: {
+              changed_groups: prepared.changedGroups,
+              content_id: persisted.contentId,
+              idempotency_record_id: idempotencyId,
+              resource_version: persisted.result.resourceVersion,
+              revision_id: persisted.result.revisionId,
+              root_content_id: persisted.rootContentId,
+            },
+            auditDigests: input.auditDigests,
+            command: input.command,
+            decision: "allow",
+            decisionId: input.decisionId,
+            errorCode: null,
+            now: input.now,
+            outcome: "succeeded",
+            outboxId: persisted.outboxId,
+            principal: input.principal,
+            reasonCode:
+              input.principal.approvalMethod === "human_direct"
+                ? "human_direct"
+                : input.principal.evaluation.ownerPolicyDecision === "require_approval"
+                  ? "owner_direct_approval_satisfied"
+                  : "allowed_by_policy",
+            targetId: persisted.contentId,
+            targetType: "content",
+          });
+          const outcome: UpdateContentResearchWriteOutcome = {
+            decision: "allow",
+            error: null,
+            operation: "update_content",
+            pendingAction: null,
+            replayed: false,
+            result: persisted.result,
+            status: "succeeded",
+          };
+          await this.#finalizeIdempotency(
+            mutationTransaction,
+            idempotencyId,
+            "succeeded",
+            200,
+            outcome,
+            persisted.contentId,
+          );
+          return outcome;
+        },
+      );
+    } catch (error) {
+      if (!(error instanceof ResearchWriteError)) throw error;
+      if (error.code === "RATE_LIMITED") {
+        const outcome = rateLimitedOutcome("update_content", error);
+        if (outcome.operation !== "update_content") {
+          throw new Error("Owner Web update rate limit returned the wrong operation.");
+        }
+        const deleted = await transaction<{ id: string }[]>`
+          delete from platform.idempotency_records
+          where id = ${idempotencyId}
+            and status = 'in_progress'
+          returning id
+        `;
+        if (deleted.length !== 1) {
+          throw new Error(
+            "The Owner Web content-update denial could not release its idempotency reservation.",
+          );
+        }
+        await this.#writeOwnerWebActionLog(transaction, {
+          after: {
+            content_id: input.command.contentId,
+            error_code: error.code,
+            expected_version: input.command.expectedVersion,
+            retry_after_ms: error.retryAfterMs,
+          },
+          auditDigests: input.auditDigests,
+          command: input.command,
+          decision: "deny",
+          decisionId: input.decisionId,
+          errorCode: error.code,
+          now: input.now,
+          outcome: "denied",
+          outboxId: null,
+          principal: input.principal,
+          reasonCode: "rate_limited",
+          targetId: input.command.contentId,
+          targetType: "content",
+        });
+        return outcome;
+      }
+      const outcome = isPlatformRuleDenial(error)
+        ? platformRuleDeniedOutcome("update_content", error)
+        : expectedErrorOutcome("update_content", input.principal.evaluation, error);
+      if (
+        outcome.operation !== "update_content" ||
+        outcome.decision === "require_approval"
+      ) {
+        throw new Error("Owner Web update failure returned an invalid outcome.");
+      }
+      await this.#writeOwnerWebActionLog(transaction, {
+        after: {
+          content_id: input.command.contentId,
+          error_code: error.code,
+          expected_version: input.command.expectedVersion,
+          idempotency_record_id: idempotencyId,
+        },
+        auditDigests: input.auditDigests,
+        command: input.command,
+        decision: outcome.decision,
+        decisionId: input.decisionId,
+        errorCode: error.code,
+        now: input.now,
+        outcome: outcome.status === "denied" ? "denied" : "failed",
+        outboxId: null,
+        principal: input.principal,
+        reasonCode: error.code.toLocaleLowerCase("en-US"),
+        targetId: input.command.contentId,
+        targetType: "content",
+      });
+      await this.#finalizeIdempotency(
+        transaction,
+        idempotencyId,
+        outcome.status === "denied" ? "denied" : "failed",
+        error.statusCode,
+        outcome,
+        null,
+      );
+      return outcome;
+    }
+  }
+
+  async #writeOwnerWebContentDelete(
+    transaction: TransactionSql,
+    input: {
+      auditDigests: ResearchActionAuditDigests;
+      command: NormalizedDeleteContentCommand;
+      decisionId: string;
+      digestBytes: Buffer;
+      idempotencyKey: string;
+      now: Date;
+      principal: OwnerWebWritePrincipal;
+    },
+  ): Promise<DeleteContentResearchWriteOutcome> {
+    if (input.command.mode !== "soft") {
+      throw new Error("Permanent content erasure must be rejected before mutation.");
+    }
+    const idempotencyId = this.#newId("idempotency_record_id");
+    await this.#insertIdempotency(transaction, {
+      actorId: input.principal.actorId,
+      agentId: input.principal.agentId,
+      credentialId: null,
+      digestBytes: input.digestBytes,
+      id: idempotencyId,
+      idempotencyKey: input.idempotencyKey,
+      operation: input.command.operation,
+      ownerId: input.principal.ownerId,
+      principalScopeKey: input.principal.principalScopeKey,
+    });
+
+    try {
+      return await transaction.savepoint(
+        "owner_web_content_delete_mutation",
+        async (mutationTransaction) => {
+          const prepared = await this.#loadContentDeleteTarget(
+            mutationTransaction,
+            input.command,
+            input.principal.actorId,
+          );
+          const persisted = await this.#persistContentDelete(mutationTransaction, {
+            actorId: input.principal.actorId,
+            now: input.now,
+            prepared,
+          });
+          await this.#writeOwnerWebActionLog(mutationTransaction, {
+            after: {
+              content_id: persisted.contentId,
+              idempotency_record_id: idempotencyId,
+              lifecycle_state: persisted.result.lifecycleState,
+              resource_version: persisted.result.resourceVersion,
+            },
+            auditDigests: input.auditDigests,
+            command: input.command,
+            decision: "allow",
+            decisionId: input.decisionId,
+            errorCode: null,
+            now: input.now,
+            outcome: "succeeded",
+            outboxId: persisted.outboxId,
+            principal: input.principal,
+            reasonCode:
+              input.principal.approvalMethod === "human_direct"
+                ? "human_direct"
+                : input.principal.evaluation.ownerPolicyDecision === "require_approval"
+                  ? "owner_direct_approval_satisfied"
+                  : "allowed_by_policy",
+            targetId: persisted.contentId,
+            targetType: "content",
+          });
+          const outcome: DeleteContentResearchWriteOutcome = {
+            decision: "allow",
+            error: null,
+            operation: "delete_content",
+            pendingAction: null,
+            replayed: false,
+            result: persisted.result,
+            status: "succeeded",
+          };
+          await this.#finalizeIdempotency(
+            mutationTransaction,
+            idempotencyId,
+            "succeeded",
+            200,
+            outcome,
+            persisted.contentId,
+          );
+          return outcome;
+        },
+      );
+    } catch (error) {
+      if (!(error instanceof ResearchWriteError)) throw error;
+      const outcome = isPlatformRuleDenial(error)
+        ? platformRuleDeniedOutcome("delete_content", error)
+        : expectedErrorOutcome("delete_content", input.principal.evaluation, error);
+      if (
+        outcome.operation !== "delete_content" ||
+        outcome.decision === "require_approval"
+      ) {
+        throw new Error("Owner Web delete failure returned an invalid outcome.");
+      }
+      await this.#writeOwnerWebActionLog(transaction, {
+        after: {
+          content_id: input.command.contentId,
+          error_code: error.code,
+          expected_version: input.command.expectedVersion,
+          idempotency_record_id: idempotencyId,
+        },
+        auditDigests: input.auditDigests,
+        command: input.command,
+        decision: outcome.decision,
+        decisionId: input.decisionId,
+        errorCode: error.code,
+        now: input.now,
+        outcome: outcome.status === "denied" ? "denied" : "failed",
+        outboxId: null,
+        principal: input.principal,
+        reasonCode: error.code.toLocaleLowerCase("en-US"),
+        targetId: input.command.contentId,
+        targetType: "content",
+      });
+      await this.#finalizeIdempotency(
+        transaction,
+        idempotencyId,
+        outcome.status === "denied" ? "denied" : "failed",
+        error.statusCode,
+        outcome,
+        null,
+      );
+      return outcome;
+    }
   }
 
   async createPost(
@@ -6620,7 +7080,7 @@ export class PostgresResearchWriteService
     transaction: TransactionSql,
     input: {
       auditDigests: ResearchActionAuditDigests;
-      command: NewResearchCommand;
+      command: NormalizedResearchCommand;
       decisionId: string;
       digestBytes: Buffer;
       error: ResearchWriteError;
@@ -6680,12 +7140,12 @@ export class PostgresResearchWriteService
     event: {
       after: postgres.JSONValue;
       auditDigests: ResearchActionAuditDigests;
-      command: NewResearchCommand;
+      command: NormalizedResearchCommand;
       decision: "allow" | "deny";
       decisionId: string;
       errorCode: string | null;
       now: Date;
-      outcome: "succeeded" | "denied";
+      outcome: "succeeded" | "denied" | "failed";
       outboxId: string | null;
       principal: OwnerWebWritePrincipal;
       reasonCode: string;

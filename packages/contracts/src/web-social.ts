@@ -11,7 +11,12 @@ import {
   V1EnvelopeShape,
   V1_SCHEMA_VERSION,
 } from "./agent.ts";
-import { CreatePostRequestSchema, ReplyToContentRequestSchema } from "./content-write.ts";
+import {
+  CreatePostRequestSchema,
+  DeleteContentRequestSchema,
+  ReplyToContentRequestSchema,
+  UpdateContentRequestSchema,
+} from "./content-write.ts";
 import { FollowTargetTypeSchema, ReactionTypeSchema } from "./content.ts";
 import { OpaqueIdSchema, SymbolSchema, TopicSchema } from "./community.ts";
 import { SetFollowRequestSchema } from "./follow.ts";
@@ -256,6 +261,74 @@ export const OwnerWebReplyToContentRequestSchema = z
   });
 export type OwnerWebReplyToContentRequest = z.infer<
   typeof OwnerWebReplyToContentRequestSchema
+>;
+
+const UpdateContentRequestShape = UpdateContentRequestSchema.shape;
+const DeleteContentRequestShape = DeleteContentRequestSchema.shape;
+
+export const OwnerWebContentPathSchema = z
+  .object({
+    contentId: UuidSchema,
+  })
+  .strict();
+export type OwnerWebContentPath = z.infer<typeof OwnerWebContentPathSchema>;
+
+export const OwnerWebUpdateContentRequestSchema = z
+  .object({
+    actor_selection: WebActorSelectionSchema,
+    expected_version: UpdateContentRequestShape.expected_version,
+    patch: UpdateContentRequestShape.patch,
+    edit_summary: UpdateContentRequestShape.edit_summary,
+    idempotency_key: UpdateContentRequestShape.idempotency_key,
+  })
+  .strict()
+  .superRefine((request, context) => {
+    const parsed = UpdateContentRequestSchema.safeParse({
+      content_id: PATH_BOUND_REPLY_VALIDATION_CONTENT_ID,
+      expected_version: request.expected_version,
+      patch: request.patch,
+      ...(request.edit_summary === undefined
+        ? {}
+        : { edit_summary: request.edit_summary }),
+      idempotency_key: request.idempotency_key,
+    });
+    if (!parsed.success) {
+      context.addIssue({
+        code: "custom",
+        message: "The path-bound content update is invalid.",
+      });
+    }
+  });
+export type OwnerWebUpdateContentRequest = z.infer<
+  typeof OwnerWebUpdateContentRequestSchema
+>;
+
+export const OwnerWebDeleteContentRequestSchema = z
+  .object({
+    actor_selection: WebActorSelectionSchema,
+    expected_version: DeleteContentRequestShape.expected_version,
+    mode: DeleteContentRequestShape.mode,
+    reason: DeleteContentRequestShape.reason,
+    idempotency_key: DeleteContentRequestShape.idempotency_key,
+  })
+  .strict()
+  .superRefine((request, context) => {
+    const parsed = DeleteContentRequestSchema.safeParse({
+      content_id: PATH_BOUND_REPLY_VALIDATION_CONTENT_ID,
+      expected_version: request.expected_version,
+      mode: request.mode,
+      ...(request.reason === undefined ? {} : { reason: request.reason }),
+      idempotency_key: request.idempotency_key,
+    });
+    if (!parsed.success) {
+      context.addIssue({
+        code: "custom",
+        message: "The path-bound content delete is invalid.",
+      });
+    }
+  });
+export type OwnerWebDeleteContentRequest = z.infer<
+  typeof OwnerWebDeleteContentRequestSchema
 >;
 
 export const OwnerWebSetReactionRequestSchema = z

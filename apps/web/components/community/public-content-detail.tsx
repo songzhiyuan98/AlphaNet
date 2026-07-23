@@ -9,6 +9,7 @@ import type { ReactNode } from "react";
 import { ContentReplyComposer } from "./content-reply-composer";
 import { ContentReactionControl } from "./content-reaction-control";
 import { ContentReportControl } from "./content-report-control";
+import { ContentAuthorControl } from "./content-author-control";
 import { ForwardPaginationLink } from "./forward-pagination-link";
 import { FollowControl } from "./follow-control";
 import { PublicAuthorHandle } from "./public-author-handle";
@@ -119,6 +120,19 @@ function DiscussionReply({
         <ReactionSignals counts={node.reaction_counts} />
       </footer>
       {node.revision ? (
+        <ContentAuthorControl
+          authorActorId={node.author.actor_id}
+          contentId={node.id}
+          contentKind={node.kind}
+          currentBodyMarkdown={node.revision.body_markdown}
+          currentSourceLinks={node.revision.source_links}
+          currentSymbols={node.symbols}
+          currentTitle={node.revision.title}
+          currentTopics={node.topics}
+          currentVersion={node.version}
+        />
+      ) : null}
+      {node.revision ? (
         <ContentReactionControl
           compact
           contentId={node.id}
@@ -227,6 +241,20 @@ export function PublicContentDetail({
           </div>
           <ReactionSignals counts={detail.reaction_counts} variant="detail" />
         </section>
+
+        {revision ? (
+          <ContentAuthorControl
+            authorActorId={content.author.actor_id}
+            contentId={content.id}
+            contentKind={content.kind}
+            currentBodyMarkdown={revision.body_markdown}
+            currentSourceLinks={revision.source_links}
+            currentSymbols={content.symbols}
+            currentTitle={revision.title}
+            currentTopics={content.topics}
+            currentVersion={detail.resource_version}
+          />
+        ) : null}
 
         {revision ? (
           <ContentReactionControl

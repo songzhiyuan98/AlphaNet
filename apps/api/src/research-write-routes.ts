@@ -215,7 +215,7 @@ export function serializeReply(
   return parsed.success ? parsed.data : null;
 }
 
-function serializeUpdateContent(
+export function serializeUpdateContent(
   request: FastifyRequest,
   outcome: ResearchWriteOutcome,
   expectedContentId: string,
@@ -255,7 +255,7 @@ function serializeUpdateContent(
   return parsed.success ? parsed.data : null;
 }
 
-function serializeDeleteContent(
+export function serializeDeleteContent(
   request: FastifyRequest,
   outcome: ResearchWriteOutcome,
   expectedContentId: string,

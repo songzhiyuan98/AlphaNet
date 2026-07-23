@@ -83,6 +83,12 @@ describeOwnerWebSocialWrite("Owner Web social research writes", () => {
     agentConnectionOptions,
   );
   const researchService = new PostgresResearchWriteService(postgres.sql, {
+    agentContentRateLimits: {
+      establishedPostsPerHour: 100,
+      establishedRepliesPerHour: 100,
+      newAgentPostsPerHour: 100,
+      newAgentRepliesPerHour: 100,
+    },
     pendingActionKeyRing: {
       currentVersion: 1,
       keys: { 1: randomBytes(32) },
@@ -519,6 +525,280 @@ describeOwnerWebSocialWrite("Owner Web social research writes", () => {
         policy_version: null,
         principal_scope_key: `human_web:${owner.ownerId}:${humanActorId}`,
         root_id: rootId,
+      },
+    ]);
+  });
+
+  it("updates Human-authored content immediately and replays the same revision result", async () => {
+    const idempotencyKey = `owner-web-human-update-${randomUUID()}`;
+    const requestId = randomUUID();
+    const input = {
+      contentId: humanContentId,
+      editSummary: "Added the independent-verification requirement.",
+      expectedVersion: 1,
+      idempotencyKey,
+      patch: {
+        bodyMarkdown:
+          "Revised Human-authored target with an explicit independent-verification requirement.",
+      },
+    };
+    const selection = {
+      actorId: humanActorId,
+      kind: "human_direct" as const,
+    };
+
+    const first = await researchService.updateContentAsOwnerWeb(
+      mutationContext(requestId),
+      selection,
+      input,
+    );
+    const replay = await researchService.updateContentAsOwnerWeb(
+      mutationContext(),
+      selection,
+      input,
+    );
+
+    expect(first).toMatchObject({
+      decision: "allow",
+      error: null,
+      pendingAction: null,
+      replayed: false,
+      result: {
+        contentId: humanContentId,
+        resourceVersion: 2,
+        revisionId: expect.any(String),
+      },
+      status: "succeeded",
+    });
+    expect(replay).toMatchObject({
+      decision: "allow",
+      error: null,
+      pendingAction: null,
+      replayed: true,
+      result: first.result,
+      status: "succeeded",
+    });
+
+    const rows = await postgres.sql<
+      {
+        action_count: number;
+        actor_kind: string;
+        agent_id: string | null;
+        approval_method: string | null;
+        approved_by_owner_id: string | null;
+        body_markdown: string;
+        credential_id: string | null;
+        idempotency_status: string;
+        policy_version: string | null;
+        principal_scope_key: string;
+        revision_count: number;
+        version: number;
+      }[]
+    >`
+      select
+        content.version::integer as version,
+        revision.body_markdown,
+        audit.actor_kind,
+        audit.agent_id::text as agent_id,
+        audit.credential_id::text as credential_id,
+        audit.approval_method,
+        audit.approved_by_owner_id::text as approved_by_owner_id,
+        audit.policy_version,
+        idempotency.status as idempotency_status,
+        idempotency.principal_scope_key,
+        (
+          select count(*)::integer
+          from platform.content_revisions as counted
+          where counted.content_id = content.id
+        ) as revision_count,
+        (
+          select count(*)::integer
+          from platform.action_logs as counted
+          where counted.request_id = ${requestId}
+            and counted.action = 'content.update_content'
+        ) as action_count
+      from platform.content_items as content
+      join platform.content_revisions as revision
+        on revision.id = content.current_revision_id
+      join platform.action_logs as audit
+        on audit.request_id = ${requestId}
+       and audit.action = 'content.update_content'
+      join platform.idempotency_records as idempotency
+        on idempotency.operation = 'update_content'
+       and idempotency.idempotency_key = ${idempotencyKey}
+       and idempotency.actor_id = content.author_actor_id
+      where content.id = ${humanContentId}
+    `;
+    expect(rows).toEqual([
+      {
+        action_count: 1,
+        actor_kind: "human",
+        agent_id: null,
+        approval_method: "human_direct",
+        approved_by_owner_id: owner.ownerId,
+        body_markdown:
+          "Revised Human-authored target with an explicit independent-verification requirement.",
+        credential_id: null,
+        idempotency_status: "succeeded",
+        policy_version: null,
+        principal_scope_key: `human_web:${owner.ownerId}:${humanActorId}`,
+        revision_count: 2,
+        version: 2,
+      },
+    ]);
+  });
+
+  it("soft-deletes Agent-authored content with the Owner click satisfying approval", async () => {
+    const created = await researchService.createPostAsOwnerWeb(
+      mutationContext(),
+      { agentId: assistedAgent.agentId, kind: "owner_direct" },
+      {
+        bodyMarkdown: "Temporary Agent research that its author will retract.",
+        idempotencyKey: `owner-web-delete-target-${randomUUID()}`,
+        primaryCommunityId: communityId,
+        title: "Owner Web delete target",
+      },
+    );
+    const contentId = required(created.result?.contentId, "Owner Web delete target");
+    const idempotencyKey = `owner-web-agent-delete-${randomUUID()}`;
+    const requestId = randomUUID();
+    const input = {
+      contentId,
+      expectedVersion: 1,
+      idempotencyKey,
+      mode: "soft" as const,
+      reason: "The author retracted the research after finding stale source data.",
+    };
+    const selection = {
+      agentId: assistedAgent.agentId,
+      kind: "owner_direct" as const,
+    };
+
+    const first = await researchService.deleteContentAsOwnerWeb(
+      mutationContext(requestId),
+      selection,
+      input,
+    );
+    const replay = await researchService.deleteContentAsOwnerWeb(
+      mutationContext(),
+      selection,
+      input,
+    );
+
+    expect(first).toMatchObject({
+      decision: "allow",
+      error: null,
+      pendingAction: null,
+      replayed: false,
+      result: {
+        contentId,
+        lifecycleState: "deleted",
+        resourceVersion: 2,
+      },
+      status: "succeeded",
+    });
+    expect(replay).toMatchObject({
+      decision: "allow",
+      error: null,
+      pendingAction: null,
+      replayed: true,
+      result: first.result,
+      status: "succeeded",
+    });
+
+    const rows = await postgres.sql<
+      {
+        action_count: number;
+        approval_method: string | null;
+        credential_id: string | null;
+        decision: string | null;
+        lifecycle_state: string;
+        outcome: string;
+        owner_policy_decision: string | null;
+        version: number;
+      }[]
+    >`
+      select
+        content.lifecycle_state,
+        content.version::integer as version,
+        audit.credential_id::text as credential_id,
+        audit.approval_method,
+        audit.decision,
+        audit.outcome,
+        audit.authorization_snapshot ->> 'owner_policy_decision'
+          as owner_policy_decision,
+        (
+          select count(*)::integer
+          from platform.action_logs as counted
+          where counted.request_id = ${requestId}
+            and counted.action = 'content.delete_content'
+        ) as action_count
+      from platform.content_items as content
+      join platform.action_logs as audit
+        on audit.request_id = ${requestId}
+       and audit.action = 'content.delete_content'
+      where content.id = ${contentId}
+    `;
+    expect(rows).toEqual([
+      {
+        action_count: 1,
+        approval_method: "owner_direct",
+        credential_id: null,
+        decision: "allow",
+        lifecycle_state: "deleted",
+        outcome: "succeeded",
+        owner_policy_decision: "require_approval",
+        version: 2,
+      },
+    ]);
+  });
+
+  it("rejects a content edit when the selected identity is not the author", async () => {
+    const created = await researchService.createPostAsOwnerWeb(
+      mutationContext(),
+      { agentId: assistedAgent.agentId, kind: "owner_direct" },
+      {
+        bodyMarkdown: "Agent-owned content must remain bound to its public author.",
+        idempotencyKey: `owner-web-author-target-${randomUUID()}`,
+        primaryCommunityId: communityId,
+        title: "Author boundary target",
+      },
+    );
+    const contentId = required(created.result?.contentId, "author boundary target");
+
+    const outcome = await researchService.updateContentAsOwnerWeb(
+      mutationContext(),
+      { actorId: humanActorId, kind: "human_direct" },
+      {
+        contentId,
+        expectedVersion: 1,
+        idempotencyKey: `owner-web-foreign-author-${randomUUID()}`,
+        patch: { bodyMarkdown: "A Human identity must not overwrite Agent content." },
+      },
+    );
+
+    expect(outcome).toMatchObject({
+      decision: "allow",
+      error: { code: "NOT_CONTENT_AUTHOR" },
+      operation: "update_content",
+      pendingAction: null,
+      replayed: false,
+      result: null,
+      status: "failed",
+    });
+    const rows = await postgres.sql<{ body_markdown: string; version: number }[]>`
+      select
+        content.version::integer as version,
+        revision.body_markdown
+      from platform.content_items as content
+      join platform.content_revisions as revision
+        on revision.id = content.current_revision_id
+      where content.id = ${contentId}
+    `;
+    expect(rows).toEqual([
+      {
+        body_markdown: "Agent-owned content must remain bound to its public author.",
+        version: 1,
       },
     ]);
   });
