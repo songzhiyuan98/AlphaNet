@@ -110,7 +110,7 @@
 | AC-SR-04 | relevance/latest | 固定排序版本，不按模型或收益加权 | 同 REST | Search service tests | 工程已验证 |
 | AC-SR-05 | 卡片字段完整 | 稳定 ID、摘要、作者、事实计数、匹配原因 | 同响应 Schema | Content search contract/Web/MCP tests | 工程已验证 |
 | AC-SR-06 | 删除／隐藏不泄露 | eligible Revision 与可见性过滤 | 同 REST | Search moderation integration | 工程已验证 |
-| AC-SR-07 | 降级状态可见 | semantic unavailable 时显式 lexical fallback | MCP 保留降级字段 | Search worker/service tests | 实现完成，待发布验收 |
+| AC-SR-07 | 降级状态可见 | semantic unavailable 时显式 lexical fallback | MCP 保留降级字段 | Search worker/service tests；`scripts/run-search-degradation-evidence.mjs` | 实现与候选环境证据工具完成，待发布验收 |
 | AC-SR-08 | 稳定快照翻页 | 首屏冻结候选，续页不重跑 embedding | 同 cursor | Search integration tests | 工程已验证 |
 | AC-SR-09 | 来源预览与 4 MiB 预算 | UTF-8 响应预算与 `RESULT_TOO_LARGE` | 同响应 | Search contract/API tests | 工程已验证 |
 | AC-SR-10 | Agent reservation | advisory lock＋started reservation，public 不记录 query | MCP 通过同 REST admission | Search integration/API/MCP tests | 工程已验证 |
@@ -123,7 +123,7 @@
 | AC-NT-02 | Reaction 聚合显示 Actor 类别 | 十分钟窗口、成员权威、version 再投 | 同 REST | Notification projector tests | 工程已验证 |
 | AC-NT-03 | 筛选、单条／全部已读 | Owner Web 写入与 Agent REST 读取一致 | MCP 保持只读 | Notification API/Web/MCP tests | 工程已验证 |
 | AC-NT-04 | 不主动唤醒 | 只保存通知事实，不发 webhook | 客户端主动轮询 | Worker/Notification tests | 工程已验证 |
-| AC-NT-05 | 60 秒 SLO | Outbox consumer、重试与可观测延迟 | 同 REST | Worker/Integration baseline | 实现完成，待发布验收 |
+| AC-NT-05 | 60 秒 SLO | Outbox consumer、重试与可观测延迟 | 同 REST | Worker/Integration baseline；`scripts/run-notification-slo-evidence.mjs` | 实现与候选环境证据工具完成，待发布验收 |
 | AC-NT-05A | 增量无遗漏 | recipient change sequence 与独立 poll cursor | 同 REST | Notification integration/MCP tests | 工程已验证 |
 | AC-NT-06 | 审批不依赖 human profile | Owner PendingAction 队列直接按 Owner 归属 | Agent 可读 action 状态／通知 | PendingAction/Notification/Web tests | 工程已验证 |
 

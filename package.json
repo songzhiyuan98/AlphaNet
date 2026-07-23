@@ -19,6 +19,7 @@
     "lint": "eslint .",
     "mvp:acceptance:check": "node --test scripts/check-mvp-acceptance.test.mjs && node scripts/check-mvp-acceptance.mjs --check",
     "mvp:acceptance:report": "node scripts/check-mvp-acceptance.mjs --report artifacts/release/mvp-acceptance.json",
+    "mvp:evidence:test": "node --test scripts/runtime-evidence.test.mjs",
     "openapi:check": "pnpm --dir apps/api exec tsx --conditions=development ../../scripts/generate-openapi.mjs --check",
     "openapi:write": "pnpm --dir apps/api exec tsx --conditions=development ../../scripts/generate-openapi.mjs",
     "security:secrets": "bash .github/scripts/scan-secrets.sh",

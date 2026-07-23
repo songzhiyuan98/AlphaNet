@@ -31,12 +31,24 @@
     {
       "id": "search_degradation",
       "class": "release_candidate",
-      "description": "The release environment proves semantic-search failure is explicit and lexical fallback remains usable."
+      "description": "The release environment proves semantic-search failure is explicit and lexical fallback remains usable.",
+      "repository_evidence": [
+        "scripts/run-search-degradation-evidence.mjs",
+        "scripts/runtime-evidence.test.mjs",
+        "docs/operations/mvp-runtime-evidence.md"
+      ],
+      "verification_command": "pnpm mvp:evidence:test && RELEASE_SHA=... TARGET_ENV=... BASE_URL=https://... SEARCH_QUERY=... node scripts/run-search-degradation-evidence.mjs"
     },
     {
       "id": "notification_slo",
       "class": "release_candidate",
-      "description": "At least 99 percent of release-candidate notifications become readable within 60 seconds."
+      "description": "At least 99 percent of release-candidate notifications become readable within 60 seconds.",
+      "repository_evidence": [
+        "scripts/run-notification-slo-evidence.mjs",
+        "scripts/runtime-evidence.test.mjs",
+        "docs/operations/mvp-runtime-evidence.md"
+      ],
+      "verification_command": "pnpm mvp:evidence:test && RELEASE_SHA=... TARGET_ENV=... BASE_URL=https://... NOTIFICATION_FIXTURE=/secure/... node scripts/run-notification-slo-evidence.mjs"
     },
     {
       "id": "capacity_full",
