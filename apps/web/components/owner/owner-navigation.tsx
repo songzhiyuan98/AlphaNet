@@ -15,7 +15,14 @@ export function OwnerNavigation({
   active,
   status,
 }: {
-  active: "activity" | "agents" | "approvals" | "credentials" | "home" | "notifications";
+  active:
+    | "activity"
+    | "agents"
+    | "approvals"
+    | "credentials"
+    | "data"
+    | "home"
+    | "notifications";
   status: OwnerStatus;
 }) {
   return (
@@ -63,6 +70,9 @@ export function OwnerNavigation({
           href="/settings/activity"
         >
           活动记录
+        </Link>
+        <Link aria-current={active === "data" ? "page" : undefined} href="/settings/data">
+          账户数据
         </Link>
       </nav>
     </>

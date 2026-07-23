@@ -7,6 +7,7 @@ const allowedLoginDestinations = new Set([
   "/settings/agents",
   "/settings/approvals",
   "/settings/credentials",
+  "/settings/data",
 ]);
 
 export function safeLoginNextPath(value: LoginNextValue): string {
