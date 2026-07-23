@@ -154,6 +154,11 @@ export function ModerationDecisionForm({
   const [pending, setPending] = useState(false);
   const [permissionDenied, setPermissionDenied] = useState(false);
   const [retrySeconds, setRetrySeconds] = useState(0);
+  const [hydrated, setHydrated] = useState(false);
+
+  useEffect(() => {
+    setHydrated(true);
+  }, []);
 
   useEffect(() => {
     if (retrySeconds <= 0) return;
@@ -164,7 +169,7 @@ export function ModerationDecisionForm({
   }, [retrySeconds]);
 
   const actionable =
-    canDecide && !permissionDenied && actions.length > 0 && success === null;
+    hydrated && canDecide && !permissionDenied && actions.length > 0 && success === null;
   const disabled = !actionable || pending || retrySeconds > 0;
 
   async function submitDecision(event: React.FormEvent<HTMLFormElement>) {

@@ -392,7 +392,7 @@ describe("moderation decision taxonomy", () => {
 });
 
 describe("ModerationDecisionForm", () => {
-  it("keeps the server-issued attempt UUID stable through browser hydration", () => {
+  it("keeps the attempt UUID stable and gates decisions through hydration", async () => {
     const initialAttemptId = "b0000000-0000-4000-8000-000000000000";
     const element = (
       <ModerationDecisionForm
@@ -408,6 +408,9 @@ describe("ModerationDecisionForm", () => {
     const container = document.createElement("div");
     container.innerHTML = renderToString(element);
     document.body.append(container);
+    expect(
+      container.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled,
+    ).toBe(true);
     const recoverableError = vi.fn();
     let root: Root | undefined;
 
@@ -419,6 +422,11 @@ describe("ModerationDecisionForm", () => {
 
     expect(recoverableError).not.toHaveBeenCalled();
     expect(container.textContent).toContain(initialAttemptId);
+    await waitFor(() => {
+      expect(
+        container.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled,
+      ).toBe(false);
+    });
     act(() => root?.unmount());
     container.remove();
   });
