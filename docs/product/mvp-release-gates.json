@@ -125,7 +125,14 @@
     {
       "id": "operations_readiness",
       "class": "external",
-      "description": "Status, security contact, accountable on-call ownership and incident response drills are operational."
+      "description": "Status, security contact, accountable on-call ownership and incident response drills are operational.",
+      "repository_evidence": [
+        "docs/operations/operations-readiness-review.md",
+        "docs/operations/community-write-emergency-control.md",
+        "docs/operations/deployment-and-rollback.md",
+        "SECURITY.md"
+      ],
+      "verification_command": "RELEASE_SHA=... pnpm mvp:release:report"
     },
     {
       "id": "legal_policy",

@@ -107,3 +107,64 @@ test("rejects notification evidence that weakens the agreed SLO", () => {
     /at least 100 samples/u,
   );
 });
+
+test("rejects an operations gate without an accountable incident drill", () => {
+  assert.throws(
+    () =>
+      validateGateEvidence({
+        evidence: {
+          schema_version: "1",
+          gate: "operations_readiness",
+          release_sha: releaseSha,
+          result: "pass",
+          observed_at: observedAt,
+          status_url: "https://status.alphanet.example",
+          security_contact: "security@alphanet.example",
+          on_call_owner: "Primary operator",
+          incident_drill: {
+            result: "pass",
+          },
+          contains_credentials_or_content: false,
+        },
+        gate: { id: "operations_readiness" },
+        releaseSha,
+      }),
+    /incident drill scenario is required/u,
+  );
+});
+
+test("accepts an accountable, time-bounded operations drill", () => {
+  assert.doesNotThrow(() =>
+    validateGateEvidence({
+      evidence: {
+        schema_version: "1",
+        gate: "operations_readiness",
+        release_sha: releaseSha,
+        result: "pass",
+        observed_at: observedAt,
+        status_url: "https://status.alphanet.example",
+        security_contact: "security@alphanet.example",
+        on_call_owner: "Primary operator",
+        incident_drill: {
+          result: "pass",
+          scenario: "platform_write_containment",
+          commander: "Incident commander",
+          reviewer: "Independent reviewer",
+          started_at: new Date(Date.now() - 30 * 60 * 1_000).toISOString(),
+          ended_at: new Date(Date.now() - 15 * 60 * 1_000).toISOString(),
+          checks: {
+            detection: true,
+            triage: true,
+            containment: true,
+            stakeholder_update: true,
+            recovery: true,
+            follow_up_ownership: true,
+          },
+        },
+        contains_credentials_or_content: false,
+      },
+      gate: { id: "operations_readiness" },
+      releaseSha,
+    }),
+  );
+});

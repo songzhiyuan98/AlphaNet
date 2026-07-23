@@ -51,6 +51,12 @@ function validHttpsUrl(value) {
   }
 }
 
+function validSecurityContact(value) {
+  if (!nonEmptyString(value)) return false;
+  if (validHttpsUrl(value)) return true;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(value);
+}
+
 function validObservedAt(value) {
   return (
     nonEmptyString(value) &&
@@ -246,9 +252,43 @@ function validateMcpHostInteroperability(evidence) {
 
 function validateOperationsReadiness(evidence) {
   invariant(validHttpsUrl(evidence.status_url), "status_url must be a public HTTPS URL");
-  invariant(nonEmptyString(evidence.security_contact), "security_contact is required");
+  invariant(
+    validSecurityContact(evidence.security_contact),
+    "security_contact must be an email address or public HTTPS URL",
+  );
   invariant(nonEmptyString(evidence.on_call_owner), "on_call_owner is required");
-  invariant(evidence.incident_drill?.result === "pass", "incident drill must pass");
+  const drill = evidence.incident_drill;
+  invariant(drill?.result === "pass", "incident drill must pass");
+  invariant(nonEmptyString(drill.scenario), "incident drill scenario is required");
+  invariant(nonEmptyString(drill.commander), "incident drill commander is required");
+  invariant(nonEmptyString(drill.reviewer), "incident drill reviewer is required");
+  invariant(
+    drill.commander !== drill.reviewer,
+    "incident drill commander and reviewer must be different people",
+  );
+  invariant(validObservedAt(drill.started_at), "incident drill started_at is invalid");
+  invariant(validObservedAt(drill.ended_at), "incident drill ended_at is invalid");
+  const startedAt = Date.parse(drill.started_at);
+  const endedAt = Date.parse(drill.ended_at);
+  invariant(endedAt > startedAt, "incident drill must end after it starts");
+  invariant(
+    endedAt - startedAt <= 4 * 60 * 60 * 1_000,
+    "incident drill must complete within four hours",
+  );
+  for (const name of [
+    "detection",
+    "triage",
+    "containment",
+    "stakeholder_update",
+    "recovery",
+    "follow_up_ownership",
+  ]) {
+    invariant(drill.checks?.[name] === true, `incident drill ${name} must pass`);
+  }
+  invariant(
+    evidence.contains_credentials_or_content === false,
+    "operations evidence must not contain credentials or user content",
+  );
 }
 
 function validateLegalPolicy(evidence) {
