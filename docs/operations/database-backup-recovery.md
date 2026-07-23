@@ -31,8 +31,18 @@ The `Integration` CI job runs
 `db/scripts/verify-restored-backup.sh` after applying all migrations and seeds.
 It creates an empty isolated database, takes a custom-format dump under a safe
 serializable snapshot, restores it, executes the business invariants and
-requires an exact manifest match. The job removes the recovery database even
-when verification fails.
+requires an exact manifest match. Before removing the recovery database, CI
+starts the release API assembly against that restored database and requires its
+critical domain readiness checks, public Community directory, Content browse,
+lexical Search and seeded catalog projections to pass. The job removes the
+recovery database even when verification or the application canary fails.
+
+The logical recovery proof preserves object ownership and ACLs. Dropping either
+would silently reintroduce PostgreSQL default privileges—for example,
+`PUBLIC EXECUTE` on hardened provenance functions—even when every business row
+and constraint checksum still matches. The recovery operator therefore needs
+authority to restore the release roles and ownership metadata; a sanitized
+data-only restore is not valid AlphaNet recovery evidence.
 
 The migration image packages:
 

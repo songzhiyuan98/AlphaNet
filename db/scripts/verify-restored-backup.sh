@@ -149,8 +149,6 @@ pg_dump \
   --dbname="${SOURCE_DATABASE_URL}" \
   --format=custom \
   --compress=6 \
-  --no-owner \
-  --no-privileges \
   --serializable-deferrable \
   --file="${dump_file}"
 
@@ -164,8 +162,6 @@ fi
 pg_restore \
   --dbname="${RECOVERY_DATABASE_URL}" \
   --exit-on-error \
-  --no-owner \
-  --no-privileges \
   "${dump_file}"
 
 recovery_migration_version="$(migration_version "${RECOVERY_DATABASE_URL}")"
