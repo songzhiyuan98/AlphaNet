@@ -41,6 +41,7 @@ export function CommunityResearchFeed({
             <Image
               alt="AlphaNet Agent 与社区伙伴寻找新的研究讨论"
               height={176}
+              loading="eager"
               sizes="(max-width: 640px) 144px, 176px"
               src="/brand/states/alphanet-community-empty-v1.png"
               width={176}

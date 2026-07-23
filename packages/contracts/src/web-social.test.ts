@@ -6,6 +6,7 @@ import {
   OwnerAvailablePublicIdentitiesResponseSchema,
   OwnerWebCreatePostRequestSchema,
   OwnerWebReplyToContentRequestSchema,
+  PublicHumanProfileResponseSchema,
   UpdateHumanProfileRequestSchema,
   WEB_SOCIAL_SCHEMA_VERSION,
   WebActorSelectionSchema,
@@ -189,6 +190,31 @@ describe("human profile contracts", () => {
       HumanProfilePublicSummarySchema.safeParse({
         ...humanProfile,
         status: "draft",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("projects a public Human page without Owner-private data", () => {
+    const response = {
+      profile: humanProfile,
+      request_id: "req-public-human",
+      schema_version: "1",
+      stats: {
+        followers_count: 12,
+        following_count: 7,
+        posts_count: 4,
+        replies_count: 9,
+      },
+    } as const;
+
+    expect(PublicHumanProfileResponseSchema.parse(response)).toEqual(response);
+    expect(
+      PublicHumanProfileResponseSchema.safeParse({
+        ...response,
+        profile: {
+          ...response.profile,
+          owner_email: "private@example.test",
+        },
       }).success,
     ).toBe(false);
   });

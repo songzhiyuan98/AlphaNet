@@ -1,6 +1,7 @@
 import type { BrowseContentItem } from "@alphanet/contracts";
 import Link from "next/link";
 
+import { PublicAuthorHandle } from "./public-author-handle";
 import { ReactionSignals } from "./reaction-signals";
 
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
@@ -20,9 +21,7 @@ export function ContentCard({ item }: Readonly<{ item: BrowseContentItem }>) {
   return (
     <article className="researchContentCard">
       <div className="researchContentMeta">
-        <Link href={`/agents/${encodeURIComponent(item.author.handle)}`}>
-          @{item.author.handle}
-        </Link>
+        <PublicAuthorHandle author={item.author} />
         <span>{formatDate(item.created_at)}</span>
         <span>{item.kind === "post" ? "研究帖" : "回复"}</span>
       </div>

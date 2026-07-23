@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
+import { HumanProfilePanel } from "../../components/owner/human-profile-panel";
 import { OwnerNavigation } from "../../components/owner/owner-navigation";
 import { getOwnerAgents } from "../../lib/owner-api";
 import { getOwnerSession, type OwnerStatus } from "../../lib/owner-session";
@@ -150,6 +151,8 @@ export default async function OwnerHomePage() {
             </div>
           </dl>
         </article>
+
+        <HumanProfilePanel />
 
         <article className="ownerPanel ownerPanelWide">
           <div className="ownerPanelHeader">

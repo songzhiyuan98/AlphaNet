@@ -96,6 +96,19 @@ export type OwnerPublicIdentityView =
 
 export type HumanProfileView = OwnerHumanPublicIdentityView;
 
+export interface PublicHumanProfile {
+  actorId: string;
+  bio: string | null;
+  createdAt: Date;
+  displayName: string;
+  followersCount: number;
+  followingCount: number;
+  handle: string;
+  postsCount: number;
+  repliesCount: number;
+  updatedAt: Date;
+}
+
 export interface EnableHumanProfileInput {
   bio?: string | null | undefined;
   displayName: string;
@@ -114,6 +127,7 @@ export interface HumanProfileMutationResult {
 
 export interface OwnerSocialIdentityService {
   checkReady(): Promise<void>;
+  getPublicHumanProfileByHandle(handle: string): Promise<PublicHumanProfile | null>;
   enableHumanProfile(
     context: OwnerWebMutationContext,
     input: EnableHumanProfileInput,
@@ -326,6 +340,111 @@ export class PostgresOwnerSocialIdentityService implements OwnerSocialIdentitySe
     this.#sql = sql;
     this.#contextVerifier = options.contextVerifier;
     this.#idFactory = options.idFactory ?? randomUUID;
+  }
+
+  async getPublicHumanProfileByHandle(
+    handle: string,
+  ): Promise<PublicHumanProfile | null> {
+    if (
+      typeof handle !== "string" ||
+      handle.length < 3 ||
+      handle.length > 32 ||
+      !HANDLE_PATTERN.test(handle)
+    ) {
+      return null;
+    }
+    const rows = await this.#sql<
+      {
+        actor_id: string;
+        bio: string | null;
+        created_at: Date;
+        display_name: string;
+        followers_count: number;
+        following_count: number;
+        handle: string;
+        posts_count: number;
+        replies_count: number;
+        updated_at: Date;
+      }[]
+    >`
+      select
+        actor.id::text as actor_id,
+        actor.handle::text as handle,
+        actor.display_name,
+        actor.bio,
+        actor.created_at,
+        actor.updated_at,
+        (
+          select count(*)::integer
+          from platform.content_items as content
+          join platform.content_items as root on root.id = content.root_id
+          join platform.communities as community
+            on community.id = root.primary_community_id
+          where content.author_actor_id = actor.id
+            and content.kind = 'post'
+            and content.lifecycle_state = 'published'
+            and content.distribution_state <> 'hidden'
+            and root.lifecycle_state = 'published'
+            and root.distribution_state <> 'hidden'
+            and community.deleted_at is null
+            and community.status <> 'suspended'
+        ) as posts_count,
+        (
+          select count(*)::integer
+          from platform.content_items as content
+          join platform.content_items as root on root.id = content.root_id
+          join platform.communities as community
+            on community.id = root.primary_community_id
+          where content.author_actor_id = actor.id
+            and content.kind = 'reply'
+            and content.lifecycle_state = 'published'
+            and content.distribution_state <> 'hidden'
+            and root.lifecycle_state = 'published'
+            and root.distribution_state <> 'hidden'
+            and community.deleted_at is null
+            and community.status <> 'suspended'
+        ) as replies_count,
+        (
+          select count(*)::integer
+          from platform.follows as follow
+          join platform.actors as follower on follower.id = follow.follower_actor_id
+          where follow.target_actor_id = actor.id
+            and follower.status = 'active'
+            and follower.deleted_at is null
+        ) as followers_count,
+        (
+          select count(*)::integer
+          from platform.follows as follow
+          where follow.follower_actor_id = actor.id
+        ) as following_count
+      from platform.actors as actor
+      join platform.owners as owner on owner.id = actor.owner_id
+      where actor.handle = ${handle}
+        and actor.kind = 'human'
+        and actor.status = 'active'
+        and actor.deleted_at is null
+        and owner.status = 'active'
+        and owner.email_verified_at is not null
+        and owner.deleted_at is null
+      limit 1
+    `;
+    const row = rows[0];
+    if (!row) return null;
+    if (!isValidDate(row.created_at) || !isValidDate(row.updated_at)) {
+      throw new Error("The persisted public human profile is invalid.");
+    }
+    return {
+      actorId: row.actor_id,
+      bio: row.bio,
+      createdAt: row.created_at,
+      displayName: row.display_name,
+      followersCount: row.followers_count,
+      followingCount: row.following_count,
+      handle: row.handle,
+      postsCount: row.posts_count,
+      repliesCount: row.replies_count,
+      updatedAt: row.updated_at,
+    };
   }
 
   async checkReady(): Promise<void> {

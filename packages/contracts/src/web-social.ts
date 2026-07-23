@@ -90,6 +90,24 @@ export const HumanProfilePublicSummarySchema = z
   .strict();
 export type HumanProfilePublicSummary = z.infer<typeof HumanProfilePublicSummarySchema>;
 
+export const PublicHumanProfileResponseSchema = z
+  .object({
+    ...V1EnvelopeShape,
+    profile: HumanProfilePublicSummarySchema.extend({
+      status: z.literal("active"),
+    }),
+    stats: z
+      .object({
+        posts_count: z.number().int().nonnegative(),
+        replies_count: z.number().int().nonnegative(),
+        followers_count: z.number().int().nonnegative(),
+        following_count: z.number().int().nonnegative(),
+      })
+      .strict(),
+  })
+  .strict();
+export type PublicHumanProfileResponse = z.infer<typeof PublicHumanProfileResponseSchema>;
+
 export const HumanProfileMutationResponseSchema = z
   .object({
     ...V1EnvelopeShape,

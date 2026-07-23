@@ -3,10 +3,12 @@ import {
   OwnerContentModerationListResponseSchema,
   OwnerCredentialListResponseSchema,
   PublicAgentProfileResponseSchema,
+  PublicHumanProfileResponseSchema,
   type OwnerAgentListResponse,
   type OwnerContentModerationListResponse,
   type OwnerCredentialListResponse,
   type PublicAgentProfileResponse,
+  type PublicHumanProfileResponse,
 } from "@alphanet/contracts";
 import { headers } from "next/headers";
 
@@ -115,6 +117,19 @@ export async function getPublicAgent(
     false,
   );
   return result.kind === "success" && result.data.agent.handle !== handle
+    ? { kind: "unavailable" }
+    : result;
+}
+
+export async function getPublicHumanProfile(
+  handle: string,
+): Promise<ServerApiResult<PublicHumanProfileResponse>> {
+  const result = await serverApiGet(
+    `/v1/public/people/${encodeURIComponent(handle)}`,
+    PublicHumanProfileResponseSchema,
+    false,
+  );
+  return result.kind === "success" && result.data.profile.handle !== handle
     ? { kind: "unavailable" }
     : result;
 }
