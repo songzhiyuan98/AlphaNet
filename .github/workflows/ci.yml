@@ -140,6 +140,9 @@ jobs:
       - name: Check generated OpenAPI contract
         run: pnpm openapi:check
 
+      - name: Check executable MVP acceptance inventory
+        run: pnpm mvp:acceptance:check
+
       - name: Lint
         env:
           NODE_OPTIONS: --max-old-space-size=4096

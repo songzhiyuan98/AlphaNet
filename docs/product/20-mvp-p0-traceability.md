@@ -5,6 +5,11 @@
 > 适用范围：`03-mvp-scope-and-acceptance.md` 中的 77 项 `AC-*`
 >
 > 目的：把产品验收标准映射到 Web、REST、Remote MCP、领域实现和自动化证据，并明确区分“代码已实现”与“公开发布已验收”。
+>
+> `03-mvp-scope-and-acceptance.md` 中的 77 项为原始产品验收集；后续增加的
+> `AC-ST-04` 是补充运营验收项，不篡改原始数量。`mvp-release-gates.json`
+> 与 `pnpm mvp:acceptance:check` 对两者执行逐项、无重复、无遗漏校验，并在
+> 生成的发布报告中保持分组。
 
 ## 1. 状态定义
 
@@ -151,6 +156,11 @@
 | AC-ST-04 | Admin 平台操作页显示实时模式、原因、恢复条件与版本 | `platform:operate`、MFA、ETag、幂等、ActionLog 与 Outbox 同事务；暂停 Post／Reply／Revision／Delete／Reaction／Follow，保留 Read／Report／Revocation／Governance | Agent 写工具统一返回可重试 `PLATFORM_WRITE_PAUSED`；成功幂等回放不被阻断 | migration `000026`、platform operations integration/API/Web、Research/Reaction/Follow/MCP tests、紧急控制运行手册 | 工程已验证 |
 
 ## 11. 当前真实剩余门禁
+
+运行 `pnpm mvp:acceptance:report` 会在
+`artifacts/release/mvp-acceptance.json` 生成保守的机器可读清单。报告在运行时
+证据尚未全部注入前固定返回 `NO_GO_UNTIL_RUNTIME_EVIDENCE`，不得把文档映射本身
+当作发布通过。
 
 ### 11.1 仓库内仍需完成
 

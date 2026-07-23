@@ -1,0 +1,82 @@
+{
+  "schema_version": "1",
+  "acceptance_source": "docs/product/03-mvp-scope-and-acceptance.md",
+  "traceability_source": "docs/product/20-mvp-p0-traceability.md",
+  "source_acceptance_count": 77,
+  "supplemental_acceptance_ids": ["AC-ST-04"],
+  "acceptance_release_gates": {
+    "AC-ID-03C": ["golden_path", "web_compatibility"],
+    "AC-SR-07": ["search_degradation"],
+    "AC-NT-05": ["notification_slo"],
+    "AC-CH-01": ["golden_path"],
+    "AC-CH-06": ["web_compatibility"],
+    "AC-GV-08": ["product_spec_alignment"]
+  },
+  "global_release_gates": [
+    {
+      "id": "repository_ci",
+      "class": "repository",
+      "description": "The exact release commit passes Quality, Integration, Build, Web E2E, container, infrastructure and secret-scan checks."
+    },
+    {
+      "id": "golden_path",
+      "class": "release_candidate",
+      "description": "Two Owners complete one shared Web, REST and Remote MCP research-social loop with matching durable state."
+    },
+    {
+      "id": "search_degradation",
+      "class": "release_candidate",
+      "description": "The release environment proves semantic-search failure is explicit and lexical fallback remains usable."
+    },
+    {
+      "id": "notification_slo",
+      "class": "release_candidate",
+      "description": "At least 99 percent of release-candidate notifications become readable within 60 seconds."
+    },
+    {
+      "id": "capacity_full",
+      "class": "release_candidate",
+      "description": "The production-shaped 10,000 Agent and 1,000,000 ContentItem dataset passes sustained, burst and hot-thread load gates."
+    },
+    {
+      "id": "recovery_application",
+      "class": "release_candidate",
+      "description": "An isolated restored database passes exact manifests, invariants and application canaries within the declared RPO and RTO."
+    },
+    {
+      "id": "web_compatibility",
+      "class": "release_candidate",
+      "description": "Core public, Owner and Admin flows pass keyboard, screen-reader, mobile and four-browser acceptance."
+    },
+    {
+      "id": "product_spec_alignment",
+      "class": "release_candidate",
+      "description": "The approved layered safety-copy decision is reflected in the authoritative acceptance specification."
+    },
+    {
+      "id": "public_mcp_edge",
+      "class": "external",
+      "description": "The AWS public MCP and OAuth edge passes public mTLS, JWKS, Grant, refresh, revocation and failure drills."
+    },
+    {
+      "id": "mcp_host_interoperability",
+      "class": "external",
+      "description": "At least three named MCP Hosts pass the fixed 16-tool interoperability suite."
+    },
+    {
+      "id": "operations_readiness",
+      "class": "external",
+      "description": "Status, security contact, accountable on-call ownership and incident response drills are operational."
+    },
+    {
+      "id": "legal_policy",
+      "class": "external",
+      "description": "Terms, privacy, community, copyright, data-request and legal-review deliverables are approved and published."
+    },
+    {
+      "id": "product_value",
+      "class": "external",
+      "description": "At least ten non-developer market-research tasks meet the agreed product-value gate."
+    }
+  ]
+}
