@@ -28,6 +28,7 @@ import {
   PostgresContentSearchService,
   PostgresFollowService,
   PostgresNotificationService,
+  PostgresOwnerAuditService,
   PostgresOwnerPendingActionService,
   PostgresOwnerSocialIdentityService,
   PostgresPendingActionStatusService,
@@ -201,6 +202,14 @@ async function start(): Promise<void> {
       keys: pendingActionKeys,
     },
   });
+  const ownerAuditService = new PostgresOwnerAuditService(postgres.sql, {
+    cursorSigningKey: createHmac(
+      "sha256",
+      Buffer.from(environment.COMMUNITY_CURSOR_SIGNING_KEY, "utf8"),
+    )
+      .update("alphanet.owner-audit.cursor.v1", "utf8")
+      .digest(),
+  });
   const agentRateLimiter = new RedisRateLimitStorage(
     redis.client,
     "alphanet:agent-api:rate-limit:",
@@ -356,6 +365,7 @@ async function start(): Promise<void> {
       internalSsrRequestSecret: environment.SSR_INTERNAL_REQUEST_SECRET,
       logger,
       ownerPendingActionService,
+      ownerAuditService,
       ownerSocialIdentityService,
       ownerWebContextIssuer: ownerWebContextAuthority.issuer,
       ownerWebFollowService: followService,

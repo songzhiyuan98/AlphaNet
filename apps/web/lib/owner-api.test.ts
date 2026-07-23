@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  getOwnerAuditActions,
+  getOwnerAuditSearchActivity,
   getOwnerContentModerationHistory,
   getOwnerCredentials,
   getPublicAgent,
@@ -33,6 +35,99 @@ const credentialId = "30000000-0000-4000-8000-000000000001";
 const actorId = "40000000-0000-4000-8000-000000000001";
 const requestedHandle = "market-scout";
 const timestamp = "2026-07-22T20:00:00.000Z";
+
+function auditActionResponse() {
+  return {
+    filters: {
+      action: "content.create_post",
+      agent_id: requestedAgentId,
+      credential_id: credentialId,
+      from: null,
+      outcome: "succeeded",
+      to: null,
+    },
+    items: [
+      {
+        action: "content.create_post",
+        actor: {
+          display_name: "Market Scout",
+          handle: requestedHandle,
+          id: actorId,
+          kind: "agent",
+        },
+        agent: {
+          display_name: "Market Scout",
+          handle: requestedHandle,
+          id: requestedAgentId,
+        },
+        approval_method: "policy_auto",
+        approved_by_owner: false,
+        channel: "mcp",
+        credential: {
+          id: credentialId,
+          name: "Primary workflow",
+          token_prefix: "aln_v1_primary",
+        },
+        decision: "allow",
+        error_code: null,
+        event_class: "domain_write",
+        id: requestedContentId,
+        occurred_at: timestamp,
+        outbox_event_id: null,
+        outcome: "succeeded",
+        policy_version: "1",
+        reason_code: null,
+        request_id: "request-domain-write",
+        retry_count: 0,
+        target: { id: requestedContentId, type: "content" },
+      },
+    ],
+    page: { has_more: false, limit: 25, next_cursor: null },
+    request_id: "request-owner-audit",
+    schema_version: "1",
+  } as const;
+}
+
+function auditSearchResponse() {
+  return {
+    filters: {
+      agent_id: requestedAgentId,
+      credential_id: null,
+      from: null,
+      outcome: "succeeded",
+      surface: "mcp",
+      to: null,
+    },
+    items: [
+      {
+        agent: {
+          display_name: "Market Scout",
+          handle: requestedHandle,
+          id: requestedAgentId,
+        },
+        credential: {
+          id: credentialId,
+          name: "Primary workflow",
+          token_prefix: "aln_v1_primary",
+        },
+        expires_at: "2026-08-21T20:00:00.000Z",
+        fallback_reason_code: null,
+        finalized_at: "2026-07-22T20:00:00.125Z",
+        id: requestedContentId,
+        latency_ms: 125,
+        occurred_at: timestamp,
+        outcome: "succeeded",
+        request_id: "request-search",
+        result_count: 20,
+        search_mode: "hybrid",
+        surface: "mcp",
+      },
+    ],
+    page: { has_more: false, limit: 25, next_cursor: null },
+    request_id: "request-owner-search-audit",
+    schema_version: "1",
+  } as const;
+}
 
 const policyRules = {
   browse: "allow",
@@ -147,6 +242,83 @@ afterEach(() => {
 });
 
 describe("Owner moderation API binding", () => {
+  it("forwards bounded Owner action and search filters through the authenticated BFF", async () => {
+    vi.stubEnv("API_INTERNAL_URL", "http://api.internal:4000");
+    const responses = [
+      Response.json(auditActionResponse()),
+      Response.json(auditSearchResponse()),
+    ];
+    const fetchMock = vi.fn<typeof fetch>(() => {
+      const response = responses.shift();
+      if (!response) throw new Error("Unexpected extra Owner audit request.");
+      return Promise.resolve(response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      getOwnerAuditActions({
+        action: "content.create_post",
+        agent_id: requestedAgentId,
+        credential_id: credentialId,
+        limit: 25,
+        outcome: "succeeded",
+      }),
+    ).resolves.toMatchObject({ kind: "success" });
+    await expect(
+      getOwnerAuditSearchActivity({
+        agent_id: requestedAgentId,
+        outcome: "succeeded",
+        surface: "mcp",
+      }),
+    ).resolves.toMatchObject({ kind: "success" });
+
+    const [actionUrl, actionInit] = fetchMock.mock.calls[0] ?? [];
+    expect(typeof actionUrl).toBe("string");
+    if (typeof actionUrl !== "string") throw new Error("Expected a string URL.");
+    const parsedActionUrl = new URL(actionUrl);
+    expect(parsedActionUrl.origin + parsedActionUrl.pathname).toBe(
+      "http://api.internal:4000/v1/owner/audit/actions",
+    );
+    expect(Object.fromEntries(parsedActionUrl.searchParams)).toEqual({
+      action: "content.create_post",
+      agent_id: requestedAgentId,
+      credential_id: credentialId,
+      limit: "25",
+      outcome: "succeeded",
+    });
+    expect(new Headers(actionInit?.headers).get("cookie")).toBe(
+      "alphanet-owner-session=opaque",
+    );
+    const searchUrl = fetchMock.mock.calls[1]?.[0];
+    expect(typeof searchUrl).toBe("string");
+    if (typeof searchUrl !== "string") throw new Error("Expected a string URL.");
+    const parsedSearchUrl = new URL(searchUrl);
+    expect(parsedSearchUrl.origin + parsedSearchUrl.pathname).toBe(
+      "http://api.internal:4000/v1/owner/audit/search-activity",
+    );
+    expect(Object.fromEntries(parsedSearchUrl.searchParams)).toEqual({
+      agent_id: requestedAgentId,
+      outcome: "succeeded",
+      surface: "mcp",
+    });
+  });
+
+  it("rejects an Owner audit response that exposes a raw search query", async () => {
+    vi.stubEnv("API_INTERNAL_URL", "http://api.internal:4000");
+    const unsafe = {
+      ...auditSearchResponse(),
+      items: [{ ...auditSearchResponse().items[0], query: "MU earnings" }],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(() => Promise.resolve(Response.json(unsafe))),
+    );
+
+    await expect(getOwnerAuditSearchActivity()).resolves.toEqual({
+      kind: "unavailable",
+    });
+  });
+
   it("accepts only a valid history envelope bound to the requested Content", async () => {
     vi.stubEnv("API_INTERNAL_URL", "http://api.internal:4000");
     const responses = [

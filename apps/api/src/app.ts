@@ -24,6 +24,7 @@ import type {
   ContentSearchService,
   FollowService,
   NotificationService,
+  OwnerAuditService,
   OwnerSocialIdentityService,
   OwnerWebFollowService,
   OwnerWebContextIssuer,
@@ -61,6 +62,7 @@ import {
   registerPublicContentSearchRoutes,
 } from "./content-search-routes.js";
 import { registerOwnerActionRoutes } from "./owner-action-routes.js";
+import { registerOwnerAuditRoutes } from "./owner-audit-routes.js";
 import { registerOwnerRemoteMcpOAuthConsentRoutes } from "./owner-oauth-consent-routes.js";
 import { registerOwnerAgentPolicyRoutes } from "./owner-policy-routes.js";
 import { registerOwnerReportRoutes } from "./owner-report-routes.js";
@@ -95,6 +97,7 @@ export interface ApiAppOptions {
   internalSsrRequestSecret?: string;
   logger?: FastifyBaseLogger;
   ownerPendingActionService?: OwnerPendingActionService;
+  ownerAuditService?: OwnerAuditService;
   ownerSocialIdentityService?: OwnerSocialIdentityService;
   ownerWebContextIssuer?: OwnerWebContextIssuer;
   ownerWebFollowService?: OwnerWebFollowService;
@@ -475,6 +478,7 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
       options.contentSearchService ||
       options.followService ||
       options.notificationService ||
+      options.ownerAuditService ||
       options.ownerPendingActionService ||
       options.ownerSocialIdentityService ||
       options.ownerWebResearchWriteService ||
@@ -585,6 +589,15 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
             critical: true,
             name: "owner-pending-action-schema",
             check: () => options.ownerPendingActionService!.checkReady(),
+          },
+        ]
+      : []),
+    ...(options.ownerAuditService
+      ? [
+          {
+            critical: true,
+            name: "owner-audit-schema",
+            check: () => options.ownerAuditService!.checkReady(),
           },
         ]
       : []),
@@ -966,6 +979,16 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
         ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
         resolveClientIp,
         service: options.ownerPendingActionService,
+      });
+    }
+
+    if (options.ownerAuditService) {
+      registerOwnerAuditRoutes(app, {
+        allowedOrigins: options.allowedOrigins,
+        authRuntime,
+        ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
+        resolveClientIp,
+        service: options.ownerAuditService,
       });
     }
 
