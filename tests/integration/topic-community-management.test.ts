@@ -29,7 +29,7 @@ describeIntegration("PostgresTopicCommunityManagementService", () => {
 
   const marker = randomUUID().replaceAll("-", "").slice(0, 12);
   const adminId = randomUUID();
-  const roleId = randomUUID();
+  const roleId = "4b756e75-bf2d-4aa4-8ac4-5bd474290103";
   const context: AdminTopicCommunityContext = {
     adminId,
     authenticationAssurance: "workforce_oidc",
@@ -37,7 +37,7 @@ describeIntegration("PostgresTopicCommunityManagementService", () => {
     permission: "community:manage",
     permissions: ["community:manage"],
     requestId: `req_topic_community_${marker}`,
-    roles: [`topic_manager_${marker}`],
+    roles: ["community_operator"],
   };
 
   beforeAll(async () => {
@@ -51,18 +51,6 @@ describeIntegration("PostgresTopicCommunityManagementService", () => {
         ${`topic-community-${marker}`},
         'Topic Community Integration Admin'
       )
-    `;
-    await postgres.sql`
-      insert into platform.admin_roles (id, key, name)
-      values (
-        ${roleId},
-        ${`topic_manager_${marker}`},
-        'Topic Community Integration Manager'
-      )
-    `;
-    await postgres.sql`
-      insert into platform.admin_role_permissions (role_id, permission)
-      values (${roleId}, 'community:manage')
     `;
     await postgres.sql`
       insert into platform.admin_assignments (
