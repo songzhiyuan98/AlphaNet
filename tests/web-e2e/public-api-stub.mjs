@@ -784,16 +784,21 @@ const server = createServer(async (request, response) => {
       if (
         origin !== expectedBrowserOrigin ||
         singleHeader(request.headers["access-control-request-method"]) !== "POST" ||
-        requestedHeaders.size !== 2 ||
+        requestedHeaders.size < 1 ||
+        requestedHeaders.size > 2 ||
         !requestedHeaders.has("content-type") ||
-        !requestedHeaders.has("x-forwarded-for")
+        [...requestedHeaders].some(
+          (header) => header !== "content-type" && header !== "x-forwarded-for",
+        )
       ) {
         response.writeHead(403, { "cache-control": "no-store" });
         return response.end();
       }
       response.writeHead(204, {
-        // Playwright's trusted-ingress fixture adds X-Forwarded-For to the
-        // browser context. Accept only that known test header plus Content-Type.
+        // Playwright injects the trusted-ingress X-Forwarded-For header at
+        // different network layers across browser engines. Some engines list
+        // it in the preflight and others add it after preflight; accept only
+        // that known optional header plus the required Content-Type.
         "access-control-allow-headers": "content-type,x-forwarded-for",
         "access-control-allow-methods": "POST",
         "access-control-allow-origin": expectedBrowserOrigin,

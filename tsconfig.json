@@ -8,6 +8,7 @@
   "include": [
     "playwright.config.ts",
     "playwright.admin-moderation.config.ts",
+    "playwright.compatibility.config.ts",
     "tests/**/*.ts",
     "vitest.integration.config.ts"
   ]

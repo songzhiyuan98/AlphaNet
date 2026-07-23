@@ -27,6 +27,7 @@
     "test:dev-seed:ui": "pnpm --dir packages/auth exec node --test scripts/ui-demo-fixture.test.mjs",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:web:admin-e2e": "bash .github/scripts/test-admin-moderation-e2e.sh",
+    "test:web:compatibility": "bash .github/scripts/test-web-compatibility.sh",
     "test:web:e2e": "bash .github/scripts/test-web-e2e.sh",
     "typecheck": "pnpm typecheck:root && pnpm --recursive --if-present typecheck",
     "typecheck:root": "tsc -p tsconfig.json --noEmit"
@@ -39,6 +40,7 @@
     }
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.12.1",
     "@eslint/js": "9.39.5",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@playwright/test": "1.61.1",

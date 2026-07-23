@@ -301,7 +301,7 @@ h1 span {
 }
 
 .workflowStep span {
-  color: #66705f;
+  color: var(--foreground-faint);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
 }
