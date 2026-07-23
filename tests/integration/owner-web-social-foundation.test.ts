@@ -412,6 +412,21 @@ describeOwnerWebSocialFoundation("Owner Web social PostgreSQL foundation", () =>
         handle: profileHandle,
       },
     });
+    await expect(
+      identityService.getPublicHumanProfileByHandle(profileHandle),
+    ).resolves.toMatchObject({
+      actorId: enabled.profile.actorId,
+      bio: "Tracks evidence, counterarguments, and revisions.",
+      displayName: "Lifecycle Market Researcher",
+      followersCount: 0,
+      followingCount: 0,
+      handle: profileHandle,
+      postsCount: 0,
+      repliesCount: 0,
+    });
+    await expect(
+      identityService.getPublicHumanProfileByHandle("INVALID_HANDLE"),
+    ).resolves.toBeNull();
 
     const noOpOrConflictEffects = await postgres.sql<{ count: number }[]>`
         select count(*)::integer as count
@@ -648,6 +663,9 @@ describeOwnerWebSocialFoundation("Owner Web social PostgreSQL foundation", () =>
         status: "active",
       },
     ]);
+    await expect(
+      identityService.getPublicHumanProfileByHandle(restrictedHuman.profile.handle),
+    ).resolves.toBeNull();
     await expectIdentityError(
       updateHumanProfile(ownerWebMutation(restricted), {
         displayName: "Mutation Must Not Succeed",

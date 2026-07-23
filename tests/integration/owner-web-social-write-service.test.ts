@@ -303,6 +303,7 @@ describeOwnerWebSocialWrite("Owner Web social research writes", () => {
         "Owner-reviewed semiconductor demand notes for independent community verification.",
       idempotencyKey,
       primaryCommunityId: communityId,
+      symbols: ["MU", "AMD"],
       title: "Owner-reviewed semiconductor demand notes",
     };
     const selection = {

@@ -1242,6 +1242,10 @@ footer {
   color: var(--accent);
 }
 
+.publicHumanHandle {
+  color: var(--accent);
+}
+
 .publicContentBody {
   color: #d8ded4;
   font-size: clamp(15px, 1.5vw, 18px);
@@ -3045,6 +3049,245 @@ footer {
 
   .oauthConsentDecisionNote {
     text-align: left;
+  }
+}
+
+/* Owner-selected public identity and community write surfaces. */
+
+.socialComposer {
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 28px 0 38px;
+}
+
+.socialComposerTrigger {
+  align-items: center;
+  background: linear-gradient(135deg, rgba(183, 243, 67, 0.08), transparent 70%), #0b0e0b;
+  border: 1px solid rgba(183, 243, 67, 0.22);
+  border-radius: var(--radius-control);
+  color: #dce7d3;
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 680;
+  justify-content: center;
+  min-height: 46px;
+  min-width: 210px;
+  padding: 0 20px;
+}
+
+.socialComposerTrigger:hover,
+.socialComposerTrigger[aria-expanded="true"] {
+  border-color: rgba(183, 243, 67, 0.48);
+  color: var(--accent);
+}
+
+.socialComposerTrigger:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.socialComposerPanel {
+  background: #090c09;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-panel);
+  margin-top: 14px;
+  max-width: 920px;
+  padding: 24px;
+}
+
+.socialComposerHeading {
+  align-items: flex-start;
+  display: flex;
+  gap: 24px;
+  justify-content: space-between;
+}
+
+.socialComposerHeading .sectionLabel {
+  margin-bottom: 8px;
+}
+
+.socialComposerHeading h2 {
+  font-size: 22px;
+  letter-spacing: -0.035em;
+  margin: 0;
+}
+
+.socialComposerStatus {
+  align-items: flex-start;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-control);
+  color: var(--foreground-secondary);
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+  gap: 12px;
+  line-height: 1.65;
+  margin: 20px 0 0;
+  padding: 15px;
+}
+
+.socialComposerStatus p {
+  margin: 0;
+}
+
+.socialComposerIdentity {
+  display: grid;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.socialComposerIdentity > span,
+.socialComposerForm label > span {
+  color: #dce2d8;
+  font-size: 11px;
+  font-weight: 590;
+}
+
+.socialComposerIdentity select,
+.socialComposerForm input,
+.socialComposerForm textarea {
+  background: #070a07;
+  border: 1px solid #30352f;
+  border-radius: var(--radius-control);
+  color: var(--foreground-primary);
+  font: inherit;
+  font-size: 13px;
+  width: 100%;
+}
+
+.socialComposerIdentity select,
+.socialComposerForm input {
+  min-height: 46px;
+  padding: 0 13px;
+}
+
+.socialComposerForm textarea {
+  line-height: 1.68;
+  min-height: 88px;
+  padding: 12px 13px;
+  resize: vertical;
+}
+
+.socialComposerIdentity select:focus,
+.socialComposerForm input:focus,
+.socialComposerForm textarea:focus {
+  border-color: #789f30;
+  box-shadow: 0 0 0 4px rgba(183, 243, 67, 0.1);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.socialComposerForm {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 18px;
+}
+
+.socialComposerForm > label {
+  display: grid;
+  gap: 8px;
+}
+
+.socialComposerFull {
+  grid-column: 1 / -1;
+}
+
+.socialComposerActions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.socialComposerActions .submitButton {
+  min-width: 160px;
+  width: auto;
+}
+
+.socialReplyComposer {
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 24px;
+  max-width: 980px;
+  padding-top: 18px;
+}
+
+.socialReplyComposer--compact {
+  margin-top: 16px;
+}
+
+.socialReplyComposer--compact .socialComposerPanel {
+  max-width: 760px;
+}
+
+.humanProfilePanel .ownerForm {
+  margin-top: 22px;
+}
+
+.humanProfilePanel .submitButton {
+  width: 100%;
+}
+
+.humanProfileKind {
+  border: 1px solid rgba(183, 243, 67, 0.22);
+  border-radius: 999px;
+  color: var(--accent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  padding: 6px 9px;
+  text-transform: uppercase;
+}
+
+.humanProfileStatus {
+  color: var(--foreground-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+  margin: 20px 0 0;
+}
+
+.humanProfileStatus p {
+  margin: 0 0 10px;
+}
+
+.humanProfileHandle {
+  align-items: center;
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  justify-content: space-between;
+  padding: 0 0 14px;
+}
+
+.humanProfileHandle span {
+  color: var(--foreground-muted);
+  font-size: 11px;
+}
+
+.humanProfileHandle strong {
+  color: var(--accent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+@media (max-width: 720px) {
+  .socialComposerPanel {
+    padding: 18px;
+  }
+
+  .socialComposerForm {
+    grid-template-columns: 1fr;
+  }
+
+  .socialComposerForm > label,
+  .socialComposerFull {
+    grid-column: 1;
+  }
+
+  .socialComposerActions {
+    justify-content: stretch;
+  }
+
+  .socialComposerActions .submitButton,
+  .socialComposerTrigger {
+    width: 100%;
   }
 }
 

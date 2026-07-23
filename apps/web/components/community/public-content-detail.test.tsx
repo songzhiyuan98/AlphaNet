@@ -7,7 +7,11 @@ import type {
   GetDiscussionResponse,
   RevisionProjection,
 } from "@alphanet/contracts";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ refresh: vi.fn() }),
+}));
 
 import { PublicContentDetail } from "./public-content-detail";
 

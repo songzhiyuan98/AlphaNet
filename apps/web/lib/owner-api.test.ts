@@ -4,6 +4,7 @@ import {
   getOwnerContentModerationHistory,
   getOwnerCredentials,
   getPublicAgent,
+  getPublicHumanProfile,
 } from "./owner-api";
 
 vi.mock("next/headers", () => ({
@@ -116,6 +117,29 @@ function profileResponse(handle: string) {
   } as const;
 }
 
+function humanProfileResponse(handle: string) {
+  return {
+    profile: {
+      actor_id: actorId,
+      bio: "Cross-validates market research.",
+      created_at: timestamp,
+      display_name: "Alpha Researcher",
+      handle,
+      kind: "human",
+      status: "active",
+      updated_at: timestamp,
+    },
+    request_id: "request-public-human",
+    schema_version: "1",
+    stats: {
+      followers_count: 3,
+      following_count: 2,
+      posts_count: 4,
+      replies_count: 5,
+    },
+  } as const;
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -202,6 +226,31 @@ describe("Owner moderation API binding", () => {
       kind: "unavailable",
     });
     const [, init] = fetchMock.mock.calls[0] ?? [];
+    expect(new Headers(init?.headers).has("cookie")).toBe(false);
+  });
+
+  it("binds a public Human profile to its requested handle without forwarding cookies", async () => {
+    vi.stubEnv("API_INTERNAL_URL", "http://api.internal:4000");
+    const responses = [
+      Response.json(humanProfileResponse("alpha-researcher")),
+      Response.json(humanProfileResponse("different-person")),
+    ];
+    const fetchMock = vi.fn<typeof fetch>(() => {
+      const response = responses.shift();
+      if (!response) throw new Error("Unexpected extra public Human request.");
+      return Promise.resolve(response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getPublicHumanProfile("alpha-researcher")).resolves.toMatchObject({
+      data: { profile: { handle: "alpha-researcher" } },
+      kind: "success",
+    });
+    await expect(getPublicHumanProfile("alpha-researcher")).resolves.toEqual({
+      kind: "unavailable",
+    });
+    const [url, init] = fetchMock.mock.calls[0] ?? [];
+    expect(url).toBe("http://api.internal:4000/v1/public/people/alpha-researcher");
     expect(new Headers(init?.headers).has("cookie")).toBe(false);
   });
 });

@@ -7,6 +7,7 @@ import Link from "next/link";
 import { communityStateLabel } from "../../lib/community-presentation";
 import { contentSearchScopeHref } from "../../lib/content-search-query";
 import type { PublicFeedSort } from "../../lib/public-content-ranking";
+import { CommunityPostComposer } from "./community-post-composer";
 import { CommunityResearchFeed } from "./community-research-feed";
 import { ContentRankingTabs } from "./content-ranking-tabs";
 import { ResearchNavigation } from "./research-navigation";
@@ -70,6 +71,13 @@ export function CommunityDetail({
           </Link>
         </aside>
       </header>
+
+      <CommunityPostComposer
+        communityId={community.id}
+        communityName={community.name}
+        enabled={community.state === "active"}
+        loginHref={`/login?next=${encodeURIComponent(`/communities/${community.slug}`)}`}
+      />
 
       <ContentRankingTabs sort={sort} />
 

@@ -57,7 +57,11 @@ export async function ownerApiRequest<T>(
   }
 
   const payload: unknown = await response.json().catch(() => null);
+  const projected = schema.safeParse(payload);
   if (!response.ok) {
+    if (projected.success) {
+      return projected.data;
+    }
     const parsed = V1ErrorResponseSchema.safeParse(payload);
     if (parsed.success) {
       throw new OwnerApiError({
@@ -73,14 +77,13 @@ export async function ownerApiRequest<T>(
     });
   }
 
-  const parsed = schema.safeParse(payload);
-  if (!parsed.success) {
+  if (!projected.success) {
     throw new OwnerApiError({
       code: "INVALID_RESPONSE",
       message: "控制面返回了无法识别的数据，请刷新后重试。",
     });
   }
-  return parsed.data;
+  return projected.data;
 }
 
 const friendlyMessages: Record<string, string> = {
@@ -117,6 +120,7 @@ const friendlyMessages: Record<string, string> = {
   NETWORK_ERROR: "无法连接控制面，请检查网络后重试。",
   OWNER_EMAIL_VERIFICATION_REQUIRED: "请先完成 Owner 邮箱验证。",
   OWNER_NOT_ACTIVE: "Owner 账户当前不能执行此操作。",
+  OWNER_SOCIAL_UNAVAILABLE: "社区身份与发布服务暂时不可用。",
   OWNER_OAUTH_CONSENT_UNAVAILABLE: "Remote MCP 授权服务暂时不可用。",
   OWNER_REAUTHENTICATION_REQUIRED: "需要重新登录以确认这次高权限变更。",
   OWNER_ACTION_UNAVAILABLE: "审批服务暂时不可用，请稍后重试。",
@@ -130,6 +134,13 @@ const friendlyMessages: Record<string, string> = {
   OWNER_SESSION_INVALID: "当前登录会话不能完成这次授权，请重新发起。",
   REQUEST_EXPIRED: "授权请求已经过期，请从 Agent 客户端重新发起。",
   REQUEST_NOT_FOUND: "找不到这次授权请求，请从 Agent 客户端重新发起。",
+  AUTHORITY_NOT_FOUND: "所选公开身份已不可用，请重新加载后选择。",
+  COMMUNITY_NOT_FOUND: "找不到目标社区，或该社区尚不能接受发布。",
+  COMMUNITY_RESTRICTED: "目标社区当前不接受这类内容。",
+  DUPLICATE_CONTENT: "近期已经发布过相同内容，请检查后再提交。",
+  POLICY_DENIED: "所选 Agent 的当前策略不允许这项社区操作。",
+  RATE_LIMITED: "社区操作过于频繁，请稍后重试。",
+  REPLIES_CLOSED: "这项内容所在社区当前已关闭回复。",
   TOKEN_EXPIRED: "这个凭证已经过期。",
   VALIDATION_FAILED: "提交内容不符合要求，请检查后重试。",
 };

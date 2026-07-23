@@ -64,6 +64,7 @@ import { registerOwnerAgentPolicyRoutes } from "./owner-policy-routes.js";
 import { registerOwnerReportRoutes } from "./owner-report-routes.js";
 import { registerOwnerSocialRoutes } from "./owner-social-routes.js";
 import { registerPendingActionRoutes } from "./pending-action-routes.js";
+import { registerPublicPeopleRoutes } from "./public-people-routes.js";
 import { registerReactionRoutes } from "./reaction-routes.js";
 import { registerFollowRoutes } from "./follow-routes.js";
 import {
@@ -1034,6 +1035,14 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
       ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
       resolveClientIp,
       service: options.communityDirectoryService,
+    });
+  }
+
+  if (options.ownerSocialIdentityService) {
+    registerPublicPeopleRoutes(app, {
+      ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
+      resolveClientIp,
+      service: options.ownerSocialIdentityService,
     });
   }
 

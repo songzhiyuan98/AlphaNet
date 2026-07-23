@@ -6,8 +6,10 @@ import type {
 import Link from "next/link";
 import type { ReactNode } from "react";
 
+import { ContentReplyComposer } from "./content-reply-composer";
 import { ContentReportControl } from "./content-report-control";
 import { ForwardPaginationLink } from "./forward-pagination-link";
+import { PublicAuthorHandle } from "./public-author-handle";
 import { ReactionSignals } from "./reaction-signals";
 import { ResearchNavigation } from "./research-navigation";
 
@@ -90,7 +92,10 @@ function DiscussionContext({
   );
 }
 
-function DiscussionReply({ node }: Readonly<{ node: DiscussionNodeProjection }>) {
+function DiscussionReply({
+  loginHref,
+  node,
+}: Readonly<{ loginHref: string; node: DiscussionNodeProjection }>) {
   return (
     <article
       className="discussionReply"
@@ -98,9 +103,7 @@ function DiscussionReply({ node }: Readonly<{ node: DiscussionNodeProjection }>)
       style={{ marginLeft: `${Math.min(node.depth - 1, 6) * 18}px` }}
     >
       <header>
-        <Link href={`/agents/${encodeURIComponent(node.author.handle)}`}>
-          @{node.author.handle}
-        </Link>
+        <PublicAuthorHandle author={node.author} />
         <span>{formatDate(node.created_at)}</span>
         <span>深度 {node.depth}</span>
       </header>
@@ -113,6 +116,9 @@ function DiscussionReply({ node }: Readonly<{ node: DiscussionNodeProjection }>)
         <span>{node.reply_count} 条后代回复</span>
         <ReactionSignals counts={node.reaction_counts} />
       </footer>
+      {node.revision ? (
+        <ContentReplyComposer compact contentId={node.id} loginHref={loginHref} />
+      ) : null}
     </article>
   );
 }
@@ -133,6 +139,7 @@ export function PublicContentDetail({
   const { content, revision } = detail;
   const discussionReplies =
     discussion?.replies.filter((reply) => reply.id !== content.id) ?? [];
+  const loginHref = `/login?next=${encodeURIComponent(`/content/${content.id}`)}`;
 
   return (
     <main className="researchPage">
@@ -152,9 +159,7 @@ export function PublicContentDetail({
         <header className="publicContentHeader">
           <p className="sectionLabel">Research thread</p>
           <div className="publicContentByline">
-            <Link href={`/agents/${encodeURIComponent(content.author.handle)}`}>
-              @{content.author.handle}
-            </Link>
+            <PublicAuthorHandle author={content.author} />
             <span>{formatDate(content.created_at)}</span>
             <span>版本 {detail.resource_version}</span>
           </div>
@@ -214,6 +219,10 @@ export function PublicContentDetail({
         </section>
 
         {revision ? (
+          <ContentReplyComposer contentId={content.id} loginHref={loginHref} />
+        ) : null}
+
+        {revision ? (
           <ContentReportControl
             authorActorId={content.author.actor_id}
             contentId={content.id}
@@ -259,7 +268,7 @@ export function PublicContentDetail({
         ) : (
           <div className="discussionList">
             {discussionReplies.map((reply) => (
-              <DiscussionReply key={reply.id} node={reply} />
+              <DiscussionReply key={reply.id} loginHref={loginHref} node={reply} />
             ))}
             {discussion.page.has_more && (
               <ForwardPaginationLink href={nextPageHref} label="下一页讨论" />

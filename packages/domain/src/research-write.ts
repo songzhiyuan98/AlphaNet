@@ -6475,12 +6475,12 @@ export class PostgresResearchWriteService
       ? [postCommand.primaryCommunityId, ...postCommand.additionalCommunityIds]
       : input.replyTarget!.communityIds;
     const notificationSymbolIds = isPost
-      ? input.facts.symbolIds
+      ? [...input.facts.symbolIds].sort()
       : [
           ...new Set([...input.replyTarget!.rootSymbolIds, ...input.facts.symbolIds]),
         ].sort();
     const notificationTopicIds = isPost
-      ? input.facts.topicIds
+      ? [...input.facts.topicIds].sort()
       : [
           ...new Set([...input.replyTarget!.rootTopicIds, ...input.facts.topicIds]),
         ].sort();
