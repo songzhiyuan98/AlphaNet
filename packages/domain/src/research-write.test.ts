@@ -37,6 +37,7 @@ import {
 } from "./research-write.js";
 import {
   CONTENT_REVISION_WRITE_MIGRATION_CHECKSUM,
+  OWNER_WEB_SOCIAL_HARDENING_V1_MIGRATION_CHECKSUM,
   PENDING_ACTION_EXECUTION_MIGRATION_CHECKSUM,
 } from "./schema-migrations.js";
 
@@ -1030,7 +1031,7 @@ function researchAuditAfterState(harness: SqlHarness): Record<string, unknown> {
 }
 
 describe("PostgresResearchWriteService", () => {
-  it("pins readiness to migrations 000006/000007 and the critical write schema", async () => {
+  it("pins readiness through 000022 and the critical write schema", async () => {
     const harness = new SqlHarness();
     await service(harness).checkReady();
 
@@ -1040,10 +1041,19 @@ describe("PostgresResearchWriteService", () => {
     expect(readiness?.values).toContain(COMMUNITY_RESEARCH_MIGRATION_CHECKSUM);
     expect(readiness?.values).toContain(PENDING_ACTION_EXECUTION_MIGRATION_CHECKSUM);
     expect(readiness?.values).toContain(CONTENT_REVISION_WRITE_MIGRATION_CHECKSUM);
+    expect(readiness?.values).toContain(OWNER_WEB_SOCIAL_HARDENING_V1_MIGRATION_CHECKSUM);
     expect(readiness?.text).toContain("platform.content_items");
     expect(readiness?.text).toContain("platform.pending_actions");
     expect(readiness?.text).toContain("content_revisions_prevent_mutation");
     expect(readiness?.text).toContain("content_revisions_validate_current_pointer");
+    expect(readiness?.text).toContain("version = '000022'");
+    expect(readiness?.text).toContain("outbox_events_content_v1_payload_shape");
+    expect(readiness?.text).toContain("content_v1_outbox_payload_is_valid");
+    expect(readiness?.text).toContain("has_function_privilege");
+    expect(readiness?.text).toContain(
+      "outbox_events_validate_runtime_content_provenance",
+    );
+    expect(readiness?.text).toContain("validate_runtime_content_outbox_provenance");
   });
 
   it("validates the ActionLog HMAC key material at construction", () => {

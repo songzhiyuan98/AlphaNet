@@ -469,6 +469,7 @@ GRANT EXECUTE ON FUNCTION
   platform.text_array_has_unique_values(text[]),
   system.claim_content_embedding_jobs(text, bytea, integer, integer),
   system.complete_content_embedding_job(uuid, text, bytea),
+  system.content_v1_outbox_payload_is_valid(text, text, text, integer, jsonb),
   system.enqueue_content_embedding_job(uuid, text, smallint),
   system.mark_all_notifications_read(uuid),
   system.project_notification(uuid, uuid, text, uuid, text, uuid, text[], uuid[], text, text, text, jsonb, text, timestamptz, text),

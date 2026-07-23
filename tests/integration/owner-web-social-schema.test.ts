@@ -294,6 +294,108 @@ describeOwnerWebSocial("Owner/Human Web social database contract", () => {
   ): Promise<void> {
     const outboxId = randomUUID();
     const aggregateSequence = await nextOutboxSequence(transaction, input.contentId);
+    const projections = await transaction<
+      Array<{
+        actor_id: string;
+        community_ids: string[];
+        current_revision_id: string;
+        kind: "post" | "reply";
+        parent_content_id: string | null;
+        root_content_id: string;
+        symbol_ids: string[];
+        topic_ids: string[];
+      }>
+    >`
+      select
+        content.author_actor_id::text as actor_id,
+        content.current_revision_id::text as current_revision_id,
+        content.kind,
+        content.parent_id::text as parent_content_id,
+        content.root_id::text as root_content_id,
+        coalesce((
+          select array_agg(
+            distinct placement.community_id::text
+            order by placement.community_id::text
+          )
+          from (
+            select root.primary_community_id as community_id
+            union
+            select additional.community_id
+            from platform.content_additional_communities as additional
+            where additional.content_id = root.id
+          ) as placement
+          where placement.community_id is not null
+        ), array[]::text[]) as community_ids,
+        coalesce((
+          select array_agg(
+            distinct classification.symbol_id::text
+            order by classification.symbol_id::text
+          )
+          from platform.content_symbols as classification
+          where classification.content_id in (content.id, root.id)
+        ), array[]::text[]) as symbol_ids,
+        coalesce((
+          select array_agg(
+            distinct classification.topic_id::text
+            order by classification.topic_id::text
+          )
+          from platform.content_topics as classification
+          where classification.content_id in (content.id, root.id)
+        ), array[]::text[]) as topic_ids
+      from platform.content_items as content
+      join platform.content_items as root on root.id = content.root_id
+      where content.id = ${input.contentId}
+      limit 1
+    `;
+    const projection = projections[0];
+    if (!projection) throw new Error("Content Outbox projection was not found");
+    const canonicalPayload =
+      input.eventType === "content.published"
+        ? {
+            actor_id: projection.actor_id,
+            community_ids: projection.community_ids,
+            content_id: input.contentId,
+            kind: projection.kind,
+            parent_content_id: projection.parent_content_id,
+            revision_id: projection.current_revision_id,
+            root_content_id: projection.root_content_id,
+            symbol_ids: projection.symbol_ids,
+            topic_ids: projection.topic_ids,
+          }
+        : input.eventType === "content.revised"
+          ? {
+              actor_id: projection.actor_id,
+              affected_symbol_ids: projection.symbol_ids,
+              affected_topic_ids: projection.topic_ids,
+              changed_groups: ["body_markdown"],
+              community_ids: projection.community_ids,
+              content_id: input.contentId,
+              resource_version: input.resourceVersion,
+              revision_id: input.revisionId,
+              root_content_id: projection.root_content_id,
+              symbol_ids: projection.symbol_ids,
+              topic_ids: projection.topic_ids,
+            }
+          : {
+              actor_id: projection.actor_id,
+              content_id: input.contentId,
+              current_revision_id: projection.current_revision_id,
+              kind: projection.kind,
+              lifecycle_state: "deleted",
+              resource_version: input.resourceVersion,
+              root_content_id: projection.root_content_id,
+            };
+    if (
+      typeof input.payload !== "object" ||
+      input.payload === null ||
+      Array.isArray(input.payload)
+    ) {
+      throw new Error("Content Outbox fixture payload must be an object");
+    }
+    // Let a test override a canonical field so intentional tamper cases keep
+    // exercising the database guard instead of being normalized away here.
+    const completePayload = { ...canonicalPayload, ...input.payload };
+    const occurredAt = new Date();
     await transaction`
       insert into system.outbox_events (
         id,
@@ -302,7 +404,10 @@ describeOwnerWebSocial("Owner/Human Web social database contract", () => {
         aggregate_sequence,
         event_type,
         event_version,
-        payload
+        payload,
+        occurred_at,
+        available_at,
+        created_at
       )
       values (
         ${outboxId},
@@ -311,7 +416,10 @@ describeOwnerWebSocial("Owner/Human Web social database contract", () => {
         ${aggregateSequence},
         ${input.eventType},
         1,
-        ${transaction.json(input.payload)}
+        ${transaction.json(completePayload)},
+        ${occurredAt},
+        ${occurredAt},
+        ${occurredAt}
       )
     `;
     await transaction`
@@ -443,6 +551,45 @@ describeOwnerWebSocial("Owner/Human Web social database contract", () => {
         update platform.content_items
         set current_revision_id = ${revisionId}
         where id = ${contentId}
+      `;
+      const occurredAt = new Date();
+      await transaction`
+        insert into system.outbox_events (
+          id,
+          aggregate_type,
+          aggregate_id,
+          aggregate_sequence,
+          event_type,
+          event_version,
+          payload,
+          occurred_at,
+          available_at,
+          max_attempts,
+          created_at
+        )
+        values (
+          ${randomUUID()},
+          'content',
+          ${contentId},
+          1,
+          'content.published',
+          1,
+          ${transaction.json({
+            actor_id: actorId,
+            community_ids: [primaryCommunityId],
+            content_id: contentId,
+            kind: "post",
+            parent_content_id: null,
+            revision_id: revisionId,
+            root_content_id: contentId,
+            symbol_ids: [],
+            topic_ids: [],
+          })},
+          ${occurredAt},
+          ${occurredAt},
+          12,
+          ${occurredAt}
+        )
       `;
     });
     return { contentId, revisionId };
@@ -731,6 +878,7 @@ describeOwnerWebSocial("Owner/Human Web social database contract", () => {
           agent_id,
           credential_id,
           channel,
+          authentication_assurance,
           authorization_snapshot,
           action,
           target_type,
@@ -752,6 +900,7 @@ describeOwnerWebSocial("Owner/Human Web social database contract", () => {
           ${agentId},
           ${credentialId},
           'rest',
+          'agent_credential',
           '{"decision":"require_approval"}'::jsonb,
           'content.create_post',
           'community',
@@ -896,6 +1045,7 @@ describeOwnerWebSocial("Owner/Human Web social database contract", () => {
     const revisionId = randomUUID();
     const outboxId = randomUUID();
     const body = `Owner-approved schema regression ${contentId}`;
+    const occurredAt = new Date();
     await asRuntime(async (transaction) => {
       await transaction`
         insert into platform.content_items (
@@ -954,7 +1104,10 @@ describeOwnerWebSocial("Owner/Human Web social database contract", () => {
           aggregate_sequence,
           event_type,
           event_version,
-          payload
+          payload,
+          occurred_at,
+          available_at,
+          created_at
         )
         values (
           ${outboxId},
@@ -965,10 +1118,18 @@ describeOwnerWebSocial("Owner/Human Web social database contract", () => {
           1,
           ${transaction.json({
             actor_id: agentActorId,
+            community_ids: [primaryCommunityId],
             content_id: contentId,
             kind: "post",
+            parent_content_id: null,
             revision_id: revisionId,
-          })}
+            root_content_id: contentId,
+            symbol_ids: [],
+            topic_ids: [],
+          })},
+          ${occurredAt},
+          ${occurredAt},
+          ${occurredAt}
         )
       `;
       const completed = await transaction<{ id: string }[]>`
@@ -1179,7 +1340,8 @@ describeOwnerWebSocial("Owner/Human Web social database contract", () => {
     await postgres.sql.unsafe(`
       grant execute on function
         platform.audit_json_is_secret_free(jsonb),
-        platform.audit_json_is_secret_free_v2(jsonb)
+        platform.audit_json_is_secret_free_v2(jsonb),
+        system.content_v1_outbox_payload_is_valid(text, text, text, integer, jsonb)
       to ${quoteRole(runtimeRole)}
     `);
   });

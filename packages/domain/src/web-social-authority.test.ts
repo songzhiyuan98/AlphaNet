@@ -13,7 +13,10 @@ import {
   OwnerWebSessionContextError,
   type OwnerWebMutationContext,
 } from "./owner-web-session-context.js";
-import { OWNER_WEB_SOCIAL_V1_MIGRATION_CHECKSUM } from "./schema-migrations.js";
+import {
+  OWNER_WEB_SOCIAL_HARDENING_V1_MIGRATION_CHECKSUM,
+  OWNER_WEB_SOCIAL_V1_MIGRATION_CHECKSUM,
+} from "./schema-migrations.js";
 import {
   evaluateOwnerDirectOperation,
   PostgresWebSocialAuthorityResolver,
@@ -284,7 +287,7 @@ async function resolvedAuthorityWithPolicy(
 }
 
 describe("PostgresWebSocialAuthorityResolver", () => {
-  it("pins readiness to migration 000021 and its authority guards", async () => {
+  it("pins readiness to migrations 000021/000022 and their authority guards", async () => {
     const { calls, sql } = fakePostgres();
     await new PostgresWebSocialAuthorityResolver(
       sql,
@@ -295,8 +298,11 @@ describe("PostgresWebSocialAuthorityResolver", () => {
     const readiness = calls.find((call) => call.text.includes("as ready"));
     expect(readiness?.text).toContain("version = '000021'");
     expect(readiness?.text).toContain("name = 'owner_web_social_v1'");
+    expect(readiness?.text).toContain("version = '000022'");
+    expect(readiness?.text).toContain("name = 'owner_web_social_hardening_v1'");
     expect(readiness?.text).toContain("validate_domain_write_subject");
     expect(readiness?.text).toContain("validate_runtime_content_write_provenance");
+    expect(readiness?.text).toContain("validate_runtime_content_outbox_provenance");
     expect(readiness?.text).toContain("action_logs_validate_domain_write_subject");
     expect(readiness?.text).toContain("content_items_validate_runtime_provenance");
     expect(readiness?.text).toContain(
@@ -309,7 +315,17 @@ describe("PostgresWebSocialAuthorityResolver", () => {
     expect(readiness?.text).toContain("mentions_validate_runtime_provenance");
     expect(readiness?.text).toContain("provenance_trigger.tgdeferrable");
     expect(readiness?.text).toContain("provenance_trigger.tginitdeferred");
+    expect(readiness?.text).toContain(
+      "action_logs_authentication_assurance_semantics_v1",
+    );
+    expect(readiness?.text).toContain("outbox_events_content_v1_payload_shape");
+    expect(readiness?.text).toContain("content_v1_outbox_payload_is_valid");
+    expect(readiness?.text).toContain("has_function_privilege");
+    expect(readiness?.text).toContain(
+      "outbox_events_validate_runtime_content_provenance",
+    );
     expect(readiness?.values).toContain(OWNER_WEB_SOCIAL_V1_MIGRATION_CHECKSUM);
+    expect(readiness?.values).toContain(OWNER_WEB_SOCIAL_HARDENING_V1_MIGRATION_CHECKSUM);
   });
 
   it("fails readiness closed with a stable 503 error", async () => {

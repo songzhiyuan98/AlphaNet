@@ -109,6 +109,7 @@ describeReactionWrite("PostgresReactionWriteService", () => {
   let replyContentId = "";
   let replyRootContentId = "";
   let reactorHumanActorId = "";
+  let communityId = "";
   let mixedCommunityContentId = "";
   let suspendedPrimaryCommunityId = "";
   let suspendedPrimaryContentId = "";
@@ -344,7 +345,7 @@ describeReactionWrite("PostgresReactionWriteService", () => {
   beforeAll(async () => {
     await redis.check();
     marker = randomUUID().replaceAll("-", "").slice(0, 10);
-    const communityId = randomUUID();
+    communityId = randomUUID();
     const topicId = randomUUID();
     const communitySlug = `reaction-${marker}`;
     suspendedPrimaryCommunityId = randomUUID();
@@ -627,6 +628,123 @@ describeReactionWrite("PostgresReactionWriteService", () => {
     ]);
     await expect(reactionWriteService.checkReady()).resolves.toBeUndefined();
     await expect(contentReadService.checkReady()).resolves.toBeUndefined();
+  });
+
+  it("keeps Content revision and deletion valid after Reaction events advance the aggregate", async () => {
+    const createFixture = async (label: string) => {
+      const outcome = await researchWriteService.createPost(
+        authorContext,
+        {
+          bodyMarkdown: `Cross-service provenance fixture for ${label}.`,
+          idempotencyKey: `reaction-provenance-create-${randomUUID()}`,
+          primaryCommunityId: communityId,
+          title: `Reaction before ${label}`,
+        },
+        { channel: "integration", requestId: `req-${randomUUID()}` },
+      );
+      expect(outcome.status).toBe("succeeded");
+      return requireId(outcome.result?.contentId, `${label} ContentItem`);
+    };
+
+    const revisedContentId = await createFixture("revision");
+    const deletedContentId = await createFixture("deletion");
+    await expect(
+      setReaction(reactorContext, revisedContentId, "helpful", true),
+    ).resolves.toMatchObject({ status: "succeeded" });
+    await expect(
+      setReaction(reactorContext, deletedContentId, "disagree", true),
+    ).resolves.toMatchObject({ status: "succeeded" });
+
+    await expect(
+      researchWriteService.updateContent(
+        authorContext,
+        {
+          contentId: revisedContentId,
+          editSummary: "Revalidated after receiving an independent social signal.",
+          expectedVersion: 1,
+          idempotencyKey: `reaction-provenance-update-${randomUUID()}`,
+          patch: {
+            bodyMarkdown:
+              "The author independently revalidated this thesis after the reaction.",
+          },
+        },
+        { channel: "integration", requestId: `req-${randomUUID()}` },
+      ),
+    ).resolves.toMatchObject({
+      result: { contentId: revisedContentId, resourceVersion: 2 },
+      status: "succeeded",
+    });
+    await expect(
+      researchWriteService.deleteContent(
+        authorContext,
+        {
+          contentId: deletedContentId,
+          expectedVersion: 1,
+          idempotencyKey: `reaction-provenance-delete-${randomUUID()}`,
+          mode: "soft",
+          reason: "The author withdrew this research after independent review.",
+        },
+        { channel: "integration", requestId: `req-${randomUUID()}` },
+      ),
+    ).resolves.toMatchObject({
+      result: {
+        contentId: deletedContentId,
+        lifecycleState: "deleted",
+        resourceVersion: 2,
+      },
+      status: "succeeded",
+    });
+
+    const events = await postgres.sql<
+      { aggregate_id: string; aggregate_sequence: number; event_type: string }[]
+    >`
+      select
+        aggregate_id,
+        aggregate_sequence::integer as aggregate_sequence,
+        event_type
+      from system.outbox_events
+      where aggregate_type = 'content'
+        and aggregate_id in (${revisedContentId}, ${deletedContentId})
+      order by aggregate_id, aggregate_sequence
+    `;
+    expect(events).toEqual(
+      [
+        {
+          aggregate_id: revisedContentId,
+          aggregate_sequence: 1,
+          event_type: "content.published",
+        },
+        {
+          aggregate_id: revisedContentId,
+          aggregate_sequence: 2,
+          event_type: "reaction.changed",
+        },
+        {
+          aggregate_id: revisedContentId,
+          aggregate_sequence: 3,
+          event_type: "content.revised",
+        },
+        {
+          aggregate_id: deletedContentId,
+          aggregate_sequence: 1,
+          event_type: "content.published",
+        },
+        {
+          aggregate_id: deletedContentId,
+          aggregate_sequence: 2,
+          event_type: "reaction.changed",
+        },
+        {
+          aggregate_id: deletedContentId,
+          aggregate_sequence: 3,
+          event_type: "content.deleted",
+        },
+      ].sort(
+        (left, right) =>
+          left.aggregate_id.localeCompare(right.aggregate_id) ||
+          left.aggregate_sequence - right.aggregate_sequence,
+      ),
+    );
   });
 
   it("preserves the direct Content Follow state in Reaction results", async () => {
