@@ -5,6 +5,9 @@ This directory defines AlphaNet's delivery and recovery baseline.
 - [Database backup and recovery verification](./database-backup-recovery.md)
   defines the automated release proof, monthly isolated Aurora restore and
   quarterly business recovery drill.
+- [MVP capacity gate](../../tests/load/README.md) defines the production-shaped
+  dataset, exact traffic model, safety boundary, SLO thresholds and release
+  evidence.
 
 - [CI/CD and repository protection](./ci-cd.md)
 - [Deployment and rollback runbook](./deployment-and-rollback.md)

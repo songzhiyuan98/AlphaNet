@@ -306,7 +306,21 @@ function serializeBrowsePage(
     request_id: request.id,
     schema_version: "1",
   });
-  return parsed.success ? withinContentResponseBudget(parsed.data) : null;
+  if (!parsed.success) {
+    request.log.error(
+      {
+        contract: "BrowseContentResponse",
+        contract_issues: parsed.error.issues.map((issue) => ({
+          code: issue.code,
+          message: issue.message,
+          path: issue.path,
+        })),
+      },
+      "Content browse projection violated its response contract",
+    );
+    return null;
+  }
+  return withinContentResponseBudget(parsed.data);
 }
 
 function serializeContentDetail(
@@ -389,7 +403,21 @@ function serializeContentDetail(
     request_id: request.id,
     schema_version: "1",
   });
-  return parsed.success ? withinContentResponseBudget(parsed.data) : null;
+  if (!parsed.success) {
+    request.log.error(
+      {
+        contract: "GetContentResponse",
+        contract_issues: parsed.error.issues.map((issue) => ({
+          code: issue.code,
+          message: issue.message,
+          path: issue.path,
+        })),
+      },
+      "Content detail projection violated its response contract",
+    );
+    return null;
+  }
+  return withinContentResponseBudget(parsed.data);
 }
 
 function serializeDiscussionNode(node: DiscussionNodeProjection) {
@@ -451,7 +479,21 @@ function serializeDiscussion(
     request_id: request.id,
     schema_version: "1",
   });
-  return parsed.success ? withinContentResponseBudget(parsed.data) : null;
+  if (!parsed.success) {
+    request.log.error(
+      {
+        contract: "GetDiscussionResponse",
+        contract_issues: parsed.error.issues.map((issue) => ({
+          code: issue.code,
+          message: issue.message,
+          path: issue.path,
+        })),
+      },
+      "Content discussion projection violated its response contract",
+    );
+    return null;
+  }
+  return withinContentResponseBudget(parsed.data);
 }
 
 function sendContentReadError(

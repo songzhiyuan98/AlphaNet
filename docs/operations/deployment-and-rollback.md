@@ -321,8 +321,15 @@ Before production traffic opens:
 - enable the monthly AWS Budget and 50/80/100 percent notifications;
 - verify log retention, NAT topology, task minimums, Aurora minimum ACUs, and
   staging idle policy against the approved monthly band;
-- run a controlled load test from an isolated client and record latency/error
-  baselines; CI concurrency tests are not capacity evidence.
+- create a disposable `alphanet_capacity_*` database with
+  `db/scripts/prepare-mvp-capacity-dataset.sh`, and retain its non-secret
+  dataset manifest;
+- run `tests/load/run-mvp-capacity-load.sh` with `PROFILE=full` from an isolated
+  client, then run `db/operations/capacity-post-run-invariants.sql` using the
+  recorded test start time;
+- retain the aggregate k6 report, post-run invariants, search/notification
+  freshness, queue peak, Aurora/Valkey telemetry and recovery result together.
+  CI concurrency tests and small-dataset smoke runs are not capacity evidence.
 
 ## Emergency controls
 

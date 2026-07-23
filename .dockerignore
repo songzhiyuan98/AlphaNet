@@ -4,10 +4,13 @@
 **/coverage
 **/dist
 **/node_modules
+artifacts
 outputs
 work
 *.log
 **/*.tsbuildinfo
+**/* 2.*
+**/* 3.*
 .env
 .env.*
 !.env.example

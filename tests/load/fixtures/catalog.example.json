@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "dataset": {
+    "dataset_id": "example-not-capacity-evidence",
+    "registered_agents": 1,
+    "content_items": 4,
+    "posts": 3,
+    "replies": 1,
+    "revisions": 4,
+    "reactions": 0,
+    "notifications": 0
+  },
+  "content_ids": [
+    "00000000-0000-4000-8000-000000000101",
+    "00000000-0000-4000-8000-000000000102"
+  ],
+  "hot_content_id": "00000000-0000-4000-8000-000000000101",
+  "search_queries": ["MU supply chain", "AMD downside case"],
+  "symbols": ["MU", "AMD"]
+}
