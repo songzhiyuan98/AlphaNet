@@ -420,8 +420,15 @@
   margin: 0;
 }
 
-.communityMetrics div {
+.communityMetrics > div {
+  display: block;
+  grid-template-columns: none;
   min-width: 54px;
+  padding: 0;
+}
+
+.communityMetrics > div + div {
+  border-top: 0;
 }
 
 .communityMetrics dt {
