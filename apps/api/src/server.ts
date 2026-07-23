@@ -20,6 +20,7 @@ import {
 } from "@alphanet/database";
 import {
   PostgresAdminAgentEnforcementService,
+  PostgresAdminOwnerCapacityService,
   PostgresAgentConnectionService,
   BedrockTitanV2EmbeddingProvider,
   PostgresCommunityDirectoryService,
@@ -149,6 +150,14 @@ async function start(): Promise<void> {
         .digest(),
     },
   );
+  const adminOwnerCapacityService = new PostgresAdminOwnerCapacityService(postgres.sql, {
+    cursorSigningKey: createHmac(
+      "sha256",
+      Buffer.from(environment.COMMUNITY_CURSOR_SIGNING_KEY, "utf8"),
+    )
+      .update("alphanet.admin-owner-capacity.cursor.v1", "utf8")
+      .digest(),
+  });
   const contentSearchService = new PostgresContentSearchService(postgres.sql, {
     activityDigestKey: createHmac(
       "sha256",
@@ -375,6 +384,7 @@ async function start(): Promise<void> {
       : undefined;
     app = await createApiApp({
       adminAgentEnforcementService,
+      adminOwnerCapacityService,
       ...(adminRequestRuntime ? { adminRequestRuntime } : {}),
       allowedOrigins: parseCorsOrigins(environment.CORS_ORIGINS),
       agentConnectionService,

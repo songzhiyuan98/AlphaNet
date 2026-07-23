@@ -111,6 +111,12 @@ async function assertSchema(client) {
          where version = '000024'
            and name = 'admin_agent_enforcement_v1'
        ) as agent_governance_ready,
+       exists (
+         select 1
+         from system.schema_migrations
+         where version = '000025'
+           and name = 'admin_owner_capacity_v1'
+       ) as owner_capacity_ready,
        to_regclass('platform.admins') is not null as admins_ready,
        to_regclass('platform.reports') is not null as reports_ready,
        to_regclass('platform.moderation_actions') is not null as actions_ready`,
@@ -120,11 +126,12 @@ async function assertSchema(client) {
     state?.moderation_ready !== true ||
     state.community_ready !== true ||
     state.agent_governance_ready !== true ||
+    state.owner_capacity_ready !== true ||
     state.admins_ready !== true ||
     state.reports_ready !== true ||
     state.actions_ready !== true
   ) {
-    fail("apply AlphaNet migrations through 000024 before seeding");
+    fail("apply AlphaNet migrations through 000025 before seeding");
   }
 }
 
@@ -366,6 +373,7 @@ async function verifyFixture(client) {
             'moderation:read',
             'moderation:decide',
             'community:manage',
+            'identity:quota_manage',
             'identity:restrict',
             'credential:revoke'
           ))
@@ -384,7 +392,7 @@ async function verifyFixture(client) {
     state.active_owners !== 2 ||
     state.reporter_agents !== 1 ||
     state.visible_content !== 1 ||
-    state.admin_permissions !== 5
+    state.admin_permissions !== 6
   ) {
     fail(`fixture verification failed: ${JSON.stringify(state)}`);
   }

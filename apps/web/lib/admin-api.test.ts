@@ -213,6 +213,114 @@ const topicCommunityMutationResponse = {
   schema_version: "1",
 } as const;
 
+const ownerId = "90000000-0000-4000-8000-000000000001";
+const ownerSummary = {
+  active_agent_count: 2,
+  base_active_agent_limit: 5,
+  closed_at: null,
+  created_at: times.opened,
+  credential_counts: { active: 2, expired: 1, revoked: 0, total: 3 },
+  current_override: null,
+  effective_active_agent_limit: 5,
+  email_hint: "r***@example.test",
+  email_verified: true,
+  owner_id: ownerId,
+  quota_version: 1,
+  restricted_at: null,
+  status: "active",
+  suspended_at: null,
+  total_agent_count: 2,
+  updated_at: times.reported,
+} as const;
+
+const ownerListResponse = {
+  capabilities: { can_manage_quota: true },
+  items: [ownerSummary],
+  ordering: {
+    as_of: times.reported,
+    ordering_version: "admin-owner-created-keyset-v1",
+    snapshot_id: "owner-snapshot-1",
+  },
+  page: { has_more: false, limit: 25, next_cursor: null },
+  request_id: "request-owner-list-1",
+  schema_version: "1",
+} as const;
+
+const ownerDetailResponse = {
+  capabilities: { can_manage_quota: true },
+  owner: ownerSummary,
+  request_id: "request-owner-detail-1",
+  schema_version: "1",
+} as const;
+
+const ownerQuotaResponse = {
+  action: {
+    action: "set_override",
+    action_id: "90000000-0000-4000-8000-000000000002",
+    admin_id: ids.admin,
+    occurred_at: times.decided,
+    permission_used: "identity:quota_manage",
+    quota_version_after: 2,
+    quota_version_before: 1,
+    reason_code: "research_team_expansion",
+  },
+  owner: {
+    ...ownerSummary,
+    current_override: {
+      created_at: times.decided,
+      expires_at: "2026-07-25T18:20:00.000Z",
+      max_active_agents: 10,
+      override_id: "90000000-0000-4000-8000-000000000003",
+      reason_code: "research_team_expansion",
+    },
+    effective_active_agent_limit: 10,
+    quota_version: 2,
+  },
+  request_id: "request-owner-quota-1",
+  schema_version: "1",
+} as const;
+
+const registrationControlResponse = {
+  capabilities: { can_manage_quota: true },
+  control: {
+    active_agent_count: 2,
+    active_agent_hard_limit: 10_000,
+    active_agent_operating_target: 5_000,
+    mode: "open",
+    pause_reason_code: null,
+    paused_at: null,
+    resume_condition: null,
+    updated_at: times.reported,
+    version: 1,
+  },
+  request_id: "request-capacity-1",
+  schema_version: "1",
+} as const;
+
+const registrationActionResponse = {
+  action: {
+    action: "pause_registration",
+    action_id: "90000000-0000-4000-8000-000000000004",
+    admin_id: ids.admin,
+    occurred_at: times.decided,
+    permission_used: "identity:quota_manage",
+    reason_code: "capacity_threshold_reached",
+    version_after: 2,
+    version_before: 1,
+  },
+  control: {
+    ...registrationControlResponse.control,
+    mode: "paused",
+    pause_reason_code: "capacity_threshold_reached",
+    paused_at: times.decided,
+    resume_condition: "Resume below the operating threshold.",
+    updated_at: times.decided,
+    version: 2,
+  },
+  request_id: "request-capacity-action-1",
+  schema_version: "1",
+} as const;
+
 const enabledConfig: EnabledAdminWebConfig = {
   awsRegion: "us-west-2",
   callbackUrl: "https://app.alphanet.example/admin/auth/callback",
@@ -472,6 +580,96 @@ describe("Admin API server-side BFF", () => {
     expect(updateHeaders.get("if-match")).toBe('"1"');
     expect(updateHeaders.get("idempotency-key")).toBe(
       `topic-community-update-${attemptId}`,
+    );
+  });
+
+  it("reads and governs Owner quotas and registration capacity", async () => {
+    const responses = [
+      jsonResponse(ownerListResponse),
+      jsonResponse(ownerDetailResponse),
+      jsonResponse(registrationControlResponse),
+      jsonResponse(ownerQuotaResponse, { status: 201 }),
+      jsonResponse(registrationActionResponse, { status: 201 }),
+    ];
+    const fetchImplementation = fetchMock(() => {
+      const response = responses.shift();
+      if (!response) throw new Error("Unexpected extra capacity request.");
+      return response;
+    });
+    const client = createAdminApiClient(clientDependencies(fetchImplementation));
+    const attemptId = "90000000-0000-4000-8000-000000000005";
+
+    await expect(
+      client.listOwners({ limit: 25, query: "example", statuses: ["active"] }),
+    ).resolves.toEqual({
+      data: ownerListResponse,
+      kind: "success",
+      status: 200,
+    });
+    expect(fetchImplementation.mock.calls[0]?.[0]).toBe(
+      "http://api.internal:4000/v1/admin/owners?" +
+        "statuses=active&query=example&limit=25",
+    );
+
+    await expect(client.getOwner(ownerId)).resolves.toEqual({
+      data: ownerDetailResponse,
+      kind: "success",
+      status: 200,
+    });
+    await expect(client.getRegistration()).resolves.toEqual({
+      data: registrationControlResponse,
+      kind: "success",
+      status: 200,
+    });
+
+    await expect(
+      client.actOnOwnerQuota({
+        action: {
+          action: "set_override",
+          expires_at: "2026-07-25T18:20:00.000Z",
+          max_active_agents: 10,
+          reason_code: "research_team_expansion",
+        },
+        attemptId,
+        ownerId,
+        quotaVersion: 1,
+      }),
+    ).resolves.toEqual({
+      data: ownerQuotaResponse,
+      kind: "success",
+      status: 201,
+    });
+    const ownerAction = fetchImplementation.mock.calls[3];
+    expect(ownerAction?.[0]).toBe(
+      `http://api.internal:4000/v1/admin/owners/${ownerId}/quota-actions`,
+    );
+    const ownerHeaders = new Headers(ownerAction?.[1]?.headers);
+    expect(ownerHeaders.get("if-match")).toBe('"1"');
+    expect(ownerHeaders.get("idempotency-key")).toBe(`owner-quota-${attemptId}`);
+
+    await expect(
+      client.actOnRegistration({
+        action: {
+          action: "pause_registration",
+          reason_code: "capacity_threshold_reached",
+          resume_condition: "Resume below the operating threshold.",
+        },
+        attemptId,
+        capacityVersion: 1,
+      }),
+    ).resolves.toEqual({
+      data: registrationActionResponse,
+      kind: "success",
+      status: 201,
+    });
+    const capacityAction = fetchImplementation.mock.calls[4];
+    expect(capacityAction?.[0]).toBe(
+      "http://api.internal:4000/v1/admin/capacity/actions",
+    );
+    const capacityHeaders = new Headers(capacityAction?.[1]?.headers);
+    expect(capacityHeaders.get("if-match")).toBe('"1"');
+    expect(capacityHeaders.get("idempotency-key")).toBe(
+      `registration-capacity-${attemptId}`,
     );
   });
 

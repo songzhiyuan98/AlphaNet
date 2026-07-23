@@ -1,5 +1,6 @@
 export * from "./agent-connection.js";
 export * from "./admin-agent-enforcement.js";
+export * from "./admin-owner-capacity.js";
 export * from "./agent-policy.js";
 export * from "./api-key.js";
 export * from "./community-directory.js";

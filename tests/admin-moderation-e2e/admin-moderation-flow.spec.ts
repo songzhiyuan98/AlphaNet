@@ -505,3 +505,106 @@ test("workforce Admin suspends and restores an Agent with audited authority chan
     },
   ]);
 });
+
+test("workforce Admin pauses registration and governs a temporary Owner quota", async ({
+  page,
+}) => {
+  const ownerRows = await queryDatabase<{ owner_id: string }>(
+    `select owner.id::text as owner_id
+     from platform.owners as owner
+     join auth.users as auth_user on auth_user.id = owner.auth_user_id
+     where auth_user.email = $1`,
+    [fixture.reporterEmail],
+  );
+  const ownerId = ownerRows[0]?.owner_id;
+  if (!ownerId) throw new Error("The reporter Owner fixture is missing.");
+
+  await page.goto("/admin/capacity");
+  await expect(page.getByRole("heading", { name: "社区管理" })).toBeVisible();
+  await page.getByRole("button", { name: "使用 Workforce 身份登录" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Complete workforce MFA" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Approve with MFA" }).click();
+  await page.waitForURL((url) => url.pathname === "/admin/capacity", {
+    timeout: 20_000,
+  });
+
+  await expect(page.getByRole("heading", { name: "身份容量" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "身份容量" })).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+  await page.getByLabel("受控原因").selectOption("infrastructure_degradation");
+  await page.getByLabel("恢复条件").fill("E2E infrastructure capacity is healthy again.");
+  await page.getByRole("button", { name: "确认执行" }).click();
+  await expect(page.getByText("平台注册容量已更新并写入审计记录。")).toBeVisible();
+  await expect(page.getByText(/当前暂停/u)).toBeVisible();
+
+  await page.getByLabel("受控原因").selectOption("incident_resolved");
+  await page.getByRole("button", { name: "确认执行" }).click();
+  await expect(page.getByText(/当前开放/u)).toBeVisible();
+
+  await page.goto(`/admin/owners/${ownerId}`);
+  await expect(page.getByRole("heading", { name: /@alphanet\.local/u })).toBeVisible();
+  await page.getByLabel("活跃 Agent 上限").fill("7");
+  const expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1_000);
+  const localDateTime = new Date(
+    expiresAt.getTime() - expiresAt.getTimezoneOffset() * 60 * 1_000,
+  )
+    .toISOString()
+    .slice(0, 16);
+  await page.getByLabel("到期时间").fill(localDateTime);
+  await page.getByLabel("受控原因").selectOption("validated_operational_need");
+  await page.getByRole("button", { name: "确认执行" }).click();
+  await expect(page.getByText("Owner 配额已更新并写入审计记录。")).toBeVisible();
+  await expect(page.getByText("7", { exact: true })).toBeVisible();
+  await expect(page.getByText(/临时配额到期时间/u)).toBeVisible();
+
+  await page.getByLabel("动作").selectOption("revoke_override");
+  await page.getByLabel("受控原因").selectOption("validated_operational_need");
+  await page.getByRole("button", { name: "确认执行" }).click();
+  await expect(page.getByText(/临时配额到期时间/u)).toHaveCount(0);
+
+  const state = await queryDatabase<{
+    capacity_action_count: number;
+    owner_action_count: number;
+    owner_quota_version: number;
+    registration_mode: string;
+    unrevoked_overrides: number;
+  }>(
+    `select
+       owner.quota_version::integer as owner_quota_version,
+       control.mode as registration_mode,
+       (
+         select count(*)::integer
+         from platform.owner_agent_quota_overrides as override
+         where override.owner_id = owner.id
+           and override.revoked_at is null
+       ) as unrevoked_overrides,
+       (
+         select count(*)::integer
+         from platform.owner_capacity_admin_actions as action
+         where action.owner_id = owner.id
+       ) as owner_action_count,
+       (
+         select count(*)::integer
+         from platform.owner_capacity_admin_actions as action
+         where action.target_kind = 'registration_control'
+       ) as capacity_action_count
+     from platform.owners as owner
+     cross join platform.registration_controls as control
+     where owner.id = $1::uuid
+       and control.id = true`,
+    [ownerId],
+  );
+  expect(state).toEqual([
+    {
+      capacity_action_count: 2,
+      owner_action_count: 2,
+      owner_quota_version: 3,
+      registration_mode: "open",
+      unrevoked_overrides: 0,
+    },
+  ]);
+});
