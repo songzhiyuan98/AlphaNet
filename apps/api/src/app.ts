@@ -24,10 +24,14 @@ import type {
   ContentSearchService,
   FollowService,
   NotificationService,
+  OwnerSocialIdentityService,
+  OwnerWebContextIssuer,
+  OwnerWebResearchWriteService,
   OwnerPendingActionService,
   PendingActionStatusService,
   ReactionWriteService,
   ResearchWriteService,
+  WebSocialAuthorityResolver,
 } from "@alphanet/domain";
 import Fastify, {
   type FastifyInstance,
@@ -58,6 +62,7 @@ import { registerOwnerActionRoutes } from "./owner-action-routes.js";
 import { registerOwnerRemoteMcpOAuthConsentRoutes } from "./owner-oauth-consent-routes.js";
 import { registerOwnerAgentPolicyRoutes } from "./owner-policy-routes.js";
 import { registerOwnerReportRoutes } from "./owner-report-routes.js";
+import { registerOwnerSocialRoutes } from "./owner-social-routes.js";
 import { registerPendingActionRoutes } from "./pending-action-routes.js";
 import { registerReactionRoutes } from "./reaction-routes.js";
 import { registerFollowRoutes } from "./follow-routes.js";
@@ -87,6 +92,10 @@ export interface ApiAppOptions {
   internalSsrRequestSecret?: string;
   logger?: FastifyBaseLogger;
   ownerPendingActionService?: OwnerPendingActionService;
+  ownerSocialIdentityService?: OwnerSocialIdentityService;
+  ownerWebContextIssuer?: OwnerWebContextIssuer;
+  ownerWebResearchWriteService?: OwnerWebResearchWriteService;
+  ownerWebSocialAuthorityResolver?: Pick<WebSocialAuthorityResolver, "checkReady">;
   pendingActionStatusService?: PendingActionStatusService;
   reactionWriteService?: ReactionWriteService;
   remoteMcpOAuthConsent?: {
@@ -462,6 +471,9 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
       options.followService ||
       options.notificationService ||
       options.ownerPendingActionService ||
+      options.ownerSocialIdentityService ||
+      options.ownerWebResearchWriteService ||
+      options.ownerWebSocialAuthorityResolver ||
       options.pendingActionStatusService ||
       options.reactionWriteService ||
       options.remoteMcpOAuthConsent ||
@@ -568,6 +580,24 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
             critical: true,
             name: "owner-pending-action-schema",
             check: () => options.ownerPendingActionService!.checkReady(),
+          },
+        ]
+      : []),
+    ...(options.ownerSocialIdentityService
+      ? [
+          {
+            critical: true,
+            name: "owner-social-identity-schema",
+            check: () => options.ownerSocialIdentityService!.checkReady(),
+          },
+        ]
+      : []),
+    ...(options.ownerWebSocialAuthorityResolver
+      ? [
+          {
+            critical: true,
+            name: "owner-web-social-authority-schema",
+            check: () => options.ownerWebSocialAuthorityResolver!.checkReady(),
           },
         ]
       : []),
@@ -931,6 +961,22 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
         ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
         resolveClientIp,
         service: options.ownerPendingActionService,
+      });
+    }
+
+    if (
+      options.ownerSocialIdentityService &&
+      options.ownerWebContextIssuer &&
+      options.ownerWebResearchWriteService
+    ) {
+      registerOwnerSocialRoutes(app, {
+        allowedOrigins: options.allowedOrigins,
+        authRuntime,
+        contextIssuer: options.ownerWebContextIssuer,
+        identityService: options.ownerSocialIdentityService,
+        ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
+        researchWriteService: options.ownerWebResearchWriteService,
+        resolveClientIp,
       });
     }
 

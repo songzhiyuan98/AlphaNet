@@ -60,6 +60,13 @@ import {
   OWNER_WEB_SOCIAL_HARDENING_V1_MIGRATION_CHECKSUM,
   PENDING_ACTION_EXECUTION_MIGRATION_CHECKSUM,
 } from "./schema-migrations.js";
+import {
+  evaluateOwnerDirectOperation,
+  type WebSocialAuthority,
+  type WebSocialAuthorityResolver,
+  type WebSocialAuthoritySelection,
+} from "./web-social-authority.js";
+import type { OwnerWebMutationContext } from "./owner-web-session-context.js";
 
 const BODY_BYTES_LIMIT = 160 * 1_024;
 const COMMAND_BYTES_LIMIT = 1_024 * 1_024;
@@ -322,6 +329,19 @@ export interface ResearchWriteService {
   ): Promise<DeleteContentResearchWriteOutcome>;
 }
 
+export interface OwnerWebResearchWriteService {
+  createPostAsOwnerWeb(
+    context: OwnerWebMutationContext,
+    selection: WebSocialAuthoritySelection,
+    input: CreatePostResearchWriteInput,
+  ): Promise<CreatePostResearchWriteOutcome>;
+  replyToContentAsOwnerWeb(
+    context: OwnerWebMutationContext,
+    selection: WebSocialAuthoritySelection,
+    input: ReplyResearchWriteInput,
+  ): Promise<ReplyResearchWriteOutcome>;
+}
+
 export type ApprovedResearchExecutionDisposition = "invalidate" | "retry";
 
 export class ApprovedResearchExecutionError extends Error {
@@ -387,6 +407,7 @@ export interface PostgresResearchWriteOptions {
   pendingActionTtlMs?: number | undefined;
   protectedActionIntentsPerHour?: number | undefined;
   antiSpamLimits?: Partial<ResearchAntiSpamLimits> | undefined;
+  webSocialAuthorityResolver?: WebSocialAuthorityResolver | undefined;
 }
 
 export interface AgentContentRateLimits {
@@ -418,6 +439,20 @@ interface AuthorizationRow {
   policy_tier: AgentPolicyTier;
   policy_version: string;
   policy_rules: unknown;
+}
+
+interface OwnerWebWritePrincipal {
+  actorId: string;
+  actorKind: "agent" | "human";
+  agentActivatedAt: Date | null;
+  agentId: string | null;
+  approvalMethod: "human_direct" | "owner_direct";
+  authenticationAssurance: "fresh_owner_session" | "owner_session";
+  authority: WebSocialAuthority;
+  evaluation: AgentOperationEvaluation;
+  ownerId: string;
+  policyVersion: string | null;
+  principalScopeKey: string;
 }
 
 interface IdempotencyRow {
@@ -1058,6 +1093,114 @@ function policySnapshot(
   };
 }
 
+function ownerWebWritePrincipal(
+  authority: WebSocialAuthority,
+  operation: "create_post" | "reply_to_content",
+): OwnerWebWritePrincipal {
+  if (authority.kind === "human_direct") {
+    return {
+      actorId: authority.actor.id,
+      actorKind: "human",
+      agentActivatedAt: null,
+      agentId: null,
+      approvalMethod: "human_direct",
+      authenticationAssurance: authority.requestContext.authenticationAssurance,
+      authority,
+      evaluation: {
+        credentialCeilingDecision: "allow",
+        decision: "allow",
+        matchedScope: null,
+        ownerPolicyDecision: "allow",
+        policyRuleSource: "tier_default",
+        reason: "ALLOWED_BY_POLICY",
+        requiredScopes: [],
+        scopeSatisfied: true,
+      },
+      ownerId: authority.owner.id,
+      policyVersion: null,
+      principalScopeKey: authority.principalScopeKey,
+    };
+  }
+
+  const direct = evaluateOwnerDirectOperation(authority, operation);
+  const policyRuleSource =
+    authority.currentPolicy.tier === "custom"
+      ? "custom_override"
+      : authority.currentPolicy.tier === "assisted"
+        ? "assisted_inheritance"
+        : "tier_default";
+  return {
+    actorId: authority.actor.id,
+    actorKind: "agent",
+    agentActivatedAt: authority.agent.activatedAt,
+    agentId: authority.agent.id,
+    approvalMethod: "owner_direct",
+    authenticationAssurance: authority.requestContext.authenticationAssurance,
+    authority,
+    evaluation: {
+      credentialCeilingDecision: "allow",
+      decision: direct.decision,
+      matchedScope: null,
+      ownerPolicyDecision: direct.ownerPolicyDecision,
+      policyRuleSource,
+      reason:
+        direct.reason === "POLICY_DENIED" || direct.reason === "POLICY_RULES_UNAVAILABLE"
+          ? direct.reason
+          : direct.ownerPolicyDecision === "require_approval"
+            ? "OWNER_APPROVAL_REQUIRED"
+            : "ALLOWED_BY_POLICY",
+      requiredScopes: [],
+      scopeSatisfied: true,
+    },
+    ownerId: authority.owner.id,
+    policyVersion: authority.currentPolicy.version,
+    principalScopeKey: authority.principalScopeKey,
+  };
+}
+
+function ownerWebPolicySnapshot(
+  principal: OwnerWebWritePrincipal,
+  decisionId: string,
+): postgres.JSONValue {
+  const authority = principal.authority;
+  const shared = {
+    approval_method: principal.approvalMethod,
+    approved_by_owner_id: principal.ownerId,
+    authenticated_at: authority.requestContext.authenticatedAt.toISOString(),
+    authentication_assurance: principal.authenticationAssurance,
+    authority_checked_at: authority.authorityCheckedAt.toISOString(),
+    csrf_validated: true,
+    decision: principal.evaluation.decision,
+    decision_id: decisionId,
+    owner_id: principal.ownerId,
+    principal_scope_key: principal.principalScopeKey,
+  };
+  if (authority.kind === "human_direct") {
+    return {
+      ...shared,
+      actor_id: principal.actorId,
+      actor_kind: "human",
+      human_direct: true,
+    };
+  }
+  return {
+    ...shared,
+    actor_id: principal.actorId,
+    actor_kind: "agent",
+    agent_id: authority.agent.id,
+    owner_policy_decision: principal.evaluation.ownerPolicyDecision,
+    policy: {
+      defaults_version: authority.currentPolicy.defaultsVersion,
+      id: authority.currentPolicy.id,
+      rule_source: principal.evaluation.policyRuleSource,
+      rules: authority.currentPolicy.rules,
+      schema_version: authority.currentPolicy.schemaVersion,
+      tier: authority.currentPolicy.tier,
+      version: authority.currentPolicy.version,
+    },
+  };
+}
+
 function approvedExecutionPolicySnapshot(
   frozenPolicy: Readonly<Record<string, unknown>>,
   currentAuthorization: AuthorizationRow,
@@ -1635,7 +1778,9 @@ function prepareRevision(command: NewResearchCommand): PreparedRevision {
   });
 }
 
-export class PostgresResearchWriteService implements ResearchWriteService {
+export class PostgresResearchWriteService
+  implements ResearchWriteService, OwnerWebResearchWriteService
+{
   readonly #activePendingActionsPerAgent: number;
   readonly #agentContentRateLimits: AgentContentRateLimits;
   readonly #antiSpamLimits: ResearchAntiSpamLimits;
@@ -1648,6 +1793,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
   readonly #pendingActionTtlMs: number;
   readonly #protectedActionIntentsPerHour: number;
   readonly #sql: PostgresClient;
+  readonly #webSocialAuthorityResolver: WebSocialAuthorityResolver | null;
 
   constructor(sql: PostgresClient, options: PostgresResearchWriteOptions) {
     const retention = options.idempotencyRetentionMs ?? 30 * 24 * 60 * 60 * 1_000;
@@ -1763,6 +1909,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     this.#antiSpamLimits = antiSpamLimits;
     this.#actionLogHmacKeyVersion = currentKeyVersion;
     this.#sql = sql;
+    this.#webSocialAuthorityResolver = options.webSocialAuthorityResolver ?? null;
     this.#clock = options.clock ?? (() => new Date());
     this.#idFactory = options.idFactory ?? randomUUID;
     this.#idempotencyRetentionMs = retention;
@@ -2283,7 +2430,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
                 );
                 await this.#enforceAgentContentRate(
                   transaction,
-                  authorization,
+                  authorization.agent_activated_at,
                   frozenAction.agentId,
                   "create_post",
                   now,
@@ -2305,7 +2452,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
                 );
                 await this.#enforceAgentContentRate(
                   transaction,
-                  authorization,
+                  authorization.agent_activated_at,
                   frozenAction.agentId,
                   "reply_to_content",
                   now,
@@ -2324,7 +2471,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
                 replyTarget,
               });
               const persisted = await this.#insertResearchContent(transaction, {
-                authorization,
+                actorId: authorization.actor_id,
                 command,
                 facts,
                 now,
@@ -2475,6 +2622,403 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       }
       throw error;
     }
+  }
+
+  async createPostAsOwnerWeb(
+    context: OwnerWebMutationContext,
+    selection: WebSocialAuthoritySelection,
+    input: CreatePostResearchWriteInput,
+  ): Promise<CreatePostResearchWriteOutcome> {
+    const outcome = await this.#dispatchOwnerWeb(
+      context,
+      selection,
+      "create_post",
+      () => normalizeCreatePostCommand(input),
+      input.idempotencyKey,
+    );
+    if (outcome.operation !== "create_post") {
+      throw new Error("Owner Web create-post dispatch returned the wrong operation.");
+    }
+    return outcome;
+  }
+
+  async replyToContentAsOwnerWeb(
+    context: OwnerWebMutationContext,
+    selection: WebSocialAuthoritySelection,
+    input: ReplyResearchWriteInput,
+  ): Promise<ReplyResearchWriteOutcome> {
+    const outcome = await this.#dispatchOwnerWeb(
+      context,
+      selection,
+      "reply_to_content",
+      () => normalizeReplyCommand(input),
+      input.idempotencyKey,
+    );
+    if (outcome.operation !== "reply_to_content") {
+      throw new Error("Owner Web reply dispatch returned the wrong operation.");
+    }
+    return outcome;
+  }
+
+  async #dispatchOwnerWeb(
+    context: OwnerWebMutationContext,
+    selection: WebSocialAuthoritySelection,
+    operation: "create_post" | "reply_to_content",
+    normalize: () => NewResearchCommand,
+    idempotencyKey: string,
+  ): Promise<ResearchWriteOutcome> {
+    const resolver = this.#webSocialAuthorityResolver;
+    if (!resolver) {
+      throw new Error("Owner Web research writes are not configured.");
+    }
+    let evaluation: AgentOperationEvaluation | null = null;
+    try {
+      return await this.#sql.begin(async (transaction) => {
+        await transaction`set local statement_timeout = '10s'`;
+        const authority = await resolver.resolveAuthorityInTransaction(
+          transaction,
+          context,
+          selection,
+        );
+        const principal = ownerWebWritePrincipal(authority, operation);
+        evaluation = principal.evaluation;
+        const command = normalize();
+        return this.#writeOwnerWebInTransaction(
+          transaction,
+          principal,
+          command,
+          idempotencyKey,
+        );
+      });
+    } catch (caught) {
+      const error =
+        caught instanceof ResearchCommandValidationError
+          ? normalizeCommandError(caught)
+          : caught;
+      if (error instanceof ResearchWriteError && evaluation !== null) {
+        return expectedErrorOutcome(operation, evaluation, error);
+      }
+      throw error;
+    }
+  }
+
+  async #writeOwnerWebInTransaction(
+    transaction: TransactionSql,
+    principal: OwnerWebWritePrincipal,
+    command: NewResearchCommand,
+    idempotencyKey: string,
+  ): Promise<ResearchWriteOutcome> {
+    validateIdempotencyKey(idempotencyKey);
+    const mentionHandles = validateCommandBudgets(command);
+    const digestBytes = digestResearchCommandBytes(command);
+    const auditDigests = this.#actionAuditDigests(digestBytes, idempotencyKey);
+    const principalScopeKey = principal.principalScopeKey;
+
+    await this.#lockIdempotency(
+      transaction,
+      principalScopeKey,
+      command.operation,
+      idempotencyKey,
+    );
+    const existing = await this.#findIdempotency(
+      transaction,
+      principalScopeKey,
+      command.operation,
+      idempotencyKey,
+    );
+    if (existing) {
+      if (!sameDigest(existing.request_digest, digestBytes)) {
+        throw new ResearchWriteError(
+          "IDEMPOTENCY_CONFLICT",
+          "This idempotency key was already used with different normalized input.",
+        );
+      }
+      if (existing.status === "admission_reserved" || existing.status === "in_progress") {
+        throw new ResearchWriteError(
+          "IDEMPOTENCY_IN_PROGRESS",
+          "The original write is still in progress.",
+          { retryable: true },
+        );
+      }
+      return parsePersistedOutcome(existing.response_body, command.operation);
+    }
+
+    const now = new Date(this.#clock().valueOf());
+    if (Number.isNaN(now.valueOf())) {
+      throw new Error("The research write clock returned an invalid Date.");
+    }
+    const decisionId = this.#newId("decision_id");
+    if (principal.evaluation.decision === "deny") {
+      return this.#commitOwnerWebStableDenial(transaction, {
+        auditDigests,
+        command,
+        decisionId,
+        digestBytes,
+        error: new ResearchWriteError(
+          "POLICY_DENIED",
+          "The selected Agent policy does not permit this Web operation.",
+          { details: { reason: principal.evaluation.reason } },
+        ),
+        idempotencyKey,
+        now,
+        principal,
+      });
+    }
+
+    let replyTarget: ReplyTarget | null = null;
+    try {
+      replyTarget = await transaction.savepoint(
+        "owner_web_research_admission",
+        async (admissionTransaction) => {
+          if (command.operation === "create_post") {
+            const targetIds = [
+              command.primaryCommunityId,
+              ...command.additionalCommunityIds,
+            ];
+            let admissions = await this.#inspectCommunities(
+              admissionTransaction,
+              targetIds,
+            );
+            this.#enforceCommunityRules(
+              admissions,
+              "investment-research",
+              command.sourceLinks.length > 0,
+              false,
+            );
+            await this.#materializeCatalogCommunities(admissionTransaction, admissions);
+            admissions = await this.#inspectCommunities(admissionTransaction, targetIds);
+            for (const inspected of admissions) {
+              if (inspected.materialization !== "materialized") {
+                throw new ResearchWriteError(
+                  "COMMUNITY_NOT_FOUND",
+                  "The catalog Community could not be materialized safely.",
+                  { details: { community_id: inspected.id } },
+                );
+              }
+            }
+            this.#enforceCommunityRules(
+              admissions,
+              "investment-research",
+              command.sourceLinks.length > 0,
+              false,
+            );
+            await this.#enforcePostRates(
+              admissionTransaction,
+              principal.actorId,
+              admissions,
+              now,
+            );
+            if (principal.agentId && principal.agentActivatedAt) {
+              await this.#enforceAgentContentRate(
+                admissionTransaction,
+                principal.agentActivatedAt,
+                principal.agentId,
+                "create_post",
+                now,
+              );
+            }
+            return null;
+          }
+
+          const inspectedReplyTarget = await this.#loadReplyTarget(
+            admissionTransaction,
+            command.parentContentId,
+          );
+          const admissions = await this.#inspectCommunities(
+            admissionTransaction,
+            inspectedReplyTarget.communityIds,
+          );
+          this.#enforceCommunityRules(
+            admissions,
+            "discussion",
+            command.sourceLinks.length > 0,
+            true,
+          );
+          if (principal.agentId && principal.agentActivatedAt) {
+            await this.#enforceAgentContentRate(
+              admissionTransaction,
+              principal.agentActivatedAt,
+              principal.agentId,
+              "reply_to_content",
+              now,
+            );
+          }
+          return inspectedReplyTarget;
+        },
+      );
+    } catch (error) {
+      if (error instanceof ResearchWriteError && error.code === "RATE_LIMITED") {
+        const outcome = rateLimitedOutcome(command.operation, error);
+        await this.#writeOwnerWebActionLog(transaction, {
+          after: {
+            error_code: error.code,
+            ...(error.details ?? {}),
+            retry_after_ms: error.retryAfterMs,
+          },
+          auditDigests,
+          command,
+          decision: "deny",
+          decisionId,
+          errorCode: error.code,
+          now,
+          outcome: "denied",
+          outboxId: null,
+          principal,
+          reasonCode: "rate_limited",
+          targetId: intendedTargetId(command),
+          targetType: command.operation === "create_post" ? "community" : "content",
+        });
+        return outcome;
+      }
+      if (error instanceof ResearchWriteError && isPlatformRuleDenial(error)) {
+        return this.#commitOwnerWebStableDenial(transaction, {
+          auditDigests,
+          command,
+          decisionId,
+          digestBytes,
+          error,
+          idempotencyKey,
+          now,
+          principal,
+        });
+      }
+      throw error;
+    }
+
+    const facts = await this.#resolveWriteFacts(transaction, command, mentionHandles);
+    const preparedRevision = prepareRevision(command);
+    try {
+      await this.#enforceNewContentAntiSpam(transaction, {
+        actorId: principal.actorId,
+        command,
+        now,
+        ownerId: principal.ownerId,
+        preparedRevision,
+        replyTarget,
+      });
+    } catch (error) {
+      if (error instanceof ResearchWriteError && error.code === "RATE_LIMITED") {
+        const outcome = rateLimitedOutcome(command.operation, error);
+        await this.#writeOwnerWebActionLog(transaction, {
+          after: {
+            error_code: error.code,
+            ...(error.details ?? {}),
+            retry_after_ms: error.retryAfterMs,
+          },
+          auditDigests,
+          command,
+          decision: "deny",
+          decisionId,
+          errorCode: error.code,
+          now,
+          outcome: "denied",
+          outboxId: null,
+          principal,
+          reasonCode: "rate_limited",
+          targetId: intendedTargetId(command),
+          targetType: command.operation === "create_post" ? "community" : "content",
+        });
+        return outcome;
+      }
+      if (error instanceof ResearchWriteError && isPlatformRuleDenial(error)) {
+        return this.#commitOwnerWebStableDenial(transaction, {
+          auditDigests,
+          command,
+          decisionId,
+          digestBytes,
+          error,
+          idempotencyKey,
+          now,
+          principal,
+        });
+      }
+      throw error;
+    }
+
+    const idempotencyId = this.#newId("idempotency_record_id");
+    await this.#insertIdempotency(transaction, {
+      actorId: principal.actorId,
+      agentId: principal.agentId,
+      credentialId: null,
+      digestBytes,
+      id: idempotencyId,
+      idempotencyKey,
+      operation: command.operation,
+      ownerId: principal.ownerId,
+      principalScopeKey,
+    });
+    const persisted = await this.#insertResearchContent(transaction, {
+      actorId: principal.actorId,
+      command,
+      facts,
+      now,
+      preparedRevision,
+      replyTarget,
+    });
+    await this.#writeOwnerWebActionLog(transaction, {
+      after: {
+        content_id: persisted.contentId,
+        idempotency_record_id: idempotencyId,
+        resource_version: 1,
+        revision_id: persisted.revisionId,
+        root_content_id: persisted.rootContentId,
+      },
+      auditDigests,
+      command,
+      decision: "allow",
+      decisionId,
+      errorCode: null,
+      now,
+      outcome: "succeeded",
+      outboxId: persisted.outboxId,
+      principal,
+      reasonCode:
+        principal.approvalMethod === "human_direct"
+          ? "human_direct"
+          : principal.evaluation.ownerPolicyDecision === "require_approval"
+            ? "owner_direct_approval_satisfied"
+            : "allowed_by_policy",
+      targetId: persisted.contentId,
+      targetType: "content",
+    });
+    const outcome: ResearchWriteOutcome =
+      command.operation === "create_post"
+        ? {
+            decision: "allow",
+            error: null,
+            operation: "create_post",
+            pendingAction: null,
+            replayed: false,
+            result: {
+              contentId: persisted.result.contentId,
+              resourceVersion: persisted.result.resourceVersion,
+              revisionId: persisted.result.revisionId,
+            },
+            status: "succeeded",
+          }
+        : {
+            decision: "allow",
+            error: null,
+            operation: "reply_to_content",
+            pendingAction: null,
+            replayed: false,
+            result: {
+              contentId: persisted.result.contentId,
+              resourceVersion: persisted.result.resourceVersion,
+              revisionId: persisted.result.revisionId,
+              rootContentId: persisted.rootContentId,
+            },
+            status: "succeeded",
+          };
+    await this.#finalizeIdempotency(
+      transaction,
+      idempotencyId,
+      "succeeded",
+      201,
+      outcome,
+      persisted.contentId,
+    );
+    return outcome;
   }
 
   async createPost(
@@ -2851,7 +3395,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
                 );
                 await this.#enforceAgentContentRate(
                   admissionTransaction,
-                  authorization,
+                  authorization.agent_activated_at,
                   context.agent.id,
                   "create_post",
                   now,
@@ -2877,7 +3421,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
             if (evaluation.decision === "allow") {
               await this.#enforceAgentContentRate(
                 admissionTransaction,
-                authorization,
+                authorization.agent_activated_at,
                 context.agent.id,
                 "reply_to_content",
                 now,
@@ -3759,8 +4303,8 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     transaction: TransactionSql,
     input: {
       actorId: string;
-      agentId: string;
-      credentialId: string;
+      agentId: string | null;
+      credentialId: string | null;
       digestBytes: Buffer;
       id: string;
       idempotencyKey: string;
@@ -4292,7 +4836,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
 
   async #enforceAgentContentRate(
     transaction: TransactionSql,
-    authorization: AuthorizationRow,
+    agentActivatedAt: Date,
     agentId: string,
     operation: "create_post" | "reply_to_content",
     now: Date,
@@ -4326,8 +4870,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     }
 
     const isNewAgent =
-      now.valueOf() - authorization.agent_activated_at.valueOf() <
-      NEW_AGENT_CONTENT_RATE_WINDOW_MS;
+      now.valueOf() - agentActivatedAt.valueOf() < NEW_AGENT_CONTENT_RATE_WINDOW_MS;
     const limit =
       operation === "create_post"
         ? isNewAgent
@@ -5728,7 +6271,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
   async #insertResearchContent(
     transaction: TransactionSql,
     input: {
-      authorization: AuthorizationRow;
+      actorId: string;
       command: NewResearchCommand;
       facts: ResolvedWriteFacts;
       now: Date;
@@ -5770,7 +6313,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         ${contentId},
         1,
         ${isPost ? "post" : "reply"},
-        ${input.authorization.actor_id},
+        ${input.actorId},
         ${primaryCommunityId},
         ${rootId},
         ${parentId},
@@ -5807,7 +6350,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
         ${input.command.bodyMarkdown},
         ${input.preparedRevision.bodyPlainText},
         null,
-        ${input.authorization.actor_id},
+        ${input.actorId},
         ${input.now},
         1,
         ${input.preparedRevision.contentHash},
@@ -5880,7 +6423,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
           ${source.title ?? null},
           ${source.description ?? null},
           ${revisionId},
-          ${input.authorization.actor_id},
+          ${input.actorId},
           ${input.now}
         )
       `;
@@ -5948,7 +6491,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       eventVersion: 1,
       occurredAt: input.now,
       payload: {
-        actor_id: input.authorization.actor_id,
+        actor_id: input.actorId,
         community_ids: communityIds,
         content_id: contentId,
         kind: isPost ? "post" : "reply",
@@ -5996,7 +6539,7 @@ export class PostgresResearchWriteService implements ResearchWriteService {
     },
   ): Promise<ResearchWriteOutcome> {
     const persisted = await this.#insertResearchContent(transaction, {
-      authorization: input.authorization,
+      actorId: input.authorization.actor_id,
       command: input.command,
       facts: input.facts,
       now: input.now,
@@ -6071,6 +6614,151 @@ export class PostgresResearchWriteService implements ResearchWriteService {
       persisted.contentId,
     );
     return outcome;
+  }
+
+  async #commitOwnerWebStableDenial(
+    transaction: TransactionSql,
+    input: {
+      auditDigests: ResearchActionAuditDigests;
+      command: NewResearchCommand;
+      decisionId: string;
+      digestBytes: Buffer;
+      error: ResearchWriteError;
+      idempotencyKey: string;
+      now: Date;
+      principal: OwnerWebWritePrincipal;
+    },
+  ): Promise<ResearchWriteOutcome> {
+    if (!isPlatformRuleDenial(input.error)) {
+      throw new Error("An Owner Web stable denial requires a hard-rule error.");
+    }
+    const idempotencyId = this.#newId("idempotency_record_id");
+    await this.#insertIdempotency(transaction, {
+      actorId: input.principal.actorId,
+      agentId: input.principal.agentId,
+      credentialId: null,
+      digestBytes: input.digestBytes,
+      id: idempotencyId,
+      idempotencyKey: input.idempotencyKey,
+      operation: input.command.operation,
+      ownerId: input.principal.ownerId,
+      principalScopeKey: input.principal.principalScopeKey,
+    });
+    const outcome = platformRuleDeniedOutcome(input.command.operation, input.error);
+    await this.#writeOwnerWebActionLog(transaction, {
+      after: {
+        error_code: input.error.code,
+        ...(input.error.details ?? {}),
+        idempotency_record_id: idempotencyId,
+      },
+      auditDigests: input.auditDigests,
+      command: input.command,
+      decision: "deny",
+      decisionId: input.decisionId,
+      errorCode: input.error.code,
+      now: input.now,
+      outcome: "denied",
+      outboxId: null,
+      principal: input.principal,
+      reasonCode: input.error.code.toLocaleLowerCase("en-US"),
+      targetId: intendedTargetId(input.command),
+      targetType: input.command.operation === "create_post" ? "community" : "content",
+    });
+    await this.#finalizeIdempotency(
+      transaction,
+      idempotencyId,
+      "denied",
+      input.error.statusCode,
+      outcome,
+      null,
+    );
+    return outcome;
+  }
+
+  async #writeOwnerWebActionLog(
+    transaction: TransactionSql,
+    event: {
+      after: postgres.JSONValue;
+      auditDigests: ResearchActionAuditDigests;
+      command: NewResearchCommand;
+      decision: "allow" | "deny";
+      decisionId: string;
+      errorCode: string | null;
+      now: Date;
+      outcome: "succeeded" | "denied";
+      outboxId: string | null;
+      principal: OwnerWebWritePrincipal;
+      reasonCode: string;
+      targetId: string;
+      targetType: "community" | "content";
+    },
+  ): Promise<void> {
+    if (
+      !isRecord(event.after) ||
+      Object.hasOwn(event.after, "input_digest") ||
+      Object.hasOwn(event.after, "idempotency_key_digest")
+    ) {
+      throw new Error("Owner Web ActionLog after_state has an invalid audit shape.");
+    }
+    const afterState = {
+      ...event.after,
+      idempotency_key_digest: event.auditDigests.idempotencyKeyDigest,
+      input_digest: event.auditDigests.inputDigest,
+    };
+    await transaction`
+      insert into platform.action_logs (
+        id,
+        event_class,
+        occurred_at,
+        actor_id,
+        actor_kind,
+        owner_id,
+        agent_id,
+        credential_id,
+        channel,
+        approval_method,
+        approved_by_owner_id,
+        authentication_assurance,
+        authorization_snapshot,
+        action,
+        target_type,
+        target_id,
+        decision,
+        outcome,
+        error_code,
+        outbox_event_id,
+        policy_version,
+        request_id,
+        after_state,
+        reason_code
+      )
+      values (
+        ${this.#newId("audit_id")},
+        'domain_write',
+        ${event.now},
+        ${event.principal.actorId},
+        ${event.principal.actorKind},
+        ${event.principal.ownerId},
+        ${event.principal.agentId},
+        null,
+        'web',
+        ${event.principal.approvalMethod},
+        ${event.principal.ownerId},
+        ${event.principal.authenticationAssurance},
+        ${transaction.json(ownerWebPolicySnapshot(event.principal, event.decisionId))},
+        ${actionName(event.command.operation)},
+        ${event.targetType},
+        ${event.targetId},
+        ${event.decision},
+        ${event.outcome},
+        ${event.errorCode},
+        ${event.outboxId},
+        ${event.principal.policyVersion},
+        ${event.principal.authority.requestContext.requestId},
+        ${transaction.json(afterState)},
+        ${event.reasonCode}
+      )
+    `;
   }
 
   async #writeActionLog(
