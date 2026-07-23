@@ -90,6 +90,8 @@ FROM (
     ('oauth_authorization_requests'::name),
     ('oauth_grants'::name),
     ('oauth_resource_configuration'::name),
+    ('owner_agent_quota_overrides'::name),
+    ('owner_capacity_admin_actions'::name),
     ('owners'::name),
     ('pending_action_attempts'::name),
     ('pending_actions'::name),
@@ -198,6 +200,15 @@ VALUES
   ('platform', 'follows', 'notification_level', 'INSERT'),
   ('platform', 'follows', 'notification_level', 'UPDATE'),
   ('platform', 'registration_controls', 'active_agent_count', 'UPDATE'),
+  ('platform', 'registration_controls', 'mode', 'UPDATE'),
+  ('platform', 'registration_controls', 'pause_reason_code', 'UPDATE'),
+  ('platform', 'registration_controls', 'resume_condition', 'UPDATE'),
+  ('platform', 'registration_controls', 'active_agent_operating_target', 'UPDATE'),
+  ('platform', 'registration_controls', 'active_agent_hard_limit', 'UPDATE'),
+  ('platform', 'registration_controls', 'updated_by_admin_id', 'UPDATE'),
+  ('platform', 'owners', 'quota_version', 'UPDATE'),
+  ('platform', 'owner_agent_quota_overrides', 'revoked_at', 'UPDATE'),
+  ('platform', 'owner_agent_quota_overrides', 'revoked_by_admin_id', 'UPDATE'),
   ('platform', 'content_items', 'version', 'UPDATE'),
   ('platform', 'content_items', 'current_revision_id', 'UPDATE'),
   ('platform', 'content_items', 'lifecycle_state', 'UPDATE'),
@@ -381,6 +392,54 @@ FROM (
     ('outbox_event_id'::name),
     ('occurred_at'::name)
 ) AS agent_admin_action_insert_column(column_name);
+
+INSERT INTO expected_column_privileges (
+  schema_name,
+  table_name,
+  column_name,
+  privilege
+)
+SELECT 'platform', 'owner_agent_quota_overrides', column_name, 'INSERT'
+FROM (
+  VALUES
+    ('id'::name),
+    ('owner_id'::name),
+    ('max_active_agents'::name),
+    ('reason_code'::name),
+    ('set_by_admin_id'::name),
+    ('created_at'::name),
+    ('expires_at'::name)
+) AS owner_quota_override_insert_column(column_name);
+
+INSERT INTO expected_column_privileges (
+  schema_name,
+  table_name,
+  column_name,
+  privilege
+)
+SELECT 'platform', 'owner_capacity_admin_actions', column_name, 'INSERT'
+FROM (
+  VALUES
+    ('id'::name),
+    ('admin_id'::name),
+    ('permission_used'::name),
+    ('target_kind'::name),
+    ('owner_id'::name),
+    ('action'::name),
+    ('reason_code'::name),
+    ('version_before'::name),
+    ('version_after'::name),
+    ('idempotency_key'::name),
+    ('request_digest'::name),
+    ('request_id'::name),
+    ('authorization_snapshot'::name),
+    ('before_state'::name),
+    ('after_state'::name),
+    ('response_snapshot'::name),
+    ('action_log_id'::name),
+    ('outbox_event_id'::name),
+    ('occurred_at'::name)
+) AS owner_capacity_action_insert_column(column_name);
 
 INSERT INTO expected_column_privileges (
   schema_name,

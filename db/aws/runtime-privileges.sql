@@ -195,6 +195,8 @@ GRANT SELECT ON TABLE
   platform.oauth_authorization_requests,
   platform.oauth_grants,
   platform.oauth_resource_configuration,
+  platform.owner_agent_quota_overrides,
+  platform.owner_capacity_admin_actions,
   platform.owners,
   platform.pending_action_attempts,
   platform.pending_actions,
@@ -234,6 +236,40 @@ GRANT INSERT (
   outbox_event_id,
   occurred_at
 ) ON TABLE platform.agent_admin_actions
+TO :"runtime_role";
+
+GRANT INSERT (
+  id,
+  owner_id,
+  max_active_agents,
+  reason_code,
+  set_by_admin_id,
+  created_at,
+  expires_at
+) ON TABLE platform.owner_agent_quota_overrides
+TO :"runtime_role";
+
+GRANT INSERT (
+  id,
+  admin_id,
+  permission_used,
+  target_kind,
+  owner_id,
+  action,
+  reason_code,
+  version_before,
+  version_after,
+  idempotency_key,
+  request_digest,
+  request_id,
+  authorization_snapshot,
+  before_state,
+  after_state,
+  response_snapshot,
+  action_log_id,
+  outbox_event_id,
+  occurred_at
+) ON TABLE platform.owner_capacity_admin_actions
 TO :"runtime_role";
 
 GRANT INSERT (
@@ -412,6 +448,16 @@ GRANT UPDATE (
 ) ON TABLE platform.moderation_cases
 TO :"runtime_role";
 
+GRANT UPDATE (quota_version) ON TABLE
+  platform.owners
+TO :"runtime_role";
+
+GRANT UPDATE (
+  revoked_at,
+  revoked_by_admin_id
+) ON TABLE platform.owner_agent_quota_overrides
+TO :"runtime_role";
+
 GRANT UPDATE (
   name,
   description,
@@ -440,9 +486,18 @@ GRANT UPDATE ON TABLE
   platform.pending_actions
 TO :"runtime_role";
 
--- Runtime may reserve or release capacity, but cannot pause registration,
--- rewrite operating limits, or impersonate an administrator update.
-GRANT UPDATE (active_agent_count) ON TABLE
+-- Runtime may reserve or release capacity and the workforce Admin path may
+-- govern registration with reviewed fields. Trigger-owned version, pause
+-- timestamp and update timestamp remain unavailable.
+GRANT UPDATE (
+  active_agent_count,
+  mode,
+  pause_reason_code,
+  resume_condition,
+  active_agent_operating_target,
+  active_agent_hard_limit,
+  updated_by_admin_id
+) ON TABLE
   platform.registration_controls
 TO :"runtime_role";
 

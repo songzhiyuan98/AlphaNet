@@ -6,6 +6,16 @@ import {
   AdminAgentListRequestSchema,
   AdminAgentListResponseSchema,
   AdminAgentPathParamsSchema,
+  AdminCapacityActionHeadersSchema,
+  AdminOwnerDetailResponseSchema,
+  AdminOwnerListRequestSchema,
+  AdminOwnerListResponseSchema,
+  AdminOwnerPathParamsSchema,
+  AdminOwnerQuotaActionRequestSchema,
+  AdminOwnerQuotaActionResponseSchema,
+  AdminRegistrationControlActionRequestSchema,
+  AdminRegistrationControlActionResponseSchema,
+  AdminRegistrationControlResponseSchema,
   AdminTopicCommunityCreateHeadersSchema,
   AdminTopicCommunityCreateRequestSchema,
   AdminTopicCommunityListRequestSchema,
@@ -34,6 +44,14 @@ import {
   type AdminAgentDetailResponse,
   type AdminAgentListRequest,
   type AdminAgentListResponse,
+  type AdminOwnerDetailResponse,
+  type AdminOwnerListRequest,
+  type AdminOwnerListResponse,
+  type AdminOwnerQuotaActionRequest,
+  type AdminOwnerQuotaActionResponse,
+  type AdminRegistrationControlActionRequest,
+  type AdminRegistrationControlActionResponse,
+  type AdminRegistrationControlResponse,
   type AdminTopicCommunityCreateRequest,
   type AdminTopicCommunityListRequest,
   type AdminTopicCommunityListResponse,
@@ -65,6 +83,7 @@ export interface AdminApiSafeError {
   requiredPermission:
     | "community:manage"
     | "credential:revoke"
+    | "identity:quota_manage"
     | "identity:restrict"
     | "moderation:decide"
     | "moderation:read"
@@ -103,6 +122,19 @@ export interface AdminAgentActionInput {
   attemptId: string;
 }
 
+export interface AdminOwnerQuotaActionInput {
+  action: AdminOwnerQuotaActionRequest;
+  attemptId: string;
+  ownerId: string;
+  quotaVersion: number;
+}
+
+export interface AdminRegistrationControlActionInput {
+  action: AdminRegistrationControlActionRequest;
+  attemptId: string;
+  capacityVersion: number;
+}
+
 export interface AdminTopicCommunityCreateInput {
   attemptId: string;
   community: AdminTopicCommunityCreateRequest;
@@ -119,6 +151,12 @@ export interface AdminApiClient {
   actOnAgent(
     input: AdminAgentActionInput,
   ): Promise<AdminApiResult<AdminAgentActionResponse>>;
+  actOnOwnerQuota(
+    input: AdminOwnerQuotaActionInput,
+  ): Promise<AdminApiResult<AdminOwnerQuotaActionResponse>>;
+  actOnRegistration(
+    input: AdminRegistrationControlActionInput,
+  ): Promise<AdminApiResult<AdminRegistrationControlActionResponse>>;
   createTopicCommunity(
     input: AdminTopicCommunityCreateInput,
   ): Promise<AdminApiResult<AdminTopicCommunityMutationResponse>>;
@@ -130,9 +168,14 @@ export interface AdminApiClient {
     request?: AdminModerationCaseDetailRequest,
   ): Promise<AdminApiResult<AdminModerationCaseDetailResponse>>;
   getAgent(agentId: string): Promise<AdminApiResult<AdminAgentDetailResponse>>;
+  getOwner(ownerId: string): Promise<AdminApiResult<AdminOwnerDetailResponse>>;
+  getRegistration(): Promise<AdminApiResult<AdminRegistrationControlResponse>>;
   listAgents(
     request?: AdminAgentListRequest,
   ): Promise<AdminApiResult<AdminAgentListResponse>>;
+  listOwners(
+    request?: AdminOwnerListRequest,
+  ): Promise<AdminApiResult<AdminOwnerListResponse>>;
   listCases(
     request?: AdminModerationCaseListRequest,
   ): Promise<AdminApiResult<AdminModerationCaseListResponse>>;
@@ -226,6 +269,20 @@ function listAgentsPath(request: AdminAgentListRequest): string {
   return `/v1/admin/agents${query.length > 0 ? `?${query}` : ""}`;
 }
 
+function listOwnersPath(request: AdminOwnerListRequest): string {
+  const parameters = new URLSearchParams();
+  if (request.statuses !== undefined) {
+    parameters.set("statuses", request.statuses.join(","));
+  }
+  if (request.query !== undefined) parameters.set("query", request.query);
+  if (request.limit !== undefined) parameters.set("limit", String(request.limit));
+  if (request.cursor !== undefined && request.cursor !== null) {
+    parameters.set("cursor", request.cursor);
+  }
+  const query = parameters.toString();
+  return `/v1/admin/owners${query.length > 0 ? `?${query}` : ""}`;
+}
+
 function listTopicCommunitiesPath(request: AdminTopicCommunityListRequest): string {
   const parameters = new URLSearchParams();
   if (request.states !== undefined) {
@@ -273,6 +330,14 @@ function agentPath(agentId: string): string {
 
 function agentActionPath(agentId: string): string {
   return `${agentPath(agentId)}/actions`;
+}
+
+function ownerPath(ownerId: string): string {
+  return `/v1/admin/owners/${encodeURIComponent(ownerId)}`;
+}
+
+function ownerQuotaActionPath(ownerId: string): string {
+  return `${ownerPath(ownerId)}/quota-actions`;
 }
 
 function topicCommunityPath(communityId: string): string {
@@ -337,6 +402,62 @@ function parseAdminAgentActionInput(input: AdminAgentActionInput): {
         body: body.data,
         headers: requestHeaders.data,
       }
+    : null;
+}
+
+function parseAdminOwnerQuotaActionInput(input: AdminOwnerQuotaActionInput): {
+  body: AdminOwnerQuotaActionRequest;
+  headers: { "idempotency-key": string; "if-match": string };
+  ownerId: string;
+} | null {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    typeof input.attemptId !== "string" ||
+    !UUID_PATTERN.test(input.attemptId) ||
+    typeof input.quotaVersion !== "number" ||
+    !Number.isSafeInteger(input.quotaVersion) ||
+    input.quotaVersion < 1
+  ) {
+    return null;
+  }
+  const path = AdminOwnerPathParamsSchema.safeParse({ owner_id: input.ownerId });
+  const body = AdminOwnerQuotaActionRequestSchema.safeParse(input.action);
+  const headers = AdminCapacityActionHeadersSchema.safeParse({
+    "idempotency-key": `owner-quota-${input.attemptId}`,
+    "if-match": `"${input.quotaVersion}"`,
+  });
+  return path.success && body.success && headers.success
+    ? {
+        body: body.data,
+        headers: headers.data,
+        ownerId: path.data.owner_id,
+      }
+    : null;
+}
+
+function parseAdminRegistrationActionInput(input: AdminRegistrationControlActionInput): {
+  body: AdminRegistrationControlActionRequest;
+  headers: { "idempotency-key": string; "if-match": string };
+} | null {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    typeof input.attemptId !== "string" ||
+    !UUID_PATTERN.test(input.attemptId) ||
+    typeof input.capacityVersion !== "number" ||
+    !Number.isSafeInteger(input.capacityVersion) ||
+    input.capacityVersion < 1
+  ) {
+    return null;
+  }
+  const body = AdminRegistrationControlActionRequestSchema.safeParse(input.action);
+  const headers = AdminCapacityActionHeadersSchema.safeParse({
+    "idempotency-key": `registration-capacity-${input.attemptId}`,
+    "if-match": `"${input.capacityVersion}"`,
+  });
+  return body.success && headers.success
+    ? { body: body.data, headers: headers.data }
     : null;
 }
 
@@ -471,6 +592,7 @@ function safeError(
   const requiredPermission =
     permission === "community:manage" ||
     permission === "credential:revoke" ||
+    permission === "identity:quota_manage" ||
     permission === "identity:restrict" ||
     permission === "moderation:read" ||
     permission === "moderation:decide"
@@ -648,6 +770,37 @@ export function createAdminApiClient(
         ? unavailable()
         : result;
     },
+    actOnOwnerQuota: async (input) => {
+      const parsed = parseAdminOwnerQuotaActionInput(input);
+      if (!parsed) return { error: null, kind: "invalid" };
+      const result = await request(
+        ownerQuotaActionPath(parsed.ownerId),
+        AdminOwnerQuotaActionResponseSchema,
+        {
+          body: JSON.stringify(parsed.body),
+          headers: parsed.headers,
+          method: "POST",
+          successStatuses: [200, 201],
+        },
+      );
+      return result.kind === "success" && result.data.owner.owner_id !== parsed.ownerId
+        ? unavailable()
+        : result;
+    },
+    actOnRegistration: async (input) => {
+      const parsed = parseAdminRegistrationActionInput(input);
+      if (!parsed) return { error: null, kind: "invalid" };
+      return request(
+        "/v1/admin/capacity/actions",
+        AdminRegistrationControlActionResponseSchema,
+        {
+          body: JSON.stringify(parsed.body),
+          headers: parsed.headers,
+          method: "POST",
+          successStatuses: [200, 201],
+        },
+      );
+    },
     createTopicCommunity: async (input) => {
       const parsed = parseTopicCommunityCreateInput(input);
       if (!parsed) return { error: null, kind: "invalid" };
@@ -709,10 +862,36 @@ export function createAdminApiClient(
         ? unavailable()
         : result;
     },
+    getOwner: async (ownerId) => {
+      const path = AdminOwnerPathParamsSchema.safeParse({ owner_id: ownerId });
+      if (!path.success) return { error: null, kind: "invalid" };
+      const result = await request(
+        ownerPath(path.data.owner_id),
+        AdminOwnerDetailResponseSchema,
+        { method: "GET", successStatuses: [200] },
+      );
+      return result.kind === "success" &&
+        result.data.owner.owner_id !== path.data.owner_id
+        ? unavailable()
+        : result;
+    },
+    getRegistration: () =>
+      request("/v1/admin/capacity", AdminRegistrationControlResponseSchema, {
+        method: "GET",
+        successStatuses: [200],
+      }),
     listAgents: async (candidate = {}) => {
       const requestData = AdminAgentListRequestSchema.safeParse(candidate);
       if (!requestData.success) return { error: null, kind: "invalid" };
       return request(listAgentsPath(requestData.data), AdminAgentListResponseSchema, {
+        method: "GET",
+        successStatuses: [200],
+      });
+    },
+    listOwners: async (candidate = {}) => {
+      const requestData = AdminOwnerListRequestSchema.safeParse(candidate);
+      if (!requestData.success) return { error: null, kind: "invalid" };
+      return request(listOwnersPath(requestData.data), AdminOwnerListResponseSchema, {
         method: "GET",
         successStatuses: [200],
       });
@@ -820,6 +999,53 @@ export async function actOnAdminAgent(
   }
   const client = await defaultAdminApiClient();
   return client ? client.actOnAgent(input) : unavailable();
+}
+
+export async function listAdminOwners(
+  request: AdminOwnerListRequest = {},
+): Promise<AdminApiResult<AdminOwnerListResponse>> {
+  if (!AdminOwnerListRequestSchema.safeParse(request).success) {
+    return { error: null, kind: "invalid" };
+  }
+  const client = await defaultAdminApiClient();
+  return client ? client.listOwners(request) : unavailable();
+}
+
+export async function getAdminOwner(
+  ownerId: string,
+): Promise<AdminApiResult<AdminOwnerDetailResponse>> {
+  if (!AdminOwnerPathParamsSchema.safeParse({ owner_id: ownerId }).success) {
+    return { error: null, kind: "invalid" };
+  }
+  const client = await defaultAdminApiClient();
+  return client ? client.getOwner(ownerId) : unavailable();
+}
+
+export async function getAdminRegistrationControl(): Promise<
+  AdminApiResult<AdminRegistrationControlResponse>
+> {
+  const client = await defaultAdminApiClient();
+  return client ? client.getRegistration() : unavailable();
+}
+
+export async function actOnAdminOwnerQuota(
+  input: AdminOwnerQuotaActionInput,
+): Promise<AdminApiResult<AdminOwnerQuotaActionResponse>> {
+  if (!parseAdminOwnerQuotaActionInput(input)) {
+    return { error: null, kind: "invalid" };
+  }
+  const client = await defaultAdminApiClient();
+  return client ? client.actOnOwnerQuota(input) : unavailable();
+}
+
+export async function actOnAdminRegistrationControl(
+  input: AdminRegistrationControlActionInput,
+): Promise<AdminApiResult<AdminRegistrationControlActionResponse>> {
+  if (!parseAdminRegistrationActionInput(input)) {
+    return { error: null, kind: "invalid" };
+  }
+  const client = await defaultAdminApiClient();
+  return client ? client.actOnRegistration(input) : unavailable();
 }
 
 export async function getAdminModerationCase(

@@ -1,5 +1,6 @@
 export * from "./action.ts";
 export * from "./admin-agent-enforcement.ts";
+export * from "./admin-owner-capacity.ts";
 export * from "./admin-topic-community.ts";
 export * from "./agent.ts";
 export * from "./community.ts";

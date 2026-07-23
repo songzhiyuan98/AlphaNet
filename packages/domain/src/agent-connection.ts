@@ -383,7 +383,7 @@ interface OwnerRow {
   id: string;
   status: string;
   email_verified_at: Date | null;
-  base_active_agent_limit: number;
+  effective_active_agent_limit: number;
 }
 
 type QuerySql = postgres.Sql | postgres.TransactionSql;
@@ -726,7 +726,18 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
             and agent.status <> 'archived'
         )::integer
           as active_count,
-        owner.base_active_agent_limit::integer as active_limit,
+        coalesce(
+          (
+            select quota_override.max_active_agents
+            from platform.owner_agent_quota_overrides as quota_override
+            where quota_override.owner_id = owner.id
+              and quota_override.revoked_at is null
+              and quota_override.expires_at > clock_timestamp()
+            order by quota_override.created_at desc, quota_override.id desc
+            limit 1
+          ),
+          owner.base_active_agent_limit
+        )::integer as active_limit,
         count(agent.id) filter (
           where agent.created_at > clock_timestamp() - interval '24 hours'
         )::integer as created_last_24_hours,
@@ -809,7 +820,7 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
         const activeCount = activeRows[0]?.count ?? 0;
         let status: "active" | "draft" = "active";
         let activationReason: AgentActivationReason | null = null;
-        if (activeCount >= owner.base_active_agent_limit) {
+        if (activeCount >= owner.effective_active_agent_limit) {
           status = "draft";
           activationReason = "OWNER_ACTIVE_AGENT_QUOTA_EXCEEDED";
         } else if (
@@ -1327,7 +1338,7 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
           and status <> 'archived'
           and deleted_at is null
       `;
-      if ((activeRows[0]?.count ?? 0) >= owner.base_active_agent_limit) {
+      if ((activeRows[0]?.count ?? 0) >= owner.effective_active_agent_limit) {
         throw new AgentConnectionError("AGENT_ACTIVE_QUOTA_EXCEEDED");
       }
       if (
@@ -2193,10 +2204,25 @@ export class PostgresAgentConnectionService implements AgentConnectionService {
 
   async #lockActiveOwner(sql: QuerySql, ownerId: string): Promise<OwnerRow> {
     const rows = await sql<OwnerRow[]>`
-      select id, status, email_verified_at, base_active_agent_limit
-      from platform.owners
-      where id = ${ownerId}
-        and deleted_at is null
+      select
+        owner.id,
+        owner.status,
+        owner.email_verified_at,
+        coalesce(
+          (
+            select quota_override.max_active_agents
+            from platform.owner_agent_quota_overrides as quota_override
+            where quota_override.owner_id = owner.id
+              and quota_override.revoked_at is null
+              and quota_override.expires_at > clock_timestamp()
+            order by quota_override.created_at desc, quota_override.id desc
+            limit 1
+          ),
+          owner.base_active_agent_limit
+        )::integer as effective_active_agent_limit
+      from platform.owners as owner
+      where owner.id = ${ownerId}
+        and owner.deleted_at is null
       for update
     `;
     const owner = rows[0];

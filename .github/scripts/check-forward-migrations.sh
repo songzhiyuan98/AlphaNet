@@ -29,6 +29,7 @@ readonly owner_web_social_v1_checksum="77b07de89c8b44de4e933a408408e191b8fdae164
 readonly owner_web_social_hardening_v1_checksum="96c121bf0c695bbe7a6765ac04288dc17a4552880294835977d861968531844e"
 readonly admin_topic_community_v1_checksum="7b698baa08e37d30d039e55c323bcef091176da5e478b6f72306f3d6e4518f23"
 readonly admin_agent_enforcement_v1_checksum="770a2960415ed686dacbb554016897237f4f18b38d4490d7e5972eb1ce9facd0"
+readonly admin_owner_capacity_v1_checksum="c00d0f4ba2a774560d8fed4c5af1f7988791294da4ccfc717caa11f2028d4b4b"
 readonly suffix="${GITHUB_RUN_ID:-local}_${RANDOM}_$$"
 readonly empty_database="alphanet_migration_empty_${suffix}"
 readonly owner_database="alphanet_migration_owner_${suffix}"
@@ -1043,9 +1044,10 @@ for database in \
       --set=owner_web_social_v1_checksum="${owner_web_social_v1_checksum}" \
       --set=owner_web_social_hardening_v1_checksum="${owner_web_social_hardening_v1_checksum}" \
       --set=admin_topic_community_v1_checksum="${admin_topic_community_v1_checksum}" \
-      --set=admin_agent_enforcement_v1_checksum="${admin_agent_enforcement_v1_checksum}" <<'SQL'
+      --set=admin_agent_enforcement_v1_checksum="${admin_agent_enforcement_v1_checksum}" \
+      --set=admin_owner_capacity_v1_checksum="${admin_owner_capacity_v1_checksum}" <<'SQL'
 SELECT
-  (SELECT count(*) FROM system.schema_migrations) = 24
+  (SELECT count(*) FROM system.schema_migrations) = 25
   AND EXISTS (
     SELECT 1
     FROM system.schema_migrations
@@ -1182,6 +1184,33 @@ SELECT
       AND name = 'admin_agent_enforcement_v1'
       AND checksum = :'admin_agent_enforcement_v1_checksum'
   )
+  AND EXISTS (
+    SELECT 1
+    FROM system.schema_migrations
+    WHERE version = '000025'
+      AND name = 'admin_owner_capacity_v1'
+      AND checksum = :'admin_owner_capacity_v1_checksum'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'platform'
+      AND table_name = 'owners'
+      AND column_name = 'quota_version'
+      AND data_type = 'bigint'
+      AND is_nullable = 'NO'
+  )
+  AND to_regclass('platform.owner_agent_quota_overrides') IS NOT NULL
+  AND to_regclass('platform.owner_capacity_admin_actions') IS NOT NULL
+  AND to_regprocedure(
+    'platform.validate_owner_capacity_admin_action_provenance()'
+  ) IS NOT NULL
+  AND to_regprocedure(
+    'platform.validate_owner_capacity_log_provenance()'
+  ) IS NOT NULL
+  AND to_regprocedure(
+    'platform.validate_owner_capacity_outbox_provenance()'
+  ) IS NOT NULL
   AND EXISTS (
     SELECT 1
     FROM information_schema.columns
