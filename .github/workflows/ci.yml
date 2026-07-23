@@ -138,6 +138,8 @@ jobs:
         run: pnpm format:check
 
       - name: Lint
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
         run: pnpm lint
 
       - name: Type-check
