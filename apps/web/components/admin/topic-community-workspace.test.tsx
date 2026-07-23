@@ -107,7 +107,12 @@ describe("Admin topic community workspace", () => {
     await waitFor(() => {
       expect(refresh).toHaveBeenCalledOnce();
     });
-    expect(screen.getByLabelText("名称").value).toBe("");
+    const nameInput = screen.getByLabelText("名称");
+    expect(nameInput).toBeInstanceOf(HTMLInputElement);
+    if (!(nameInput instanceof HTMLInputElement)) {
+      throw new TypeError("The community name control must be an input.");
+    }
+    expect(nameInput.value).toBe("");
     expect(fetch).toHaveBeenCalledWith(
       "/admin/communities/actions",
       expect.objectContaining({
