@@ -212,7 +212,7 @@ describeRecoveryCanary("restored database application canary", () => {
 
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
-      migration_version: "000026",
+      migration_version: "000027",
     });
     expect(rows[0]?.community_count).toBeGreaterThanOrEqual(7);
     expect(rows[0]?.symbol_count).toBeGreaterThanOrEqual(10);
