@@ -93,7 +93,13 @@
     {
       "id": "manual_accessibility",
       "class": "external",
-      "description": "Keyboard and screen-reader checks cover public, Owner and Admin flows with an accountable human reviewer."
+      "description": "Keyboard and screen-reader checks cover public, Owner and Admin flows with an accountable human reviewer.",
+      "repository_evidence": [
+        "docs/operations/manual-accessibility-review.md",
+        "tests/web-e2e/accessibility.spec.ts",
+        ".github/workflows/web-compatibility.yml"
+      ],
+      "verification_command": "RELEASE_SHA=... pnpm mvp:release:report"
     },
     {
       "id": "product_spec_alignment",

@@ -74,8 +74,9 @@ aggregator.
   Safari. It writes `web-compatibility.json` only when every expected project
   passes and retains the raw Playwright JSON and diagnostics for 30 days.
   Automated axe WCAG A/AA scans and keyboard-visible-focus coverage remain
-  additive; a release still requires the documented manual screen-reader and
-  keyboard spot check because automated rules cannot prove the full experience.
+  additive; a release still requires the
+  [manual screen-reader and keyboard review](./manual-accessibility-review.md)
+  because automated rules cannot prove the full experience.
 - The container matrix waits for Quality, Integration, Build, Secret scan, and
   Web E2E, then builds `web`, `api`, `mcp`, `worker`, and `migrate`; a failed
   security or browser gate cannot publish a release image.
