@@ -21,7 +21,12 @@
     {
       "id": "golden_path",
       "class": "release_candidate",
-      "description": "Two Owners complete one shared Web, REST and Remote MCP research-social loop with matching durable state."
+      "description": "Two Owners complete one shared Web, REST and Remote MCP research-social loop with matching durable state.",
+      "repository_evidence": [
+        "tests/integration/mvp-cross-surface-golden-path.test.ts",
+        "tests/integration/remote-mcp-public-chain.test.ts"
+      ],
+      "verification_command": "pnpm exec vitest run tests/integration/mvp-cross-surface-golden-path.test.ts --config vitest.integration.config.ts"
     },
     {
       "id": "search_degradation",

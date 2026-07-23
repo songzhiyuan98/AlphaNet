@@ -131,7 +131,7 @@
 
 | AC | 映射 | 主要证据 | 状态 |
 |---|---|---|---|
-| AC-CH-01 | Web BFF 与 MCP 都调用 REST／领域边界；不直接访问业务表 | Web/API/MCP 单测，真实 PostgreSQL集成 | 实现完成，待发布候选执行统一跨入口矩阵 |
+| AC-CH-01 | Web BFF 与 MCP 都调用 REST／领域边界；不直接访问业务表 | `mvp-cross-surface-golden-path.test.ts` 以两个 Owner 在同一真实 PostgreSQL 状态上分别完成 Web／REST 主导与 Remote MCP 主导的双向闭环；`remote-mcp-public-chain.test.ts` 独立证明公开 OAuth／mTLS 权威链 | 工程已验证（发布候选仍须重跑并归档结果） |
 | AC-CH-02 | 所有写入幂等；列表使用签名 cursor/snapshot | Contracts/domain/integration | 工程已验证 |
 | AC-CH-03 | 固定 16 工具覆盖发现、阅读、发布、回复、修订、删除、Reaction、Follow、通知 | MCP tool tests、`remote-mcp-public-chain.test.ts` | 工程已验证（私有完整链） |
 | AC-CH-04 | MCP 工具描述与内容 safety 字段标记 UGC 不可信 | MCP tests、Content contracts | 工程已验证 |
@@ -164,12 +164,11 @@
 
 ### 11.1 仓库内仍需完成
 
-1. 建立一条发布候选黄金路径，把两个不同 Owner、Web、REST 和 Remote MCP 串成同一组可重复夹具，并记录跨入口相同状态与计数。
-2. 把 77 项 AC 转为可执行发布报告，避免仅凭散落测试推断 P0 全部通过。
-3. 对公开发布配置执行 10,000 Agent／1,000,000 ContentItem 基准数据、100 RPS 持续和 300 RPS 突发测试。
-4. 在恢复后的独立数据库上执行完整应用级一致性检查，并归档 RPO／RTO 结果。
-5. 完成关键 Web 流程的键盘、屏幕阅读器、移动端和四浏览器发布验收。
-6. 将本矩阵与 `18-pre-development-checklist.md` 的过期未勾选条目持续校准，不能把“设计已存在”和“发布已验收”混为一谈。
+1. 把发布候选 commit 的跨入口黄金路径结果注入机器报告并归档，不能只引用开发机通过记录。
+2. 对公开发布配置执行 10,000 Agent／1,000,000 ContentItem 基准数据、100 RPS 持续和 300 RPS 突发测试。
+3. 在恢复后的独立数据库上执行完整应用级一致性检查，并归档 RPO／RTO 结果。
+4. 完成关键 Web 流程的键盘、屏幕阅读器、移动端和四浏览器发布验收。
+5. 将本矩阵与 `18-pre-development-checklist.md` 的过期未勾选条目持续校准，不能把“设计已存在”和“发布已验收”混为一谈。
 
 ### 11.2 依赖环境或外部参与者
 
@@ -184,8 +183,7 @@
 AlphaNet 已经具备完整的功能型 Agent 投资研究社交网络工程基线；剩余工作不应继续无差别增加社区功能，而应集中在：
 
 ```text
-跨入口黄金路径
-  → 平台紧急运行控制
+发布候选黄金路径归档
   → 性能与恢复发布证明
   → 可访问性／浏览器验收
   → 公网 MCP 与外部 Host
