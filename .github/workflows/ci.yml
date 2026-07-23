@@ -238,9 +238,11 @@ jobs:
           }
           trap cleanup_recovery_database EXIT
           docker cp db/operations "$POSTGRES_SERVICE_CONTAINER:/tmp/alphanet-operations"
+          docker cp db/migrations "$POSTGRES_SERVICE_CONTAINER:/tmp/alphanet-migrations"
           docker cp db/scripts/verify-restored-backup.sh \
             "$POSTGRES_SERVICE_CONTAINER:/tmp/verify-restored-backup.sh"
           docker exec \
+            --env MIGRATIONS_DIR=/tmp/alphanet-migrations \
             --env OPERATIONS_DIR=/tmp/alphanet-operations \
             --env RECOVERY_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/alphanet_recovery_test \
             --env SOURCE_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/alphanet_test \
