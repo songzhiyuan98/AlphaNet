@@ -19,7 +19,7 @@
     "lint": "eslint .",
     "mvp:acceptance:check": "node --test scripts/check-mvp-acceptance.test.mjs && node scripts/check-mvp-acceptance.mjs --check",
     "mvp:acceptance:report": "node scripts/check-mvp-acceptance.mjs --report artifacts/release/mvp-acceptance.json",
-    "mvp:evidence:test": "node --test scripts/runtime-evidence.test.mjs",
+    "mvp:evidence:test": "node --test scripts/runtime-evidence.test.mjs scripts/recovery-evidence.test.mjs",
     "mvp:release:check": "node --test scripts/check-mvp-release.test.mjs .github/scripts/write-repository-ci-evidence.test.mjs && node scripts/check-mvp-release.mjs",
     "mvp:release:report": "node scripts/check-mvp-release.mjs --allow-no-go",
     "openapi:check": "pnpm --dir apps/api exec tsx --conditions=development ../../scripts/generate-openapi.mjs --check",

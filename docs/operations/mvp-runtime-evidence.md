@@ -68,3 +68,27 @@ p95, p99, and max latency without recording identities or content.
 
 `ALLOW_LOCAL_HTTP=1 ALLOW_SMALL_SAMPLE=1` exists only for local harness
 verification and cannot produce release evidence.
+
+## Recovery application
+
+For the monthly isolated Aurora restore, record the incident timestamp, selected
+restore point, and the timestamp at which recovery work began. Use the restored
+cluster as the quiescent source and a separate empty database as the logical
+verification target, then run:
+
+```bash
+RELEASE_SHA="$(git rev-parse HEAD)" \
+TARGET_ENV=aws-release-candidate \
+SOURCE_DATABASE_URL='postgresql://…/restored_source' \
+RECOVERY_DATABASE_URL='postgresql://…/empty_verification_target' \
+INCIDENT_AT='2026-07-23T12:00:00Z' \
+RESTORE_POINT_AT='2026-07-23T11:50:00Z' \
+RECOVERY_STARTED_AT='2026-07-23T12:05:00Z' \
+node scripts/run-recovery-application-evidence.mjs
+```
+
+The runner requires an exact manifest match and database invariants, starts the
+release application canary against the isolated recovery database, and writes
+only aggregate evidence. The gate fails when the restore point is more than 15
+minutes behind the incident time, total recovery exceeds four hours, or the
+application canary cannot read the restored state.
