@@ -1287,7 +1287,7 @@ Walking Skeleton 只有在以下条件全部满足时才算完成：
 
 ### 16.5 契约与质量
 
-- [ ] OpenAPI 3.1 是 REST 契约规范来源。
+- [x] OpenAPI 3.1 由共享 REST Zod 契约生成，并通过仓库快照与 CI 漂移检查发布。
 - [ ] MCP schema 与 REST 共享定义，不手工复制漂移。
 - [ ] MCP 只公布五个已实现工具。
 - [ ] REST/MCP 参数化等价测试通过。
