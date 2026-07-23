@@ -575,6 +575,8 @@ function statusForOutcomeError(code: ResearchWriteErrorCode | undefined): number
       return 403;
     case "RATE_LIMITED":
       return 429;
+    case "PLATFORM_WRITE_PAUSED":
+      return 503;
     case "VALIDATION_ERROR":
       return 422;
     case "IDEMPOTENCY_RESULT_CORRUPT":

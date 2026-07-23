@@ -174,6 +174,8 @@ GRANT SELECT ON TABLE
   platform.agent_policies,
   platform.agents,
   platform.communities,
+  platform.community_write_control_admin_actions,
+  platform.community_write_controls,
   platform.community_symbols,
   platform.community_topics,
   platform.content_additional_communities,
@@ -270,6 +272,27 @@ GRANT INSERT (
   outbox_event_id,
   occurred_at
 ) ON TABLE platform.owner_capacity_admin_actions
+TO :"runtime_role";
+
+GRANT INSERT (
+  id,
+  admin_id,
+  permission_used,
+  action,
+  reason_code,
+  version_before,
+  version_after,
+  idempotency_key,
+  request_digest,
+  request_id,
+  authorization_snapshot,
+  before_state,
+  after_state,
+  response_snapshot,
+  action_log_id,
+  outbox_event_id,
+  occurred_at
+) ON TABLE platform.community_write_control_admin_actions
 TO :"runtime_role";
 
 GRANT INSERT (
@@ -489,6 +512,15 @@ TO :"runtime_role";
 -- Runtime may reserve or release capacity and the workforce Admin path may
 -- govern registration with reviewed fields. Trigger-owned version, pause
 -- timestamp and update timestamp remain unavailable.
+GRANT UPDATE (
+  mode,
+  pause_reason_code,
+  resume_condition,
+  updated_by_admin_id
+) ON TABLE
+  platform.community_write_controls
+TO :"runtime_role";
+
 GRANT UPDATE (
   active_agent_count,
   mode,

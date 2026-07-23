@@ -18,6 +18,7 @@ import { closeDependencies, type HealthDependency } from "@alphanet/database";
 import type {
   AdminAgentEnforcementService,
   AdminOwnerCapacityService,
+  AdminPlatformOperationsService,
   AgentConnectionService,
   CommunityDirectoryService,
   ContentModerationService,
@@ -51,6 +52,7 @@ import Fastify, {
 import { registerAgentConnectionRoutes, v1Error } from "./agent-routes.js";
 import { registerAdminAgentEnforcementRoutes } from "./admin-agent-enforcement-routes.js";
 import { registerAdminOwnerCapacityRoutes } from "./admin-owner-capacity-routes.js";
+import { registerAdminPlatformOperationsRoutes } from "./admin-platform-operations-routes.js";
 import { registerAdminTopicCommunityRoutes } from "./admin-topic-community-routes.js";
 import {
   registerCommunityRoutes,
@@ -92,6 +94,7 @@ export interface ApiAppOptions {
   allowedOrigins: string[];
   adminAgentEnforcementService?: AdminAgentEnforcementService;
   adminOwnerCapacityService?: AdminOwnerCapacityService;
+  adminPlatformOperationsService?: AdminPlatformOperationsService;
   adminRequestRuntime?: AdminRequestRuntime;
   agentConnectionService?: AgentConnectionService;
   agentRateLimiter?: Pick<RedisRateLimitStorage, "consume">;
@@ -485,6 +488,7 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
     (options.authRuntime ||
       options.adminAgentEnforcementService ||
       options.adminOwnerCapacityService ||
+      options.adminPlatformOperationsService ||
       options.agentConnectionService ||
       options.communityDirectoryService ||
       options.contentModerationService ||
@@ -552,6 +556,15 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
             critical: true,
             name: "admin-owner-capacity-schema",
             check: () => options.adminOwnerCapacityService!.checkReady(),
+          },
+        ]
+      : []),
+    ...(options.adminPlatformOperationsService
+      ? [
+          {
+            critical: true,
+            name: "admin-platform-operations-schema",
+            check: () => options.adminPlatformOperationsService!.checkReady(),
           },
         ]
       : []),
@@ -1137,6 +1150,13 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
     registerAdminOwnerCapacityRoutes(app, {
       adminRuntime: options.adminRequestRuntime,
       service: options.adminOwnerCapacityService,
+    });
+  }
+
+  if (options.adminRequestRuntime && options.adminPlatformOperationsService) {
+    registerAdminPlatformOperationsRoutes(app, {
+      adminRuntime: options.adminRequestRuntime,
+      service: options.adminPlatformOperationsService,
     });
   }
 

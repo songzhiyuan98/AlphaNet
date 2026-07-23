@@ -14,6 +14,7 @@ This directory defines AlphaNet's delivery and recovery baseline.
 - [AWS database identities and release gate](./aws-database-access.md)
 - [AWS Valkey TLS contract](./aws-valkey-tls.md)
 - [Workforce Admin Web deployment](./admin-web-deployment.md)
+- [Community write emergency control](./community-write-emergency-control.md)
 - [AWS infrastructure bootstrap](../../infra/aws/README.md)
 
 ## Current delivery state

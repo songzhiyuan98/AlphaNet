@@ -4,6 +4,7 @@ import { appendOutboxEvent, type PostgresClient } from "@alphanet/database";
 import type postgres from "postgres";
 
 import { evaluateAgentOperation, type AgentOperationEvaluation } from "./agent-policy.js";
+import { readCommunityWriteControl } from "./admin-platform-operations.js";
 import type {
   AgentCredentialContext,
   AgentPolicyTier,
@@ -13,6 +14,7 @@ import type { OwnerWebMutationContext } from "./owner-web-session-context.js";
 import {
   AGENT_POLICY_CONTROL_MIGRATION_CHECKSUM,
   FOLLOW_GRAPH_MIGRATION_CHECKSUM,
+  PLATFORM_EMERGENCY_WRITE_CONTROL_MIGRATION_CHECKSUM,
 } from "./schema-migrations.js";
 import {
   evaluateOwnerDirectOperation,
@@ -61,6 +63,7 @@ const FOLLOW_ERROR_CODES = [
   "IDEMPOTENCY_IN_PROGRESS",
   "IDEMPOTENCY_RESULT_CORRUPT",
   "INVALID_ARGUMENT",
+  "PLATFORM_WRITE_PAUSED",
   "POLICY_DENIED",
   "RATE_LIMITED",
   "SCOPE_REQUIRED",
@@ -407,6 +410,8 @@ function statusForError(code: FollowErrorCode): number {
       return 400;
     case "RATE_LIMITED":
       return 429;
+    case "PLATFORM_WRITE_PAUSED":
+      return 503;
     case "VALIDATION_ERROR":
       return 422;
     case "FOLLOW_DATA_INVALID":
@@ -1223,6 +1228,14 @@ export class PostgresFollowService implements FollowService, OwnerWebFollowServi
               and name = 'agent_policy_control'
               and checksum = ${AGENT_POLICY_CONTROL_MIGRATION_CHECKSUM}
           )
+          and exists (
+            select 1
+            from system.schema_migrations
+            where version = '000026'
+              and checksum =
+                ${PLATFORM_EMERGENCY_WRITE_CONTROL_MIGRATION_CHECKSUM}
+          )
+          and to_regclass('platform.community_write_controls') is not null
           and to_regclass('platform.follows') is not null
           and to_regclass('system.actor_follow_epochs') is not null
           and to_regclass(
@@ -1535,6 +1548,21 @@ export class PostgresFollowService implements FollowService, OwnerWebFollowServi
         responseCode: existing.response_code,
         status: existing.status,
       });
+    }
+
+    const writeControl = await readCommunityWriteControl(transaction);
+    if (writeControl.mode === "paused") {
+      throw new FollowError(
+        "PLATFORM_WRITE_PAUSED",
+        "Community writes are temporarily paused.",
+        {
+          details: {
+            control_version: writeControl.version,
+            reason_code: writeControl.pauseReasonCode!,
+          },
+          retryable: true,
+        },
+      );
     }
 
     const now = new Date(this.#clock().valueOf());

@@ -39,6 +39,7 @@ import {
   CONTENT_REVISION_WRITE_MIGRATION_CHECKSUM,
   OWNER_WEB_SOCIAL_HARDENING_V1_MIGRATION_CHECKSUM,
   PENDING_ACTION_EXECUTION_MIGRATION_CHECKSUM,
+  PLATFORM_EMERGENCY_WRITE_CONTROL_MIGRATION_CHECKSUM,
 } from "./schema-migrations.js";
 
 const ownerId = "00000000-0000-4000-8000-000000000001";
@@ -223,6 +224,7 @@ interface HarnessOptions {
     | undefined;
   updateActorCount?: number | undefined;
   updateContentCount?: number | undefined;
+  writeControlMode?: "open" | "paused" | undefined;
 }
 
 interface HarnessTransaction {
@@ -323,6 +325,20 @@ class SqlHarness {
     context?: HarnessTransaction,
   ): Promise<unknown[]> {
     if (text.startsWith("set local")) return [];
+    if (text.includes("from platform.community_write_controls")) {
+      const paused = this.#options.writeControlMode === "paused";
+      return [
+        {
+          mode: paused ? "paused" : "open",
+          pause_reason_code: paused ? "security_incident" : null,
+          paused_at: paused ? new Date("2026-07-20T00:00:00.000Z") : null,
+          resume_condition: paused ? "Resume after incident containment." : null,
+          updated_at: new Date("2026-07-20T00:00:00.000Z"),
+          updated_by_admin_id: paused ? "00000000-0000-4000-8000-000000000999" : null,
+          version: paused ? "2" : "1",
+        },
+      ];
+    }
     if (text === "select clock_timestamp() as database_now") {
       return [{ database_now: new Date(now.valueOf()) }];
     }
@@ -1042,6 +1058,9 @@ describe("PostgresResearchWriteService", () => {
     expect(readiness?.values).toContain(PENDING_ACTION_EXECUTION_MIGRATION_CHECKSUM);
     expect(readiness?.values).toContain(CONTENT_REVISION_WRITE_MIGRATION_CHECKSUM);
     expect(readiness?.values).toContain(OWNER_WEB_SOCIAL_HARDENING_V1_MIGRATION_CHECKSUM);
+    expect(readiness?.values).toContain(
+      PLATFORM_EMERGENCY_WRITE_CONTROL_MIGRATION_CHECKSUM,
+    );
     expect(readiness?.text).toContain("platform.content_items");
     expect(readiness?.text).toContain("platform.pending_actions");
     expect(readiness?.text).toContain("content_revisions_prevent_mutation");
@@ -2353,9 +2372,10 @@ describe("PostgresResearchWriteService", () => {
     expect(hasSql(replayHarness, "for update of content")).toBe(false);
   });
 
-  it("replays a matching terminal result before re-running Community admission", async () => {
+  it("replays a matching terminal result while new platform writes are paused", async () => {
     const command = normalizeCreatePostCommand(postInput());
     const harness = new SqlHarness({
+      writeControlMode: "paused",
       existingIdempotency: {
         digest: digestResearchCommandBytes(command),
         status: "succeeded",
@@ -2382,6 +2402,7 @@ describe("PostgresResearchWriteService", () => {
     );
 
     expect(result).toMatchObject({ replayed: true, status: "succeeded" });
+    expect(hasSql(harness, "from platform.community_write_controls")).toBe(false);
     expect(hasSql(harness, "from platform.communities as community")).toBe(false);
     expect(hasSql(harness, "insert into platform.idempotency_records")).toBe(false);
   });
@@ -3781,6 +3802,52 @@ describe("PostgresResearchWriteService", () => {
     expect(hasSql(harness, "from platform.communities as community")).toBe(false);
     expect(hasSql(harness, "insert into platform.idempotency_records")).toBe(false);
     expect(hasSql(harness, "insert into platform.action_logs")).toBe(false);
+  });
+
+  it("temporarily rejects a new Research write without consuming idempotency", async () => {
+    const harness = new SqlHarness({ writeControlMode: "paused" });
+    const result = await service(harness).createPost(
+      agentContext("autonomous"),
+      postInput({ idempotencyKey: "platform-pause-new-write" }),
+      { requestId: "req-platform-pause-new-write" },
+    );
+
+    expect(result).toMatchObject({
+      error: {
+        code: "PLATFORM_WRITE_PAUSED",
+        details: {
+          control_version: 2,
+          reason_code: "security_incident",
+        },
+        retryable: true,
+      },
+      replayed: false,
+      status: "failed",
+    });
+    expect(hasSql(harness, "insert into platform.idempotency_records")).toBe(false);
+    expect(hasSql(harness, "insert into platform.action_logs")).toBe(false);
+  });
+
+  it("defers an approved action while writes are paused instead of invalidating it", async () => {
+    const keyRing = {
+      currentVersion: 1,
+      keys: { 1: randomBytes(32) },
+    } as const;
+    const fixture = approvedExecutionFixture(keyRing);
+    const harness = new SqlHarness({ writeControlMode: "paused" });
+    const repository = approvedExecutionRepository(harness, fixture.frozenAction);
+
+    await expect(
+      service(harness, { pendingActionKeyRing: keyRing }).executeApprovedAction(
+        repository,
+        fixture.claim,
+      ),
+    ).rejects.toMatchObject({
+      code: "APPROVED_ACTION_PLATFORM_WRITE_PAUSED",
+      disposition: "retry",
+      retryAfterMs: 60_000,
+    } satisfies Partial<ApprovedResearchExecutionError>);
+    expect(repository.finalizeSucceeded).not.toHaveBeenCalled();
   });
 
   it("rejects missing content scope before opening a database transaction", async () => {

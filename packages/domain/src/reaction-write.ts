@@ -4,6 +4,7 @@ import { appendOutboxEvent, type PostgresClient } from "@alphanet/database";
 import type postgres from "postgres";
 
 import { evaluateAgentOperation, type AgentOperationEvaluation } from "./agent-policy.js";
+import { readCommunityWriteControl } from "./admin-platform-operations.js";
 import type {
   AgentCredentialContext,
   AgentPolicyTier,
@@ -14,6 +15,7 @@ import {
   AGENT_POLICY_CONTROL_MIGRATION_CHECKSUM,
   CONTENT_REACTIONS_MIGRATION_CHECKSUM,
   FOLLOW_GRAPH_MIGRATION_CHECKSUM,
+  PLATFORM_EMERGENCY_WRITE_CONTROL_MIGRATION_CHECKSUM,
 } from "./schema-migrations.js";
 import {
   evaluateOwnerDirectOperation,
@@ -44,6 +46,7 @@ const REACTION_ERROR_CODES = [
   "IDEMPOTENCY_CONFLICT",
   "IDEMPOTENCY_IN_PROGRESS",
   "IDEMPOTENCY_RESULT_CORRUPT",
+  "PLATFORM_WRITE_PAUSED",
   "POLICY_DENIED",
   "RATE_LIMITED",
   "SCOPE_REQUIRED",
@@ -64,6 +67,7 @@ export type ReactionWriteErrorCode =
   | "IDEMPOTENCY_CONFLICT"
   | "IDEMPOTENCY_IN_PROGRESS"
   | "IDEMPOTENCY_RESULT_CORRUPT"
+  | "PLATFORM_WRITE_PAUSED"
   | "POLICY_DENIED"
   | "RATE_LIMITED"
   | "SCOPE_REQUIRED"
@@ -291,6 +295,8 @@ function statusForError(code: ReactionWriteErrorCode): number {
       return 403;
     case "RATE_LIMITED":
       return 429;
+    case "PLATFORM_WRITE_PAUSED":
+      return 503;
     case "VALIDATION_ERROR":
       return 422;
     case "IDEMPOTENCY_RESULT_CORRUPT":
@@ -895,6 +901,14 @@ export class PostgresReactionWriteService
           )
           and exists (
             select 1
+            from system.schema_migrations
+            where version = '000026'
+              and checksum =
+                ${PLATFORM_EMERGENCY_WRITE_CONTROL_MIGRATION_CHECKSUM}
+          )
+          and to_regclass('platform.community_write_controls') is not null
+          and exists (
+            select 1
             from pg_catalog.pg_attribute
             where attrelid = to_regclass('platform.credentials')
               and attname = 'policy_ceiling_rules'
@@ -1090,6 +1104,21 @@ export class PostgresReactionWriteService
         responseCode: existing.response_code,
         status: existing.status,
       });
+    }
+
+    const writeControl = await readCommunityWriteControl(transaction);
+    if (writeControl.mode === "paused") {
+      throw new ReactionWriteError(
+        "PLATFORM_WRITE_PAUSED",
+        "Community writes are temporarily paused.",
+        {
+          details: {
+            control_version: writeControl.version,
+            reason_code: writeControl.pauseReasonCode!,
+          },
+          retryable: true,
+        },
+      );
     }
 
     const now = new Date(this.#clock().valueOf());

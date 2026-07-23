@@ -321,6 +321,46 @@ const registrationActionResponse = {
   schema_version: "1",
 } as const;
 
+const communityWriteControlResponse = {
+  capabilities: { can_operate_platform: true },
+  control: {
+    mode: "open",
+    pause_reason_code: null,
+    paused_at: null,
+    resume_condition: null,
+    updated_at: times.reported,
+    updated_by_admin_id: null,
+    version: 1,
+  },
+  request_id: "request-platform-control-1",
+  schema_version: "1",
+} as const;
+
+const communityWriteActionResponse = {
+  action: {
+    action: "pause_community_writes",
+    action_id: "90000000-0000-4000-8000-000000000006",
+    admin_id: ids.admin,
+    occurred_at: times.decided,
+    permission_used: "platform:operate",
+    reason_code: "security_incident",
+    version_after: 2,
+    version_before: 1,
+  },
+  control: {
+    ...communityWriteControlResponse.control,
+    mode: "paused",
+    pause_reason_code: "security_incident",
+    paused_at: times.decided,
+    resume_condition: "Security review completed and evidence retained.",
+    updated_at: times.decided,
+    updated_by_admin_id: ids.admin,
+    version: 2,
+  },
+  request_id: "request-platform-control-action-1",
+  schema_version: "1",
+} as const;
+
 const enabledConfig: EnabledAdminWebConfig = {
   awsRegion: "us-west-2",
   callbackUrl: "https://app.alphanet.example/admin/auth/callback",
@@ -670,6 +710,54 @@ describe("Admin API server-side BFF", () => {
     expect(capacityHeaders.get("if-match")).toBe('"1"');
     expect(capacityHeaders.get("idempotency-key")).toBe(
       `registration-capacity-${attemptId}`,
+    );
+  });
+
+  it("reads and governs the platform community-write control", async () => {
+    const responses = [
+      jsonResponse(communityWriteControlResponse),
+      jsonResponse(communityWriteActionResponse, { status: 201 }),
+    ];
+    const fetchImplementation = fetchMock(() => {
+      const response = responses.shift();
+      if (!response) throw new Error("Unexpected extra platform request.");
+      return response;
+    });
+    const client = createAdminApiClient(clientDependencies(fetchImplementation));
+    const attemptId = "90000000-0000-4000-8000-000000000007";
+
+    await expect(client.getCommunityWriteControl()).resolves.toEqual({
+      data: communityWriteControlResponse,
+      kind: "success",
+      status: 200,
+    });
+    expect(fetchImplementation.mock.calls[0]?.[0]).toBe(
+      "http://api.internal:4000/v1/admin/platform/community-writes",
+    );
+
+    await expect(
+      client.actOnCommunityWrites({
+        action: {
+          action: "pause_community_writes",
+          reason_code: "security_incident",
+          resume_condition: "Security review completed and evidence retained.",
+        },
+        attemptId,
+        controlVersion: 1,
+      }),
+    ).resolves.toEqual({
+      data: communityWriteActionResponse,
+      kind: "success",
+      status: 201,
+    });
+    const mutation = fetchImplementation.mock.calls[1];
+    expect(mutation?.[0]).toBe(
+      "http://api.internal:4000/v1/admin/platform/community-writes/actions",
+    );
+    const actionHeaders = new Headers(mutation?.[1]?.headers);
+    expect(actionHeaders.get("if-match")).toBe('"1"');
+    expect(actionHeaders.get("idempotency-key")).toBe(
+      `community-write-control-${attemptId}`,
     );
   });
 

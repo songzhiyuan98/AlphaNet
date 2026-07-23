@@ -7,6 +7,9 @@ import {
   AdminAgentListResponseSchema,
   AdminAgentPathParamsSchema,
   AdminCapacityActionHeadersSchema,
+  AdminCommunityWriteControlActionRequestSchema,
+  AdminCommunityWriteControlActionResponseSchema,
+  AdminCommunityWriteControlResponseSchema,
   AdminOwnerDetailResponseSchema,
   AdminOwnerListRequestSchema,
   AdminOwnerListResponseSchema,
@@ -16,6 +19,7 @@ import {
   AdminRegistrationControlActionRequestSchema,
   AdminRegistrationControlActionResponseSchema,
   AdminRegistrationControlResponseSchema,
+  AdminPlatformActionHeadersSchema,
   AdminTopicCommunityCreateHeadersSchema,
   AdminTopicCommunityCreateRequestSchema,
   AdminTopicCommunityListRequestSchema,
@@ -44,6 +48,9 @@ import {
   type AdminAgentDetailResponse,
   type AdminAgentListRequest,
   type AdminAgentListResponse,
+  type AdminCommunityWriteControlActionRequest,
+  type AdminCommunityWriteControlActionResponse,
+  type AdminCommunityWriteControlResponse,
   type AdminOwnerDetailResponse,
   type AdminOwnerListRequest,
   type AdminOwnerListResponse,
@@ -87,6 +94,7 @@ export interface AdminApiSafeError {
     | "identity:restrict"
     | "moderation:decide"
     | "moderation:read"
+    | "platform:operate"
     | null;
   retryAfterMs: number | null;
 }
@@ -135,6 +143,12 @@ export interface AdminRegistrationControlActionInput {
   capacityVersion: number;
 }
 
+export interface AdminCommunityWriteControlActionInput {
+  action: AdminCommunityWriteControlActionRequest;
+  attemptId: string;
+  controlVersion: number;
+}
+
 export interface AdminTopicCommunityCreateInput {
   attemptId: string;
   community: AdminTopicCommunityCreateRequest;
@@ -157,6 +171,9 @@ export interface AdminApiClient {
   actOnRegistration(
     input: AdminRegistrationControlActionInput,
   ): Promise<AdminApiResult<AdminRegistrationControlActionResponse>>;
+  actOnCommunityWrites(
+    input: AdminCommunityWriteControlActionInput,
+  ): Promise<AdminApiResult<AdminCommunityWriteControlActionResponse>>;
   createTopicCommunity(
     input: AdminTopicCommunityCreateInput,
   ): Promise<AdminApiResult<AdminTopicCommunityMutationResponse>>;
@@ -170,6 +187,7 @@ export interface AdminApiClient {
   getAgent(agentId: string): Promise<AdminApiResult<AdminAgentDetailResponse>>;
   getOwner(ownerId: string): Promise<AdminApiResult<AdminOwnerDetailResponse>>;
   getRegistration(): Promise<AdminApiResult<AdminRegistrationControlResponse>>;
+  getCommunityWriteControl(): Promise<AdminApiResult<AdminCommunityWriteControlResponse>>;
   listAgents(
     request?: AdminAgentListRequest,
   ): Promise<AdminApiResult<AdminAgentListResponse>>;
@@ -461,6 +479,33 @@ function parseAdminRegistrationActionInput(input: AdminRegistrationControlAction
     : null;
 }
 
+function parseAdminCommunityWriteActionInput(
+  input: AdminCommunityWriteControlActionInput,
+): {
+  body: AdminCommunityWriteControlActionRequest;
+  headers: { "idempotency-key": string; "if-match": string };
+} | null {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    typeof input.attemptId !== "string" ||
+    !UUID_PATTERN.test(input.attemptId) ||
+    typeof input.controlVersion !== "number" ||
+    !Number.isSafeInteger(input.controlVersion) ||
+    input.controlVersion < 1
+  ) {
+    return null;
+  }
+  const body = AdminCommunityWriteControlActionRequestSchema.safeParse(input.action);
+  const headers = AdminPlatformActionHeadersSchema.safeParse({
+    "idempotency-key": `community-write-control-${input.attemptId}`,
+    "if-match": `"${input.controlVersion}"`,
+  });
+  return body.success && headers.success
+    ? { body: body.data, headers: headers.data }
+    : null;
+}
+
 function parseTopicCommunityCreateInput(input: AdminTopicCommunityCreateInput): {
   body: AdminTopicCommunityCreateRequest;
   headers: { "idempotency-key": string };
@@ -595,7 +640,8 @@ function safeError(
     permission === "identity:quota_manage" ||
     permission === "identity:restrict" ||
     permission === "moderation:read" ||
-    permission === "moderation:decide"
+    permission === "moderation:decide" ||
+    permission === "platform:operate"
       ? permission
       : null;
   const bodyRetryAfter = safePositiveInteger(envelope.error.retry_after_ms);
@@ -801,6 +847,20 @@ export function createAdminApiClient(
         },
       );
     },
+    actOnCommunityWrites: async (input) => {
+      const parsed = parseAdminCommunityWriteActionInput(input);
+      if (!parsed) return { error: null, kind: "invalid" };
+      return request(
+        "/v1/admin/platform/community-writes/actions",
+        AdminCommunityWriteControlActionResponseSchema,
+        {
+          body: JSON.stringify(parsed.body),
+          headers: parsed.headers,
+          method: "POST",
+          successStatuses: [200, 201],
+        },
+      );
+    },
     createTopicCommunity: async (input) => {
       const parsed = parseTopicCommunityCreateInput(input);
       if (!parsed) return { error: null, kind: "invalid" };
@@ -880,6 +940,15 @@ export function createAdminApiClient(
         method: "GET",
         successStatuses: [200],
       }),
+    getCommunityWriteControl: () =>
+      request(
+        "/v1/admin/platform/community-writes",
+        AdminCommunityWriteControlResponseSchema,
+        {
+          method: "GET",
+          successStatuses: [200],
+        },
+      ),
     listAgents: async (candidate = {}) => {
       const requestData = AdminAgentListRequestSchema.safeParse(candidate);
       if (!requestData.success) return { error: null, kind: "invalid" };
@@ -1046,6 +1115,23 @@ export async function actOnAdminRegistrationControl(
   }
   const client = await defaultAdminApiClient();
   return client ? client.actOnRegistration(input) : unavailable();
+}
+
+export async function getAdminCommunityWriteControl(): Promise<
+  AdminApiResult<AdminCommunityWriteControlResponse>
+> {
+  const client = await defaultAdminApiClient();
+  return client ? client.getCommunityWriteControl() : unavailable();
+}
+
+export async function actOnAdminCommunityWrites(
+  input: AdminCommunityWriteControlActionInput,
+): Promise<AdminApiResult<AdminCommunityWriteControlActionResponse>> {
+  if (!parseAdminCommunityWriteActionInput(input)) {
+    return { error: null, kind: "invalid" };
+  }
+  const client = await defaultAdminApiClient();
+  return client ? client.actOnCommunityWrites(input) : unavailable();
 }
 
 export async function getAdminModerationCase(

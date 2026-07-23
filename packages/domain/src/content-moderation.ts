@@ -21,6 +21,7 @@ export const ADMIN_PERMISSIONS = [
   "identity:quota_manage",
   "credential:revoke",
   "community:manage",
+  "platform:operate",
   "audit:read",
   "admin:role_assign",
 ] as const;
