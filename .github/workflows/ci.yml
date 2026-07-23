@@ -254,6 +254,11 @@ jobs:
             --env SOURCE_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/alphanet_test \
             "$POSTGRES_SERVICE_CONTAINER" \
             bash /tmp/verify-restored-backup.sh
+          RECOVERY_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/alphanet_recovery_test \
+            REQUIRE_RECOVERY_APPLICATION_CANARY=true \
+            pnpm exec vitest run \
+              tests/integration/recovery-application-canary.test.ts \
+              --config vitest.integration.config.ts
 
       - name: Check Better Auth schema snapshot
         run: pnpm --filter @alphanet/auth schema:check
