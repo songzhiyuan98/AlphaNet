@@ -1,0 +1,182 @@
+import { z } from "zod";
+
+import {
+  AgentBioSchema,
+  AgentDisplayNameSchema,
+  AgentHandleSchema,
+  AgentPublicSummarySchema,
+  AgentStatusSchema,
+  TimestampSchema,
+  UuidSchema,
+  V1EnvelopeShape,
+  V1_SCHEMA_VERSION,
+} from "./agent.ts";
+import { IdempotencyKeySchema } from "./write-primitives.ts";
+
+export const WEB_SOCIAL_SCHEMA_VERSION = V1_SCHEMA_VERSION;
+
+const HumanProfileDisplayNameSchema = AgentDisplayNameSchema.refine(
+  (value) => !value.includes("\0"),
+  "Display name must not contain null bytes.",
+);
+const HumanProfileBioSchema = AgentBioSchema.refine(
+  (value) => !value.includes("\0"),
+  "Biography must not contain null bytes.",
+);
+
+export const HumanWebActorSelectionSchema = z
+  .object({
+    actor_kind: z.literal("human"),
+    actor_id: UuidSchema,
+  })
+  .strict();
+export type HumanWebActorSelection = z.infer<typeof HumanWebActorSelectionSchema>;
+
+export const ManagedAgentWebActorSelectionSchema = z
+  .object({
+    actor_kind: z.literal("agent"),
+    agent_id: UuidSchema,
+  })
+  .strict();
+export type ManagedAgentWebActorSelection = z.infer<
+  typeof ManagedAgentWebActorSelectionSchema
+>;
+
+/**
+ * The only client-selectable public principals for an authenticated Owner Web
+ * action. The API must still derive the Actor chain and verify ownership.
+ */
+export const WebActorSelectionSchema = z.discriminatedUnion("actor_kind", [
+  HumanWebActorSelectionSchema,
+  ManagedAgentWebActorSelectionSchema,
+]);
+export type WebActorSelection = z.infer<typeof WebActorSelectionSchema>;
+
+export const EnableHumanProfileRequestSchema = z
+  .object({
+    handle: AgentHandleSchema,
+    display_name: HumanProfileDisplayNameSchema,
+    bio: HumanProfileBioSchema.nullable().optional(),
+  })
+  .strict();
+export type EnableHumanProfileRequest = z.infer<typeof EnableHumanProfileRequestSchema>;
+
+export const UpdateHumanProfileRequestSchema = z
+  .object({
+    display_name: HumanProfileDisplayNameSchema.optional(),
+    bio: HumanProfileBioSchema.nullable().optional(),
+  })
+  .strict()
+  .refine((request) => request.display_name !== undefined || request.bio !== undefined, {
+    message: "At least one human profile field must be provided.",
+  });
+export type UpdateHumanProfileRequest = z.infer<typeof UpdateHumanProfileRequestSchema>;
+
+export const HumanProfileStatusSchema = AgentStatusSchema.exclude(["draft"]);
+export type HumanProfileStatus = z.infer<typeof HumanProfileStatusSchema>;
+
+export const HumanProfilePublicSummarySchema = z
+  .object({
+    actor_id: UuidSchema,
+    kind: z.literal("human"),
+    handle: AgentHandleSchema,
+    display_name: HumanProfileDisplayNameSchema,
+    bio: HumanProfileBioSchema.nullable(),
+    status: HumanProfileStatusSchema,
+    created_at: TimestampSchema,
+    updated_at: TimestampSchema,
+  })
+  .strict();
+export type HumanProfilePublicSummary = z.infer<typeof HumanProfilePublicSummarySchema>;
+
+const ActiveHumanProfilePublicSummarySchema = HumanProfilePublicSummarySchema.extend({
+  status: z.literal("active"),
+});
+
+const ActiveManagedAgentPublicSummarySchema = AgentPublicSummarySchema.extend({
+  status: z.literal("active"),
+  activated_at: TimestampSchema,
+});
+
+const OwnerAvailableHumanIdentitySchema = z
+  .object({
+    kind: z.literal("human"),
+    selection: HumanWebActorSelectionSchema,
+    profile: ActiveHumanProfilePublicSummarySchema,
+  })
+  .strict();
+
+const OwnerAvailableManagedAgentIdentitySchema = z
+  .object({
+    kind: z.literal("agent"),
+    selection: ManagedAgentWebActorSelectionSchema,
+    profile: ActiveManagedAgentPublicSummarySchema,
+  })
+  .strict();
+
+export const OwnerAvailablePublicIdentitySchema = z
+  .discriminatedUnion("kind", [
+    OwnerAvailableHumanIdentitySchema,
+    OwnerAvailableManagedAgentIdentitySchema,
+  ])
+  .superRefine((identity, context) => {
+    const selectionMatchesProfile =
+      identity.kind === "human"
+        ? identity.selection.actor_id === identity.profile.actor_id
+        : identity.selection.agent_id === identity.profile.id;
+    if (!selectionMatchesProfile) {
+      context.addIssue({
+        code: "custom",
+        path: ["selection"],
+        message: "The Web Actor selection must identify the projected public identity.",
+      });
+    }
+  });
+export type OwnerAvailablePublicIdentity = z.infer<
+  typeof OwnerAvailablePublicIdentitySchema
+>;
+
+export const OwnerAvailablePublicIdentitiesResponseSchema = z
+  .object({
+    ...V1EnvelopeShape,
+    identities: z.array(OwnerAvailablePublicIdentitySchema),
+  })
+  .strict()
+  .superRefine((response, context) => {
+    const actorIds = response.identities.map((identity) => identity.profile.actor_id);
+    if (new Set(actorIds).size !== actorIds.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["identities"],
+        message: "Available public identities must have unique Actor IDs.",
+      });
+    }
+
+    const agentIds = response.identities.flatMap((identity) =>
+      identity.kind === "agent" ? [identity.profile.id] : [],
+    );
+    if (new Set(agentIds).size !== agentIds.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["identities"],
+        message: "Available managed Agent identities must have unique Agent IDs.",
+      });
+    }
+  });
+export type OwnerAvailablePublicIdentitiesResponse = z.infer<
+  typeof OwnerAvailablePublicIdentitiesResponseSchema
+>;
+
+/**
+ * Route-specific Web write schemas compose this envelope with their existing
+ * social/content payload instead of defining a second copy of that payload.
+ */
+export const WebSocialWriteEnvelopeShape = {
+  actor_selection: WebActorSelectionSchema,
+  idempotency_key: IdempotencyKeySchema,
+} as const;
+
+export const WebSocialWriteEnvelopeSchema = z
+  .object(WebSocialWriteEnvelopeShape)
+  .strict();
+export type WebSocialWriteEnvelope = z.infer<typeof WebSocialWriteEnvelopeSchema>;
