@@ -1,4 +1,5 @@
 export * from "./admin-navigation";
+export * from "./agent-governance-workspace";
 export * from "./admin-problem";
 export * from "./topic-community-workspace";
 export * from "./moderation-case-detail";

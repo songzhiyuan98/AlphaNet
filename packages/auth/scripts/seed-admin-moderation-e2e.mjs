@@ -7,6 +7,7 @@ import { DEMO_CONTENT_IDS, DEMO_EMAIL, seedUiDemoData } from "./ui-demo-fixture.
 
 export const ADMIN_MODERATION_E2E = Object.freeze({
   adminAssignmentId: "e4000000-0000-4000-8000-000000000502",
+  agentGovernanceAssignmentId: "e4000000-0000-4000-8000-000000000504",
   communityAssignmentId: "e4000000-0000-4000-8000-000000000503",
   adminId: "e4000000-0000-4000-8000-000000000501",
   adminSubject: "alphanet-e2e-content-moderator",
@@ -104,6 +105,12 @@ async function assertSchema(client) {
          where version = '000023'
            and name = 'admin_topic_community_v1'
        ) as community_ready,
+       exists (
+         select 1
+         from system.schema_migrations
+         where version = '000024'
+           and name = 'admin_agent_enforcement_v1'
+       ) as agent_governance_ready,
        to_regclass('platform.admins') is not null as admins_ready,
        to_regclass('platform.reports') is not null as reports_ready,
        to_regclass('platform.moderation_actions') is not null as actions_ready`,
@@ -112,11 +119,12 @@ async function assertSchema(client) {
   if (
     state?.moderation_ready !== true ||
     state.community_ready !== true ||
+    state.agent_governance_ready !== true ||
     state.admins_ready !== true ||
     state.reports_ready !== true ||
     state.actions_ready !== true
   ) {
-    fail("apply AlphaNet migrations through 000023 before seeding");
+    fail("apply AlphaNet migrations through 000024 before seeding");
   }
 }
 
@@ -305,6 +313,23 @@ async function ensureContentModerator(client, oidcIssuer, base) {
        )`,
     [fixture.communityAssignmentId, fixture.adminId, base],
   );
+  await client.query(
+    `insert into platform.admin_assignments (
+       id, admin_id, role_id, grant_source, granted_at
+     ) select
+       $1::uuid, $2::uuid, role.id, 'bootstrap', $3
+     from platform.admin_roles as role
+     where role.key = 'identity_operator'
+       and role.status = 'active'
+       and not exists (
+         select 1
+         from platform.admin_assignments as assignment
+         where assignment.admin_id = $2::uuid
+           and assignment.role_id = role.id
+           and assignment.revoked_at is null
+       )`,
+    [fixture.agentGovernanceAssignmentId, fixture.adminId, base],
+  );
 }
 
 async function verifyFixture(client) {
@@ -340,7 +365,9 @@ async function verifyFixture(client) {
           and role_permission.permission in (
             'moderation:read',
             'moderation:decide',
-            'community:manage'
+            'community:manage',
+            'identity:restrict',
+            'credential:revoke'
           ))
           as admin_permissions`,
     [
@@ -357,7 +384,7 @@ async function verifyFixture(client) {
     state.active_owners !== 2 ||
     state.reporter_agents !== 1 ||
     state.visible_content !== 1 ||
-    state.admin_permissions !== 3
+    state.admin_permissions !== 5
   ) {
     fail(`fixture verification failed: ${JSON.stringify(state)}`);
   }

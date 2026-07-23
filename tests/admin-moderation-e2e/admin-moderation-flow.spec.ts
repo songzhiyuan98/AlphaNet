@@ -15,6 +15,7 @@ const fixture = Object.freeze({
   hideInternalNote: "E2E private Admin evidence: hide after independent review",
   reporterDetails: "E2E private reporter evidence: suspicious redirect chain",
   reporterEmail: "reporter.owner@alphanet.local",
+  reporterAgentId: "e4000000-0000-4000-8000-000000000201",
   reporterHandle: "moderation-e2e-reporter",
   reporterPassword:
     process.env.E2E_REPORTER_PASSWORD ?? "Reporter-owner-e2e-password-2026",
@@ -412,6 +413,95 @@ test("workforce Admin creates, edits, and archives a topic community", async ({
       community_name: "AI Infrastructure & Compute",
       community_state: "archived",
       community_version: 3,
+    },
+  ]);
+});
+
+test("workforce Admin suspends and restores an Agent with audited authority changes", async ({
+  page,
+}) => {
+  await page.goto("/admin/agents");
+  await expect(page.getByRole("heading", { name: "社区管理" })).toBeVisible();
+  await page.getByRole("button", { name: "使用 Workforce 身份登录" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Complete workforce MFA" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Approve with MFA" }).click();
+  await page.waitForURL((url) => url.pathname === "/admin/agents", {
+    timeout: 20_000,
+  });
+
+  await expect(page.getByRole("heading", { name: "Agent 治理" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Agent 治理" })).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+  const row = page.locator("article").filter({ hasText: `@${fixture.reporterHandle}` });
+  await expect(row).toBeVisible();
+  await row.getByRole("link", { name: "查看与处置" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Moderation E2E Reporter" }),
+  ).toBeVisible();
+
+  await page.getByLabel("治理动作").selectOption("suspend_agent");
+  await page.getByLabel("受控原因").selectOption("platform_policy_violation");
+  await page
+    .getByLabel("内部审计备注（可选）")
+    .fill("E2E confirmed automated platform-policy violation.");
+  await page.getByRole("button", { name: "确认执行" }).click();
+  await expect(page.getByText("Agent 治理操作已完成并写入审计记录。")).toBeVisible();
+  await expect(page.getByText(/已暂停 · v2/u)).toBeVisible();
+
+  await page.getByLabel("治理动作").selectOption("restore_agent");
+  await page.getByLabel("受控原因").selectOption("risk_condition_resolved");
+  await page.getByLabel("内部审计备注（可选）").fill("E2E risk condition resolved.");
+  await page.getByRole("button", { name: "确认执行" }).click();
+  await expect(page.getByText(/活跃 · v3/u)).toBeVisible();
+
+  const state = await queryDatabase<{
+    action_count: number;
+    action_log_count: number;
+    actor_status: string;
+    agent_status: string;
+    governance_version: number;
+    outbox_count: number;
+  }>(
+    `select
+       agent.status as agent_status,
+       actor.status as actor_status,
+       agent.governance_version::integer as governance_version,
+       (
+         select count(*)::integer
+         from platform.agent_admin_actions
+         where agent_id = agent.id
+       ) as action_count,
+       (
+         select count(*)::integer
+         from platform.action_logs
+         where target_type = 'agent'
+           and target_id = agent.id::text
+           and event_class = 'governance'
+       ) as action_log_count,
+       (
+         select count(*)::integer
+         from system.outbox_events
+         where aggregate_type = 'agent'
+           and aggregate_id = agent.id::text
+           and event_type = any(array['agent.suspended', 'agent.restored'])
+       ) as outbox_count
+     from platform.agents as agent
+     join platform.actors as actor on actor.id = agent.actor_id
+     where agent.id = $1::uuid`,
+    [fixture.reporterAgentId],
+  );
+  expect(state).toEqual([
+    {
+      action_count: 2,
+      action_log_count: 2,
+      actor_status: "active",
+      agent_status: "active",
+      governance_version: 3,
+      outbox_count: 2,
     },
   ]);
 });

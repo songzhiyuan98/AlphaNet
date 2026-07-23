@@ -1,4 +1,11 @@
 import {
+  AdminAgentActionHeadersSchema,
+  AdminAgentActionRequestSchema,
+  AdminAgentActionResponseSchema,
+  AdminAgentDetailResponseSchema,
+  AdminAgentListRequestSchema,
+  AdminAgentListResponseSchema,
+  AdminAgentPathParamsSchema,
   AdminTopicCommunityCreateHeadersSchema,
   AdminTopicCommunityCreateRequestSchema,
   AdminTopicCommunityListRequestSchema,
@@ -22,6 +29,11 @@ import {
   type AdminModerationCaseListResponse,
   type AdminModerationDecisionRequest,
   type AdminModerationDecisionResponse,
+  type AdminAgentActionRequest,
+  type AdminAgentActionResponse,
+  type AdminAgentDetailResponse,
+  type AdminAgentListRequest,
+  type AdminAgentListResponse,
   type AdminTopicCommunityCreateRequest,
   type AdminTopicCommunityListRequest,
   type AdminTopicCommunityListResponse,
@@ -50,7 +62,13 @@ export interface AdminApiSafeError {
   code: string;
   currentVersion: number | null;
   requestId: string;
-  requiredPermission: "community:manage" | "moderation:decide" | "moderation:read" | null;
+  requiredPermission:
+    | "community:manage"
+    | "credential:revoke"
+    | "identity:restrict"
+    | "moderation:decide"
+    | "moderation:read"
+    | null;
   retryAfterMs: number | null;
 }
 
@@ -78,6 +96,13 @@ export interface AdminModerationDecisionInput {
   decision: AdminModerationDecisionRequest;
 }
 
+export interface AdminAgentActionInput {
+  action: AdminAgentActionRequest;
+  agentId: string;
+  agentVersion: number;
+  attemptId: string;
+}
+
 export interface AdminTopicCommunityCreateInput {
   attemptId: string;
   community: AdminTopicCommunityCreateRequest;
@@ -91,6 +116,9 @@ export interface AdminTopicCommunityUpdateInput {
 }
 
 export interface AdminApiClient {
+  actOnAgent(
+    input: AdminAgentActionInput,
+  ): Promise<AdminApiResult<AdminAgentActionResponse>>;
   createTopicCommunity(
     input: AdminTopicCommunityCreateInput,
   ): Promise<AdminApiResult<AdminTopicCommunityMutationResponse>>;
@@ -101,6 +129,10 @@ export interface AdminApiClient {
     caseId: string,
     request?: AdminModerationCaseDetailRequest,
   ): Promise<AdminApiResult<AdminModerationCaseDetailResponse>>;
+  getAgent(agentId: string): Promise<AdminApiResult<AdminAgentDetailResponse>>;
+  listAgents(
+    request?: AdminAgentListRequest,
+  ): Promise<AdminApiResult<AdminAgentListResponse>>;
   listCases(
     request?: AdminModerationCaseListRequest,
   ): Promise<AdminApiResult<AdminModerationCaseListResponse>>;
@@ -180,6 +212,20 @@ function listCasesPath(request: AdminModerationCaseListRequest): string {
   return `/v1/admin/moderation/cases${query.length > 0 ? `?${query}` : ""}`;
 }
 
+function listAgentsPath(request: AdminAgentListRequest): string {
+  const parameters = new URLSearchParams();
+  if (request.statuses !== undefined) {
+    parameters.set("statuses", request.statuses.join(","));
+  }
+  if (request.query !== undefined) parameters.set("query", request.query);
+  if (request.limit !== undefined) parameters.set("limit", String(request.limit));
+  if (request.cursor !== undefined && request.cursor !== null) {
+    parameters.set("cursor", request.cursor);
+  }
+  const query = parameters.toString();
+  return `/v1/admin/agents${query.length > 0 ? `?${query}` : ""}`;
+}
+
 function listTopicCommunitiesPath(request: AdminTopicCommunityListRequest): string {
   const parameters = new URLSearchParams();
   if (request.states !== undefined) {
@@ -221,6 +267,14 @@ function decisionPath(caseId: string): string {
   return `/v1/admin/moderation/cases/${encodeURIComponent(caseId)}/actions`;
 }
 
+function agentPath(agentId: string): string {
+  return `/v1/admin/agents/${encodeURIComponent(agentId)}`;
+}
+
+function agentActionPath(agentId: string): string {
+  return `${agentPath(agentId)}/actions`;
+}
+
 function topicCommunityPath(communityId: string): string {
   return `/v1/admin/topic-communities/${encodeURIComponent(communityId)}`;
 }
@@ -251,6 +305,37 @@ function parseAdminModerationDecisionInput(
         caseId: path.data.case_id,
         decision: decision.data,
         headers: decisionHeaders.data,
+      }
+    : null;
+}
+
+function parseAdminAgentActionInput(input: AdminAgentActionInput): {
+  agentId: string;
+  body: AdminAgentActionRequest;
+  headers: { "idempotency-key": string; "if-match": string };
+} | null {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    typeof input.attemptId !== "string" ||
+    !UUID_PATTERN.test(input.attemptId) ||
+    typeof input.agentVersion !== "number" ||
+    !Number.isSafeInteger(input.agentVersion) ||
+    input.agentVersion < 1
+  ) {
+    return null;
+  }
+  const path = AdminAgentPathParamsSchema.safeParse({ agent_id: input.agentId });
+  const body = AdminAgentActionRequestSchema.safeParse(input.action);
+  const requestHeaders = AdminAgentActionHeadersSchema.safeParse({
+    "idempotency-key": `agent-governance-${input.attemptId}`,
+    "if-match": `"${input.agentVersion}"`,
+  });
+  return path.success && body.success && requestHeaders.success
+    ? {
+        agentId: path.data.agent_id,
+        body: body.data,
+        headers: requestHeaders.data,
       }
     : null;
 }
@@ -385,6 +470,8 @@ function safeError(
   const permission = details?.required_permission;
   const requiredPermission =
     permission === "community:manage" ||
+    permission === "credential:revoke" ||
+    permission === "identity:restrict" ||
     permission === "moderation:read" ||
     permission === "moderation:decide"
       ? permission
@@ -544,6 +631,23 @@ export function createAdminApiClient(
   }
 
   const client: AdminApiClient = {
+    actOnAgent: async (input) => {
+      const parsed = parseAdminAgentActionInput(input);
+      if (!parsed) return { error: null, kind: "invalid" };
+      const result = await request(
+        agentActionPath(parsed.agentId),
+        AdminAgentActionResponseSchema,
+        {
+          body: JSON.stringify(parsed.body),
+          headers: parsed.headers,
+          method: "POST",
+          successStatuses: [200, 201],
+        },
+      );
+      return result.kind === "success" && result.data.agent.agent_id !== parsed.agentId
+        ? unavailable()
+        : result;
+    },
     createTopicCommunity: async (input) => {
       const parsed = parseTopicCommunityCreateInput(input);
       if (!parsed) return { error: null, kind: "invalid" };
@@ -591,6 +695,27 @@ export function createAdminApiClient(
       return result.kind === "success" && result.data.case.case_id !== path.data.case_id
         ? unavailable()
         : result;
+    },
+    getAgent: async (agentId) => {
+      const path = AdminAgentPathParamsSchema.safeParse({ agent_id: agentId });
+      if (!path.success) return { error: null, kind: "invalid" };
+      const result = await request(
+        agentPath(path.data.agent_id),
+        AdminAgentDetailResponseSchema,
+        { method: "GET", successStatuses: [200] },
+      );
+      return result.kind === "success" &&
+        result.data.agent.agent_id !== path.data.agent_id
+        ? unavailable()
+        : result;
+    },
+    listAgents: async (candidate = {}) => {
+      const requestData = AdminAgentListRequestSchema.safeParse(candidate);
+      if (!requestData.success) return { error: null, kind: "invalid" };
+      return request(listAgentsPath(requestData.data), AdminAgentListResponseSchema, {
+        method: "GET",
+        successStatuses: [200],
+      });
     },
     listCases: async (candidate = {}) => {
       const requestData = AdminModerationCaseListRequestSchema.safeParse(candidate);
@@ -665,6 +790,36 @@ export async function listAdminModerationCases(
   }
   const client = await defaultAdminApiClient();
   return client ? client.listCases(request) : unavailable();
+}
+
+export async function listAdminAgents(
+  request: AdminAgentListRequest = {},
+): Promise<AdminApiResult<AdminAgentListResponse>> {
+  if (!AdminAgentListRequestSchema.safeParse(request).success) {
+    return { error: null, kind: "invalid" };
+  }
+  const client = await defaultAdminApiClient();
+  return client ? client.listAgents(request) : unavailable();
+}
+
+export async function getAdminAgent(
+  agentId: string,
+): Promise<AdminApiResult<AdminAgentDetailResponse>> {
+  if (!AdminAgentPathParamsSchema.safeParse({ agent_id: agentId }).success) {
+    return { error: null, kind: "invalid" };
+  }
+  const client = await defaultAdminApiClient();
+  return client ? client.getAgent(agentId) : unavailable();
+}
+
+export async function actOnAdminAgent(
+  input: AdminAgentActionInput,
+): Promise<AdminApiResult<AdminAgentActionResponse>> {
+  if (!parseAdminAgentActionInput(input)) {
+    return { error: null, kind: "invalid" };
+  }
+  const client = await defaultAdminApiClient();
+  return client ? client.actOnAgent(input) : unavailable();
 }
 
 export async function getAdminModerationCase(

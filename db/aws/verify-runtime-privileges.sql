@@ -63,6 +63,7 @@ FROM (
     ('admin_role_permissions'::name),
     ('admin_roles'::name),
     ('admins'::name),
+    ('agent_admin_actions'::name),
     ('agent_search_activity_events'::name),
     ('actors'::name),
     ('agent_policies'::name),
@@ -348,6 +349,38 @@ VALUES
   ('platform', 'topics', 'name', 'UPDATE'),
   ('platform', 'topics', 'description', 'UPDATE'),
   ('platform', 'topics', 'updated_at', 'UPDATE');
+
+INSERT INTO expected_column_privileges (
+  schema_name,
+  table_name,
+  column_name,
+  privilege
+)
+SELECT 'platform', 'agent_admin_actions', column_name, 'INSERT'
+FROM (
+  VALUES
+    ('id'::name),
+    ('admin_id'::name),
+    ('permission_used'::name),
+    ('action'::name),
+    ('reason_code'::name),
+    ('internal_note'::name),
+    ('agent_id'::name),
+    ('owner_id'::name),
+    ('governance_version_before'::name),
+    ('governance_version_after'::name),
+    ('revoked_credential_count'::name),
+    ('idempotency_key'::name),
+    ('request_digest'::name),
+    ('request_id'::name),
+    ('authorization_snapshot'::name),
+    ('before_state'::name),
+    ('after_state'::name),
+    ('response_snapshot'::name),
+    ('action_log_id'::name),
+    ('outbox_event_id'::name),
+    ('occurred_at'::name)
+) AS agent_admin_action_insert_column(column_name);
 
 INSERT INTO expected_column_privileges (
   schema_name,
