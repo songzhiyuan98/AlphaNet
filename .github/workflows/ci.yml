@@ -226,6 +226,29 @@ jobs:
           bash db/scripts/migrate.sh
           bash db/scripts/seed.sh
 
+      - name: Prove database backup and isolated recovery
+        env:
+          POSTGRES_SERVICE_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          set -Eeuo pipefail
+          test "$(psql -XAt --dbname postgres --command "SELECT count(*) FROM pg_database WHERE datname = 'alphanet_recovery_test'")" = "0"
+          createdb alphanet_recovery_test
+          cleanup_recovery_database() {
+            dropdb --if-exists alphanet_recovery_test
+          }
+          trap cleanup_recovery_database EXIT
+          docker cp db/operations "$POSTGRES_SERVICE_CONTAINER:/tmp/alphanet-operations"
+          docker cp db/migrations "$POSTGRES_SERVICE_CONTAINER:/tmp/alphanet-migrations"
+          docker cp db/scripts/verify-restored-backup.sh \
+            "$POSTGRES_SERVICE_CONTAINER:/tmp/verify-restored-backup.sh"
+          docker exec \
+            --env MIGRATIONS_DIR=/tmp/alphanet-migrations \
+            --env OPERATIONS_DIR=/tmp/alphanet-operations \
+            --env RECOVERY_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/alphanet_recovery_test \
+            --env SOURCE_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/alphanet_test \
+            "$POSTGRES_SERVICE_CONTAINER" \
+            bash /tmp/verify-restored-backup.sh
+
       - name: Check Better Auth schema snapshot
         run: pnpm --filter @alphanet/auth schema:check
 

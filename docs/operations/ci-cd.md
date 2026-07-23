@@ -54,6 +54,12 @@ aggregator.
   Revision so altered kind, root, or revision identifiers fail closed.
   The suite includes a real-auth API Credential lifecycle E2E and bounded,
   independent-pool concurrency consistency load.
+  After migration and seed, CI also takes a custom-format backup, restores it
+  into a separate empty database, validates the migration head and business
+  authority/content/Outbox invariants, and requires exact per-table row counts
+  plus dual order-insensitive checksums. This is release-candidate recovery
+  proof; the monthly isolated Aurora snapshot/PITR restore remains the
+  Production RPO/RTO gate.
 - Build compiles the workspace.
 - Web E2E builds the current production Next.js application and runs 18
   Chromium checks against a strict versioned public-API stub with Playwright

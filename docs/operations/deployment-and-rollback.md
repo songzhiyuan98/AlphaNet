@@ -150,6 +150,9 @@ gates:
   public origin;
 - complete abuse/rate-limit and controlled load tests, confirm alarms and
   budget notifications, and observe repeated successful staging releases.
+- execute the monthly isolated Aurora restore procedure in
+  [`database-backup-recovery.md`](./database-backup-recovery.md), preserve its
+  non-sensitive manifest evidence, and confirm the RPO/RTO result.
 
 ## First environment bootstrap
 
