@@ -9,10 +9,17 @@ import type {
   AgentPolicyTier,
   AgentScope,
 } from "./agent-connection.js";
+import type { OwnerWebMutationContext } from "./owner-web-session-context.js";
 import {
   AGENT_POLICY_CONTROL_MIGRATION_CHECKSUM,
   FOLLOW_GRAPH_MIGRATION_CHECKSUM,
 } from "./schema-migrations.js";
+import {
+  evaluateOwnerDirectOperation,
+  type WebSocialAuthority,
+  type WebSocialAuthorityResolver,
+  type WebSocialAuthoritySelection,
+} from "./web-social-authority.js";
 
 const FOLLOW_GRAPH_MIGRATION_NAME = "follow_graph";
 const FOLLOW_GRAPH_MIGRATION_VERSION = "000011";
@@ -167,6 +174,14 @@ export interface FollowService {
   ): Promise<FollowWriteOutcome>;
 }
 
+export interface OwnerWebFollowService {
+  setFollowAsOwnerWeb(
+    context: OwnerWebMutationContext,
+    selection: WebSocialAuthoritySelection,
+    input: SetFollowInput,
+  ): Promise<FollowWriteOutcome>;
+}
+
 export interface PostgresFollowServiceOptions {
   clock?: (() => Date) | undefined;
   cursorSigningKey: Buffer;
@@ -175,6 +190,7 @@ export interface PostgresFollowServiceOptions {
   idFactory?: (() => string) | undefined;
   idempotencyRetentionMs?: number | undefined;
   queryTimeoutMilliseconds?: number | undefined;
+  webSocialAuthorityResolver?: WebSocialAuthorityResolver | undefined;
 }
 
 export class FollowError extends Error {
@@ -291,6 +307,21 @@ interface FollowRateRow {
 
 interface FollowCardinalityRow {
   follow_count: number;
+}
+
+interface FollowWritePrincipal {
+  actorId: string;
+  actorKind: "agent" | "human";
+  activatedAt: Date;
+  agentId: string | null;
+  approvalMethod: "human_direct" | "owner_direct" | "policy_auto";
+  authenticationAssurance: "agent_credential" | "fresh_owner_session" | "owner_session";
+  authorizationSnapshot(decisionId: string): postgres.JSONValue;
+  credentialId: string | null;
+  evaluation: AgentOperationEvaluation;
+  ownerId: string;
+  policyVersion: string | null;
+  principalScopeKey: string;
 }
 
 interface FollowListRow extends FollowRow {
@@ -652,6 +683,136 @@ function policySnapshot(
   };
 }
 
+function humanDirectFollowEvaluation(): AgentOperationEvaluation {
+  return {
+    credentialCeilingDecision: "allow",
+    decision: "allow",
+    matchedScope: null,
+    ownerPolicyDecision: "allow",
+    policyRuleSource: "tier_default",
+    reason: "ALLOWED_BY_POLICY",
+    requiredScopes: [],
+    scopeSatisfied: true,
+  };
+}
+
+function agentFollowPrincipal(
+  context: AgentCredentialContext,
+  authorization: AuthorizationRow,
+  evaluation: AgentOperationEvaluation,
+): FollowWritePrincipal {
+  return {
+    actorId: authorization.actor_id,
+    actorKind: "agent",
+    activatedAt: new Date(authorization.agent_activated_at.valueOf()),
+    agentId: context.agent.id,
+    approvalMethod: "policy_auto",
+    authenticationAssurance: "agent_credential",
+    authorizationSnapshot: (decisionId) =>
+      policySnapshot(authorization, evaluation, decisionId),
+    credentialId: context.credential.id,
+    evaluation,
+    ownerId: context.owner.id,
+    policyVersion: authorization.policy_version,
+    principalScopeKey: `credential:${context.credential.id}`,
+  };
+}
+
+function ownerWebFollowPrincipal(authority: WebSocialAuthority): FollowWritePrincipal {
+  if (authority.kind === "human_direct") {
+    const evaluation = humanDirectFollowEvaluation();
+    return {
+      actorId: authority.actor.id,
+      actorKind: "human",
+      activatedAt: new Date(authority.actor.createdAt.valueOf()),
+      agentId: null,
+      approvalMethod: "human_direct",
+      authenticationAssurance: authority.requestContext.authenticationAssurance,
+      authorizationSnapshot: (decisionId) => ({
+        actor_id: authority.actor.id,
+        actor_kind: "human",
+        approval_method: "human_direct",
+        approved_by_owner_id: authority.owner.id,
+        authenticated_at: authority.requestContext.authenticatedAt.toISOString(),
+        authentication_assurance: authority.requestContext.authenticationAssurance,
+        authority_checked_at: authority.authorityCheckedAt.toISOString(),
+        csrf_validated: true,
+        decision: evaluation.decision,
+        decision_id: decisionId,
+        human_direct: true,
+        owner_id: authority.owner.id,
+        principal_scope_key: authority.principalScopeKey,
+      }),
+      credentialId: null,
+      evaluation,
+      ownerId: authority.owner.id,
+      policyVersion: null,
+      principalScopeKey: authority.principalScopeKey,
+    };
+  }
+
+  const direct = evaluateOwnerDirectOperation(authority, "set_follow");
+  const policyRuleSource =
+    authority.currentPolicy.tier === "custom"
+      ? "custom_override"
+      : authority.currentPolicy.tier === "assisted"
+        ? "assisted_inheritance"
+        : "tier_default";
+  const evaluation: AgentOperationEvaluation = {
+    credentialCeilingDecision: "allow",
+    decision: direct.decision,
+    matchedScope: null,
+    ownerPolicyDecision: direct.ownerPolicyDecision,
+    policyRuleSource,
+    reason:
+      direct.reason === "POLICY_DENIED" || direct.reason === "POLICY_RULES_UNAVAILABLE"
+        ? direct.reason
+        : direct.ownerPolicyDecision === "require_approval"
+          ? "OWNER_APPROVAL_REQUIRED"
+          : "ALLOWED_BY_POLICY",
+    requiredScopes: [],
+    scopeSatisfied: true,
+  };
+  return {
+    actorId: authority.actor.id,
+    actorKind: "agent",
+    activatedAt: new Date(authority.agent.activatedAt.valueOf()),
+    agentId: authority.agent.id,
+    approvalMethod: "owner_direct",
+    authenticationAssurance: authority.requestContext.authenticationAssurance,
+    authorizationSnapshot: (decisionId) => ({
+      actor_id: authority.actor.id,
+      actor_kind: "agent",
+      agent_id: authority.agent.id,
+      approval_method: "owner_direct",
+      approved_by_owner_id: authority.owner.id,
+      authenticated_at: authority.requestContext.authenticatedAt.toISOString(),
+      authentication_assurance: authority.requestContext.authenticationAssurance,
+      authority_checked_at: authority.authorityCheckedAt.toISOString(),
+      csrf_validated: true,
+      decision: evaluation.decision,
+      decision_id: decisionId,
+      owner_id: authority.owner.id,
+      owner_policy_decision: evaluation.ownerPolicyDecision,
+      policy: {
+        defaults_version: authority.currentPolicy.defaultsVersion,
+        id: authority.currentPolicy.id,
+        rule_source: evaluation.policyRuleSource,
+        rules: authority.currentPolicy.rules,
+        schema_version: authority.currentPolicy.schemaVersion,
+        tier: authority.currentPolicy.tier,
+        version: authority.currentPolicy.version,
+      },
+      principal_scope_key: authority.principalScopeKey,
+    }),
+    credentialId: null,
+    evaluation,
+    ownerId: authority.owner.id,
+    policyVersion: authority.currentPolicy.version,
+    principalScopeKey: authority.principalScopeKey,
+  };
+}
+
 function rateLimitedOutcome(error: FollowError): FollowWriteOutcome {
   if (
     error.code !== "RATE_LIMITED" ||
@@ -993,7 +1154,7 @@ function assertListAllowed(context: AgentCredentialContext): void {
   }
 }
 
-export class PostgresFollowService implements FollowService {
+export class PostgresFollowService implements FollowService, OwnerWebFollowService {
   readonly #clock: () => Date;
   readonly #cursorSigningKey: Buffer;
   readonly #cursorTtlMilliseconds: number;
@@ -1002,6 +1163,7 @@ export class PostgresFollowService implements FollowService {
   readonly #idempotencyRetentionMs: number;
   readonly #queryTimeoutMilliseconds: number;
   readonly #sql: PostgresClient;
+  readonly #webSocialAuthorityResolver: WebSocialAuthorityResolver | null;
 
   constructor(sql: PostgresClient, options: PostgresFollowServiceOptions) {
     this.#sql = sql;
@@ -1014,6 +1176,7 @@ export class PostgresFollowService implements FollowService {
       (options.cursorTtlSeconds ?? DEFAULT_CURSOR_TTL_SECONDS) * 1_000;
     this.#queryTimeoutMilliseconds =
       options.queryTimeoutMilliseconds ?? DEFAULT_QUERY_TIMEOUT_MILLISECONDS;
+    this.#webSocialAuthorityResolver = options.webSocialAuthorityResolver ?? null;
     if (
       !Buffer.isBuffer(options.cursorSigningKey) ||
       options.cursorSigningKey.length < 32
@@ -1249,7 +1412,6 @@ export class PostgresFollowService implements FollowService {
       const command = normalizeSetFollowCommand(input);
       const channel = validateRequestContext(request);
       const digest = digestInput(command);
-      const principalScopeKey = `credential:${context.credential.id}`;
       return await this.#sql.begin(async (transaction) => {
         await this.#setStatementTimeout(transaction, 10_000);
         const authorization = await this.#loadAuthorization(transaction, context);
@@ -1273,158 +1435,200 @@ export class PostgresFollowService implements FollowService {
             "The Agent credential lacks the follow:write scope.",
           );
         }
-
-        await this.#lockIdempotency(
-          transaction,
-          principalScopeKey,
-          command.idempotencyKey,
-        );
-        const existingIdempotency = await this.#findIdempotency(
-          transaction,
-          principalScopeKey,
-          command.idempotencyKey,
-        );
-        if (existingIdempotency) {
-          if (!sameDigest(existingIdempotency.request_digest, digest)) {
-            throw new FollowError(
-              "IDEMPOTENCY_CONFLICT",
-              "This idempotency key was already used with different normalized input.",
-            );
-          }
-          if (
-            existingIdempotency.status === "admission_reserved" ||
-            existingIdempotency.status === "in_progress"
-          ) {
-            throw new FollowError(
-              "IDEMPOTENCY_IN_PROGRESS",
-              "The original Follow command is still in progress.",
-              { retryable: true },
-            );
-          }
-          return parsePersistedOutcome(existingIdempotency.response_body, {
-            command,
-            resourceId: existingIdempotency.resource_id,
-            responseCode: existingIdempotency.response_code,
-            status: existingIdempotency.status,
-          });
-        }
-
-        const now = new Date(this.#clock().valueOf());
-        if (!Number.isFinite(now.valueOf())) {
-          throw new Error("The Follow clock returned an invalid Date.");
-        }
-        const decisionId = this.#newId("decision_id");
-
-        if (currentEvaluation.decision !== "allow") {
-          const idempotencyId = this.#newId("idempotency_record_id");
-          await this.#insertIdempotency(transaction, {
-            authorization,
-            context,
-            digest,
-            id: idempotencyId,
-            idempotencyKey: command.idempotencyKey,
-            principalScopeKey,
-          });
-          const denied = errorOutcome(
-            currentEvaluation,
-            new FollowError(
-              "POLICY_DENIED",
-              "The Agent policy does not permit Follow writes.",
-              { details: { reason: currentEvaluation.reason } },
-            ),
-          );
-          await this.#commitFailure(transaction, {
-            authorization,
-            channel,
-            context,
-            decisionId,
-            evaluation: currentEvaluation,
-            idempotencyId,
-            input: command,
-            now,
-            outcome: denied,
-            rateRuleApplied: false,
-            requestId: request.requestId,
-          });
-          return denied;
-        }
-
-        try {
-          await this.#enforceFollowRate(
-            transaction,
-            authorization,
-            context.agent.id,
-            now,
-          );
-        } catch (error) {
-          if (error instanceof FollowError && error.code === "RATE_LIMITED") {
-            const denied = rateLimitedOutcome(error);
-            await this.#commitTransientRateLimit(transaction, {
-              authorization,
-              channel,
-              context,
-              decisionId,
-              evaluation: currentEvaluation,
-              input: command,
-              now,
-              outcome: denied,
-              requestId: request.requestId,
-            });
-            return denied;
-          }
-          throw error;
-        }
-
-        const idempotencyId = this.#newId("idempotency_record_id");
-        await this.#insertIdempotency(transaction, {
-          authorization,
-          context,
+        const principal = agentFollowPrincipal(context, authorization, currentEvaluation);
+        return this.#executeFollow(transaction, {
+          channel,
+          command,
           digest,
-          id: idempotencyId,
-          idempotencyKey: command.idempotencyKey,
-          principalScopeKey,
+          principal,
+          requestId: request.requestId,
         });
-
-        try {
-          return await transaction.savepoint(
-            "follow_write_admission",
-            async (admissionTransaction) =>
-              this.#commitFollow(admissionTransaction, {
-                authorization,
-                channel,
-                context,
-                decisionId,
-                evaluation: currentEvaluation,
-                idempotencyId,
-                input: command,
-                now,
-                requestId: request.requestId,
-              }),
-          );
-        } catch (error) {
-          if (error instanceof FollowError) {
-            const failed = errorOutcome(currentEvaluation, error);
-            await this.#commitFailure(transaction, {
-              authorization,
-              channel,
-              context,
-              decisionId,
-              evaluation: currentEvaluation,
-              idempotencyId,
-              input: command,
-              now,
-              outcome: failed,
-              rateRuleApplied: true,
-              requestId: request.requestId,
-            });
-            return failed;
-          }
-          throw error;
-        }
       });
     } catch (error) {
       if (error instanceof FollowError) {
         return errorOutcome(currentEvaluation, error);
+      }
+      throw error;
+    }
+  }
+
+  async setFollowAsOwnerWeb(
+    context: OwnerWebMutationContext,
+    selection: WebSocialAuthoritySelection,
+    input: SetFollowInput,
+  ): Promise<FollowWriteOutcome> {
+    const resolver = this.#webSocialAuthorityResolver;
+    if (!resolver) {
+      throw new Error("The Owner Web social authority resolver is unavailable.");
+    }
+    let currentEvaluation = humanDirectFollowEvaluation();
+    try {
+      const command = normalizeSetFollowCommand(input);
+      const channel = validateRequestContext({
+        channel: "web",
+        requestId: context.requestId,
+      });
+      const digest = digestInput(command);
+      return await this.#sql.begin(async (transaction) => {
+        await this.#setStatementTimeout(transaction, 10_000);
+        const authority = await resolver.resolveAuthorityInTransaction(
+          transaction,
+          context,
+          selection,
+        );
+        const principal = ownerWebFollowPrincipal(authority);
+        currentEvaluation = principal.evaluation;
+        return this.#executeFollow(transaction, {
+          channel,
+          command,
+          digest,
+          principal,
+          requestId: context.requestId,
+        });
+      });
+    } catch (error) {
+      if (error instanceof FollowError) {
+        return errorOutcome(currentEvaluation, error);
+      }
+      throw error;
+    }
+  }
+
+  async #executeFollow(
+    transaction: TransactionSql,
+    input: {
+      channel: string;
+      command: NormalizedSetFollowCommand;
+      digest: Buffer;
+      principal: FollowWritePrincipal;
+      requestId: string;
+    },
+  ): Promise<FollowWriteOutcome> {
+    const { command, principal } = input;
+    await this.#lockIdempotency(
+      transaction,
+      principal.principalScopeKey,
+      command.idempotencyKey,
+    );
+    const existing = await this.#findIdempotency(
+      transaction,
+      principal.principalScopeKey,
+      command.idempotencyKey,
+    );
+    if (existing) {
+      if (!sameDigest(existing.request_digest, input.digest)) {
+        throw new FollowError(
+          "IDEMPOTENCY_CONFLICT",
+          "This idempotency key was already used with different normalized input.",
+        );
+      }
+      if (existing.status === "admission_reserved" || existing.status === "in_progress") {
+        throw new FollowError(
+          "IDEMPOTENCY_IN_PROGRESS",
+          "The original Follow command is still in progress.",
+          { retryable: true },
+        );
+      }
+      return parsePersistedOutcome(existing.response_body, {
+        command,
+        resourceId: existing.resource_id,
+        responseCode: existing.response_code,
+        status: existing.status,
+      });
+    }
+
+    const now = new Date(this.#clock().valueOf());
+    if (!Number.isFinite(now.valueOf())) {
+      throw new Error("The Follow clock returned an invalid Date.");
+    }
+    const decisionId = this.#newId("decision_id");
+
+    if (principal.evaluation.decision !== "allow") {
+      const idempotencyId = this.#newId("idempotency_record_id");
+      await this.#insertIdempotency(transaction, {
+        digest: input.digest,
+        id: idempotencyId,
+        idempotencyKey: command.idempotencyKey,
+        principal,
+      });
+      const denied = errorOutcome(
+        principal.evaluation,
+        new FollowError(
+          "POLICY_DENIED",
+          "The selected Agent policy does not permit Follow writes.",
+          { details: { reason: principal.evaluation.reason } },
+        ),
+      );
+      await this.#commitFailure(transaction, {
+        channel: input.channel,
+        decisionId,
+        idempotencyId,
+        input: command,
+        now,
+        outcome: denied,
+        principal,
+        rateRuleApplied: false,
+        requestId: input.requestId,
+      });
+      return denied;
+    }
+
+    try {
+      await this.#enforceFollowRate(transaction, principal, now);
+    } catch (error) {
+      if (error instanceof FollowError && error.code === "RATE_LIMITED") {
+        const denied = rateLimitedOutcome(error);
+        await this.#commitTransientRateLimit(transaction, {
+          channel: input.channel,
+          decisionId,
+          input: command,
+          now,
+          outcome: denied,
+          principal,
+          requestId: input.requestId,
+        });
+        return denied;
+      }
+      throw error;
+    }
+
+    const idempotencyId = this.#newId("idempotency_record_id");
+    await this.#insertIdempotency(transaction, {
+      digest: input.digest,
+      id: idempotencyId,
+      idempotencyKey: command.idempotencyKey,
+      principal,
+    });
+
+    try {
+      return await transaction.savepoint(
+        "follow_write_admission",
+        async (admissionTransaction) =>
+          this.#commitFollow(admissionTransaction, {
+            channel: input.channel,
+            decisionId,
+            idempotencyId,
+            input: command,
+            now,
+            principal,
+            requestId: input.requestId,
+          }),
+      );
+    } catch (error) {
+      if (error instanceof FollowError) {
+        const failed = errorOutcome(principal.evaluation, error);
+        await this.#commitFailure(transaction, {
+          channel: input.channel,
+          decisionId,
+          idempotencyId,
+          input: command,
+          now,
+          outcome: failed,
+          principal,
+          rateRuleApplied: true,
+          requestId: input.requestId,
+        });
+        return failed;
       }
       throw error;
     }
@@ -1774,12 +1978,10 @@ export class PostgresFollowService implements FollowService {
   async #insertIdempotency(
     transaction: TransactionSql,
     input: {
-      authorization: AuthorizationRow;
-      context: AgentCredentialContext;
       digest: Buffer;
       id: string;
       idempotencyKey: string;
-      principalScopeKey: string;
+      principal: FollowWritePrincipal;
     },
   ): Promise<void> {
     await transaction`
@@ -1800,11 +2002,11 @@ export class PostgresFollowService implements FollowService {
       )
       select
         ${input.id},
-        ${input.principalScopeKey},
-        ${input.context.owner.id},
-        ${input.context.agent.id},
-        ${input.authorization.actor_id},
-        ${input.context.credential.id},
+        ${input.principal.principalScopeKey},
+        ${input.principal.ownerId},
+        ${input.principal.agentId},
+        ${input.principal.actorId},
+        ${input.principal.credentialId},
         'set_follow',
         ${input.idempotencyKey},
         ${input.digest},
@@ -1821,13 +2023,15 @@ export class PostgresFollowService implements FollowService {
 
   async #enforceFollowRate(
     transaction: TransactionSql,
-    authorization: AuthorizationRow,
-    agentId: string,
+    principal: FollowWritePrincipal,
     now: Date,
   ): Promise<void> {
     await transaction`
       select pg_catalog.pg_advisory_xact_lock(
-        pg_catalog.hashtextextended(${`alphanet:follow-write:${agentId}`}, 0)
+        pg_catalog.hashtextextended(
+          ${`alphanet:follow-write:${principal.actorId}`},
+          0
+        )
       )
     `;
     const windowStart = new Date(now.valueOf() - FOLLOW_RATE_WINDOW_MS);
@@ -1836,7 +2040,7 @@ export class PostgresFollowService implements FollowService {
         count(*)::integer as follow_count,
         min(action.occurred_at) + interval '1 hour' as retry_at
       from platform.action_logs as action
-      where action.agent_id = ${agentId}
+      where action.actor_id = ${principal.actorId}
         and action.action = 'follow.set'
         and action.outcome = 'succeeded'
         and action.occurred_at >= ${windowStart}
@@ -1845,10 +2049,7 @@ export class PostgresFollowService implements FollowService {
     if (!row || !Number.isInteger(row.follow_count) || row.follow_count < 0) {
       throw new Error("Follow quota projection returned invalid data.");
     }
-    const activatedAt = asDate(
-      authorization.agent_activated_at,
-      "AUTHORIZATION_CONTEXT_STALE",
-    );
+    const activatedAt = asDate(principal.activatedAt, "AUTHORIZATION_CONTEXT_STALE");
     const isNewAgent = now.valueOf() - activatedAt.valueOf() < NEW_AGENT_WINDOW_MS;
     const limit = isNewAgent
       ? NEW_AGENT_FOLLOWS_PER_HOUR
@@ -1857,11 +2058,12 @@ export class PostgresFollowService implements FollowService {
       const retryAt = row.retry_at?.valueOf() ?? now.valueOf() + FOLLOW_RATE_WINDOW_MS;
       throw new FollowError(
         "RATE_LIMITED",
-        "The Agent Follow command limit for this rolling hour has been reached.",
+        "The Actor Follow command limit for this rolling hour has been reached.",
         {
           details: {
             limit,
-            limit_dimension: "agent_follow_hour",
+            limit_dimension:
+              principal.actorKind === "agent" ? "agent_follow_hour" : "human_follow_hour",
             new_agent_window: isNewAgent,
             rule_version: FOLLOW_RATE_RULE_VERSION,
           },
@@ -2135,27 +2337,21 @@ export class PostgresFollowService implements FollowService {
   async #commitFollow(
     transaction: TransactionSql,
     input: {
-      authorization: AuthorizationRow;
       channel: string;
-      context: AgentCredentialContext;
       decisionId: string;
-      evaluation: AgentOperationEvaluation;
       idempotencyId: string;
       input: NormalizedSetFollowCommand;
       now: Date;
+      principal: FollowWritePrincipal;
       requestId: string;
     },
   ): Promise<FollowWriteOutcome> {
     const target = await this.#resolveTarget(
       transaction,
-      input.authorization.actor_id,
+      input.principal.actorId,
       input.input,
     );
-    const existing = await this.#findFollow(
-      transaction,
-      input.authorization.actor_id,
-      target,
-    );
+    const existing = await this.#findFollow(transaction, input.principal.actorId, target);
     let changed = false;
     let followId: string | null = existing?.id ?? null;
     let updatedAt = input.now;
@@ -2171,7 +2367,7 @@ export class PostgresFollowService implements FollowService {
         throw new Error("An active Follow command requires an effective level.");
       }
       if (existing === null) {
-        await this.#assertCardinalityAvailable(transaction, input.authorization.actor_id);
+        await this.#assertCardinalityAvailable(transaction, input.principal.actorId);
         followId = this.#newId("follow_id");
         const columns = this.#targetColumns(target);
         const inserted = await transaction<FollowRow[]>`
@@ -2187,7 +2383,7 @@ export class PostgresFollowService implements FollowService {
           )
           values (
             ${followId},
-            ${input.authorization.actor_id},
+            ${input.principal.actorId},
             ${target.targetType},
             ${columns.actorId},
             ${columns.symbolId},
@@ -2206,7 +2402,7 @@ export class PostgresFollowService implements FollowService {
           update platform.follows
           set notification_level = ${notificationLevel}
           where id = ${existing.id}
-            and follower_actor_id = ${input.authorization.actor_id}
+            and follower_actor_id = ${input.principal.actorId}
           returning id::text as id, notification_level, created_at, updated_at
         `;
         const row = updated[0];
@@ -2220,7 +2416,7 @@ export class PostgresFollowService implements FollowService {
       const deleted = await transaction<{ id: string }[]>`
         delete from platform.follows
         where id = ${existing.id}
-          and follower_actor_id = ${input.authorization.actor_id}
+          and follower_actor_id = ${input.principal.actorId}
         returning id::text as id
       `;
       if (deleted.length !== 1) {
@@ -2246,7 +2442,7 @@ export class PostgresFollowService implements FollowService {
       status: "succeeded",
     };
     const { id: outboxId } = await appendOutboxEvent(transaction, {
-      aggregateId: `${input.authorization.actor_id}:${target.targetType}:${target.resourceId}`,
+      aggregateId: `${input.principal.actorId}:${target.targetType}:${target.resourceId}`,
       aggregateType: "follow",
       eventType: changed ? "follow.changed" : "follow.confirmed",
       eventVersion: 1,
@@ -2255,7 +2451,7 @@ export class PostgresFollowService implements FollowService {
         active: input.input.active,
         changed,
         follow_id: followId,
-        follower_actor_id: input.authorization.actor_id,
+        follower_actor_id: input.principal.actorId,
         notification_level: notificationLevel,
         target_id: target.targetId,
         target_resource_id: target.resourceId,
@@ -2263,16 +2459,14 @@ export class PostgresFollowService implements FollowService {
       },
     });
     await this.#writeActionLog(transaction, {
-      authorization: input.authorization,
       channel: input.channel,
-      context: input.context,
       decision: "allow",
       decisionId: input.decisionId,
       errorCode: null,
-      evaluation: input.evaluation,
       now: input.now,
       outcome: "succeeded",
       outboxId,
+      principal: input.principal,
       requestId: input.requestId,
       state: {
         active: input.input.active,
@@ -2313,15 +2507,13 @@ export class PostgresFollowService implements FollowService {
   async #commitFailure(
     transaction: TransactionSql,
     input: {
-      authorization: AuthorizationRow;
       channel: string;
-      context: AgentCredentialContext;
       decisionId: string;
-      evaluation: AgentOperationEvaluation;
       idempotencyId: string;
       input: NormalizedSetFollowCommand;
       now: Date;
       outcome: FollowWriteOutcome;
+      principal: FollowWritePrincipal;
       rateRuleApplied: boolean;
       requestId: string;
     },
@@ -2329,16 +2521,14 @@ export class PostgresFollowService implements FollowService {
     const error = input.outcome.error;
     if (error === null) throw new Error("A failed Follow outcome requires an error.");
     await this.#writeActionLog(transaction, {
-      authorization: input.authorization,
       channel: input.channel,
-      context: input.context,
       decision: input.outcome.decision,
       decisionId: input.decisionId,
       errorCode: error.code,
-      evaluation: input.evaluation,
       now: input.now,
       outcome: input.outcome.status === "denied" ? "denied" : "failed",
       outboxId: null,
+      principal: input.principal,
       requestId: input.requestId,
       state: {
         active: input.input.active,
@@ -2363,14 +2553,12 @@ export class PostgresFollowService implements FollowService {
   async #commitTransientRateLimit(
     transaction: TransactionSql,
     input: {
-      authorization: AuthorizationRow;
       channel: string;
-      context: AgentCredentialContext;
       decisionId: string;
-      evaluation: AgentOperationEvaluation;
       input: NormalizedSetFollowCommand;
       now: Date;
       outcome: FollowWriteOutcome;
+      principal: FollowWritePrincipal;
       requestId: string;
     },
   ): Promise<void> {
@@ -2383,16 +2571,14 @@ export class PostgresFollowService implements FollowService {
       throw new Error("A transient Follow denial requires RATE_LIMITED.");
     }
     await this.#writeActionLog(transaction, {
-      authorization: input.authorization,
       channel: input.channel,
-      context: input.context,
       decision: "deny",
       decisionId: input.decisionId,
       errorCode: error.code,
-      evaluation: input.evaluation,
       now: input.now,
       outcome: "denied",
       outboxId: null,
+      principal: input.principal,
       requestId: input.requestId,
       state: {
         active: input.input.active,
@@ -2409,16 +2595,14 @@ export class PostgresFollowService implements FollowService {
   async #writeActionLog(
     transaction: TransactionSql,
     event: {
-      authorization: AuthorizationRow;
       channel: string;
-      context: AgentCredentialContext;
       decision: FollowWriteDecision;
       decisionId: string;
       errorCode: FollowErrorCode | null;
-      evaluation: AgentOperationEvaluation;
       now: Date;
       outcome: "succeeded" | "denied" | "failed";
       outboxId: string | null;
+      principal: FollowWritePrincipal;
       requestId: string;
       state: postgres.JSONValue;
       targetId: string;
@@ -2437,6 +2621,7 @@ export class PostgresFollowService implements FollowService {
         credential_id,
         channel,
         approval_method,
+        approved_by_owner_id,
         authentication_assurance,
         authorization_snapshot,
         action,
@@ -2455,17 +2640,22 @@ export class PostgresFollowService implements FollowService {
         ${this.#newId("audit_id")},
         'domain_write',
         ${event.now},
-        ${event.authorization.actor_id},
-        'agent',
-        ${event.context.owner.id},
-        ${event.context.agent.id},
-        ${event.context.credential.id},
+        ${event.principal.actorId},
+        ${event.principal.actorKind},
+        ${event.principal.ownerId},
+        ${event.principal.agentId},
+        ${event.principal.credentialId},
         ${event.channel},
-        ${event.evaluation.decision === "allow" ? "policy_auto" : null},
-        'agent_credential',
-        ${transaction.json(
-          policySnapshot(event.authorization, event.evaluation, event.decisionId),
-        )},
+        ${
+          event.principal.credentialId === null
+            ? event.principal.approvalMethod
+            : event.decision === "allow"
+              ? "policy_auto"
+              : null
+        },
+        ${event.principal.credentialId === null ? event.principal.ownerId : null},
+        ${event.principal.authenticationAssurance},
+        ${transaction.json(event.principal.authorizationSnapshot(event.decisionId))},
         'follow.set',
         ${event.targetType},
         ${event.targetId},
@@ -2473,10 +2663,12 @@ export class PostgresFollowService implements FollowService {
         ${event.outcome},
         ${event.errorCode},
         ${event.outboxId},
-        ${event.authorization.policy_version},
+        ${event.principal.policyVersion},
         ${event.requestId},
         ${transaction.json(event.state)},
-        ${(event.errorCode ?? event.evaluation.reason).toLocaleLowerCase("en-US")}
+        ${(event.errorCode ?? event.principal.evaluation.reason).toLocaleLowerCase(
+          "en-US",
+        )}
       )
     `;
   }

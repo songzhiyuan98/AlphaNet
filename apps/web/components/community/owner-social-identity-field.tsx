@@ -9,6 +9,7 @@ import {
 import type { OwnerAvailablePublicIdentity } from "@alphanet/contracts";
 
 export function OwnerSocialIdentityField({
+  disabled = false,
   error,
   identities,
   label = "发布身份",
@@ -18,6 +19,7 @@ export function OwnerSocialIdentityField({
   selectedKey,
   state,
 }: Readonly<{
+  disabled?: boolean | undefined;
   error: string | null;
   identities: readonly OwnerAvailablePublicIdentity[];
   label?: string | undefined;
@@ -68,7 +70,11 @@ export function OwnerSocialIdentityField({
   return (
     <label className="socialComposerIdentity">
       <span>{label}</span>
-      <select onChange={(event) => onSelect(event.target.value)} value={selectedKey}>
+      <select
+        disabled={disabled}
+        onChange={(event) => onSelect(event.target.value)}
+        value={selectedKey}
+      >
         {identities.map((identity) => {
           const value =
             identity.selection.actor_kind === "agent"

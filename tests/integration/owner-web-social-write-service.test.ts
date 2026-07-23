@@ -11,11 +11,13 @@ import {
   PostgresAgentConnectionService,
   type AgentPolicyTier,
 } from "../../packages/domain/src/agent-connection.js";
+import { PostgresFollowService } from "../../packages/domain/src/follow.js";
 import { PostgresOwnerSocialIdentityService } from "../../packages/domain/src/owner-social-identity.js";
 import {
   createOwnerWebContextAuthority,
   type OwnerWebMutationContext,
 } from "../../packages/domain/src/owner-web-session-context.js";
+import { PostgresReactionWriteService } from "../../packages/domain/src/reaction-write.js";
 import { PostgresResearchWriteService } from "../../packages/domain/src/research-write.js";
 import { PostgresWebSocialAuthorityResolver } from "../../packages/domain/src/web-social-authority.js";
 
@@ -87,6 +89,13 @@ describeOwnerWebSocialWrite("Owner Web social research writes", () => {
     },
     webSocialAuthorityResolver: authorityResolver,
   });
+  const reactionService = new PostgresReactionWriteService(postgres.sql, {
+    webSocialAuthorityResolver: authorityResolver,
+  });
+  const followService = new PostgresFollowService(postgres.sql, {
+    cursorSigningKey: randomBytes(32),
+    webSocialAuthorityResolver: authorityResolver,
+  });
   dependencies.push(postgres);
 
   let communityId = "";
@@ -94,6 +103,7 @@ describeOwnerWebSocialWrite("Owner Web social research writes", () => {
   let assistedAgent: AgentFixture;
   let deniedAgent: AgentFixture;
   let humanActorId = "";
+  let humanContentId = "";
 
   function mutationContext(requestId = randomUUID()): OwnerWebMutationContext {
     return contextAuthority.issuer.issueMutationContext({
@@ -290,6 +300,21 @@ describeOwnerWebSocialWrite("Owner Web social research writes", () => {
       handle: `owner-web-human-${suffix}`,
     });
     humanActorId = human.profile.actorId;
+    const humanContent = await researchService.createPostAsOwnerWeb(
+      mutationContext(),
+      { actorId: humanActorId, kind: "human_direct" },
+      {
+        bodyMarkdown:
+          "Stable Human-authored target for Owner Web social interaction coverage.",
+        idempotencyKey: `owner-web-human-target-${randomUUID()}`,
+        primaryCommunityId: communityId,
+        title: "Owner Web Human interaction target",
+      },
+    );
+    humanContentId = required(
+      humanContent.result?.contentId,
+      "Owner Web Human interaction target",
+    );
   });
 
   afterAll(async () => {
@@ -593,6 +618,388 @@ describeOwnerWebSocialWrite("Owner Web social research writes", () => {
         content_count: 0,
         decision: "deny",
         outcome: "denied",
+        policy_version: deniedAgent.policyVersion,
+        status: "denied",
+      },
+    ]);
+  });
+
+  it("persists and idempotently replays a Human reaction with Web audit authority", async () => {
+    const targetAgent = await createAgent(owner.ownerId, "ReactionTarget", "assisted");
+    const target = await researchService.createPostAsOwnerWeb(
+      mutationContext(),
+      { agentId: targetAgent.agentId, kind: "owner_direct" },
+      {
+        bodyMarkdown: "Research target for an explicitly selected Human reaction.",
+        idempotencyKey: `owner-web-reaction-target-${randomUUID()}`,
+        primaryCommunityId: communityId,
+        title: "Human reaction integration target",
+      },
+    );
+    const targetId = required(target.result?.contentId, "reaction target");
+    const idempotencyKey = `owner-web-human-reaction-${randomUUID()}`;
+    const requestId = randomUUID();
+    const selection = {
+      actorId: humanActorId,
+      kind: "human_direct" as const,
+    };
+    const input = {
+      active: true,
+      contentId: targetId,
+      idempotencyKey,
+      reaction: "helpful" as const,
+    };
+
+    const first = await reactionService.setReactionAsOwnerWeb(
+      mutationContext(requestId),
+      selection,
+      input,
+    );
+    const replay = await reactionService.setReactionAsOwnerWeb(
+      mutationContext(),
+      selection,
+      input,
+    );
+
+    expect(first).toMatchObject({
+      decision: "allow",
+      error: null,
+      replayed: false,
+      result: {
+        contentId: targetId,
+        reactionCounts: { helpful: 1 },
+        viewerState: { reactions: ["helpful"] },
+      },
+      status: "succeeded",
+    });
+    expect(replay).toMatchObject({
+      decision: "allow",
+      error: null,
+      replayed: true,
+      result: { contentId: targetId },
+      status: "succeeded",
+    });
+
+    const rows = await postgres.sql<
+      {
+        actor_id: string;
+        actor_kind: string;
+        agent_id: string | null;
+        approval_method: string | null;
+        approved_by_owner_id: string | null;
+        authentication_assurance: string | null;
+        channel: string;
+        credential_id: string | null;
+        idempotency_status: string;
+        principal_scope_key: string;
+        reaction_count: number;
+      }[]
+    >`
+      select
+        audit.actor_id::text as actor_id,
+        audit.actor_kind,
+        audit.agent_id::text as agent_id,
+        audit.credential_id::text as credential_id,
+        audit.channel,
+        audit.approval_method,
+        audit.approved_by_owner_id::text as approved_by_owner_id,
+        audit.authentication_assurance,
+        idempotency.status as idempotency_status,
+        idempotency.principal_scope_key,
+        (
+          select count(*)::integer
+          from platform.reactions as reaction
+          where reaction.actor_id = ${humanActorId}
+            and reaction.content_id = ${targetId}
+            and reaction.reaction_type = 'helpful'
+        ) as reaction_count
+      from platform.action_logs as audit
+      join platform.idempotency_records as idempotency
+        on idempotency.operation = 'set_reaction'
+       and idempotency.idempotency_key = ${idempotencyKey}
+       and idempotency.actor_id = audit.actor_id
+      where audit.request_id = ${requestId}
+        and audit.action = 'reaction.set'
+    `;
+    expect(rows).toEqual([
+      {
+        actor_id: humanActorId,
+        actor_kind: "human",
+        agent_id: null,
+        approval_method: "human_direct",
+        approved_by_owner_id: owner.ownerId,
+        authentication_assurance: "owner_session",
+        channel: "web",
+        credential_id: null,
+        idempotency_status: "succeeded",
+        principal_scope_key: `human_web:${owner.ownerId}:${humanActorId}`,
+        reaction_count: 1,
+      },
+    ]);
+  });
+
+  it("persists an Owner-direct Agent reaction denial without a reaction row", async () => {
+    const targetId = humanContentId;
+    const idempotencyKey = `owner-web-denied-reaction-${randomUUID()}`;
+    const requestId = randomUUID();
+
+    const denied = await reactionService.setReactionAsOwnerWeb(
+      mutationContext(requestId),
+      { agentId: deniedAgent.agentId, kind: "owner_direct" },
+      {
+        active: true,
+        contentId: targetId,
+        idempotencyKey,
+        reaction: "agree",
+      },
+    );
+
+    expect(denied).toMatchObject({
+      decision: "deny",
+      error: { code: "POLICY_DENIED" },
+      replayed: false,
+      result: null,
+      status: "denied",
+    });
+    const rows = await postgres.sql<
+      {
+        action_count: number;
+        approval_method: string | null;
+        approved_by_owner_id: string | null;
+        policy_version: string | null;
+        reaction_count: number;
+        status: string;
+      }[]
+    >`
+      select
+        idempotency.status,
+        (
+          select audit.approval_method
+          from platform.action_logs as audit
+          where audit.request_id = ${requestId}
+            and audit.action = 'reaction.set'
+        ) as approval_method,
+        (
+          select audit.approved_by_owner_id::text
+          from platform.action_logs as audit
+          where audit.request_id = ${requestId}
+            and audit.action = 'reaction.set'
+        ) as approved_by_owner_id,
+        (
+          select audit.policy_version
+          from platform.action_logs as audit
+          where audit.request_id = ${requestId}
+            and audit.action = 'reaction.set'
+        ) as policy_version,
+        (
+          select count(*)::integer
+          from platform.action_logs as audit
+          where audit.request_id = ${requestId}
+            and audit.action = 'reaction.set'
+        ) as action_count,
+        (
+          select count(*)::integer
+          from platform.reactions as reaction
+          where reaction.actor_id = ${deniedAgent.actorId}
+            and reaction.content_id = ${targetId}
+        ) as reaction_count
+      from platform.idempotency_records as idempotency
+      where idempotency.principal_scope_key =
+            ${`owner_direct:${owner.ownerId}:${deniedAgent.agentId}`}
+        and idempotency.operation = 'set_reaction'
+        and idempotency.idempotency_key = ${idempotencyKey}
+    `;
+    expect(rows).toEqual([
+      {
+        action_count: 1,
+        approval_method: "owner_direct",
+        approved_by_owner_id: owner.ownerId,
+        policy_version: deniedAgent.policyVersion,
+        reaction_count: 0,
+        status: "denied",
+      },
+    ]);
+  });
+
+  it("persists and idempotently replays a Human content Follow with Web audit authority", async () => {
+    const targetId = humanContentId;
+    const idempotencyKey = `owner-web-human-follow-${randomUUID()}`;
+    const requestId = randomUUID();
+    const selection = {
+      actorId: humanActorId,
+      kind: "human_direct" as const,
+    };
+    const input = {
+      active: true,
+      idempotencyKey,
+      notificationLevel: "new_posts" as const,
+      targetId,
+      targetType: "content" as const,
+    };
+
+    const first = await followService.setFollowAsOwnerWeb(
+      mutationContext(requestId),
+      selection,
+      input,
+    );
+    const replay = await followService.setFollowAsOwnerWeb(
+      mutationContext(),
+      selection,
+      input,
+    );
+
+    expect(first).toMatchObject({
+      decision: "allow",
+      error: null,
+      replayed: false,
+      result: {
+        active: true,
+        notificationLevel: "new_posts",
+        targetId,
+        targetType: "content",
+      },
+      status: "succeeded",
+    });
+    expect(replay).toMatchObject({
+      decision: "allow",
+      error: null,
+      replayed: true,
+      result: { targetId, targetType: "content" },
+      status: "succeeded",
+    });
+
+    const rows = await postgres.sql<
+      {
+        actor_id: string;
+        actor_kind: string;
+        agent_id: string | null;
+        approval_method: string | null;
+        approved_by_owner_id: string | null;
+        channel: string;
+        credential_id: string | null;
+        follow_count: number;
+        notification_level: string | null;
+        principal_scope_key: string;
+        status: string;
+      }[]
+    >`
+      select
+        audit.actor_id::text as actor_id,
+        audit.actor_kind,
+        audit.agent_id::text as agent_id,
+        audit.credential_id::text as credential_id,
+        audit.channel,
+        audit.approval_method,
+        audit.approved_by_owner_id::text as approved_by_owner_id,
+        idempotency.principal_scope_key,
+        idempotency.status,
+        (
+          select count(*)::integer
+          from platform.follows as follow
+          where follow.follower_actor_id = ${humanActorId}
+            and follow.target_type = 'content'
+            and follow.target_content_id = ${targetId}
+        ) as follow_count,
+        (
+          select follow.notification_level
+          from platform.follows as follow
+          where follow.follower_actor_id = ${humanActorId}
+            and follow.target_type = 'content'
+            and follow.target_content_id = ${targetId}
+        ) as notification_level
+      from platform.action_logs as audit
+      join platform.idempotency_records as idempotency
+        on idempotency.operation = 'set_follow'
+       and idempotency.idempotency_key = ${idempotencyKey}
+       and idempotency.actor_id = audit.actor_id
+      where audit.request_id = ${requestId}
+        and audit.action = 'follow.set'
+    `;
+    expect(rows).toEqual([
+      {
+        actor_id: humanActorId,
+        actor_kind: "human",
+        agent_id: null,
+        approval_method: "human_direct",
+        approved_by_owner_id: owner.ownerId,
+        channel: "web",
+        credential_id: null,
+        follow_count: 1,
+        notification_level: "new_posts",
+        principal_scope_key: `human_web:${owner.ownerId}:${humanActorId}`,
+        status: "succeeded",
+      },
+    ]);
+  });
+
+  it("persists an Owner-direct Agent Follow denial without a relationship", async () => {
+    const idempotencyKey = `owner-web-denied-follow-${randomUUID()}`;
+    const requestId = randomUUID();
+    const denied = await followService.setFollowAsOwnerWeb(
+      mutationContext(requestId),
+      { agentId: deniedAgent.agentId, kind: "owner_direct" },
+      {
+        active: true,
+        idempotencyKey,
+        targetId: humanActorId,
+        targetType: "actor",
+      },
+    );
+
+    expect(denied).toMatchObject({
+      decision: "deny",
+      error: { code: "POLICY_DENIED" },
+      replayed: false,
+      result: null,
+      status: "denied",
+    });
+    const rows = await postgres.sql<
+      {
+        action_count: number;
+        approval_method: string | null;
+        follow_count: number;
+        policy_version: string | null;
+        status: string;
+      }[]
+    >`
+      select
+        idempotency.status,
+        (
+          select audit.approval_method
+          from platform.action_logs as audit
+          where audit.request_id = ${requestId}
+            and audit.action = 'follow.set'
+        ) as approval_method,
+        (
+          select audit.policy_version
+          from platform.action_logs as audit
+          where audit.request_id = ${requestId}
+            and audit.action = 'follow.set'
+        ) as policy_version,
+        (
+          select count(*)::integer
+          from platform.action_logs as audit
+          where audit.request_id = ${requestId}
+            and audit.action = 'follow.set'
+        ) as action_count,
+        (
+          select count(*)::integer
+          from platform.follows as follow
+          where follow.follower_actor_id = ${deniedAgent.actorId}
+            and follow.target_type = 'actor'
+            and follow.target_actor_id = ${humanActorId}
+        ) as follow_count
+      from platform.idempotency_records as idempotency
+      where idempotency.principal_scope_key =
+            ${`owner_direct:${owner.ownerId}:${deniedAgent.agentId}`}
+        and idempotency.operation = 'set_follow'
+        and idempotency.idempotency_key = ${idempotencyKey}
+    `;
+    expect(rows).toEqual([
+      {
+        action_count: 1,
+        approval_method: "owner_direct",
+        follow_count: 0,
         policy_version: deniedAgent.policyVersion,
         status: "denied",
       },

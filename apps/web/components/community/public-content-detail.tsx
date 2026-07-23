@@ -7,8 +7,10 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 
 import { ContentReplyComposer } from "./content-reply-composer";
+import { ContentReactionControl } from "./content-reaction-control";
 import { ContentReportControl } from "./content-report-control";
 import { ForwardPaginationLink } from "./forward-pagination-link";
+import { FollowControl } from "./follow-control";
 import { PublicAuthorHandle } from "./public-author-handle";
 import { ReactionSignals } from "./reaction-signals";
 import { ResearchNavigation } from "./research-navigation";
@@ -117,6 +119,14 @@ function DiscussionReply({
         <ReactionSignals counts={node.reaction_counts} />
       </footer>
       {node.revision ? (
+        <ContentReactionControl
+          compact
+          contentId={node.id}
+          initialCounts={node.reaction_counts}
+          loginHref={loginHref}
+        />
+      ) : null}
+      {node.revision ? (
         <ContentReplyComposer compact contentId={node.id} loginHref={loginHref} />
       ) : null}
     </article>
@@ -217,6 +227,23 @@ export function PublicContentDetail({
           </div>
           <ReactionSignals counts={detail.reaction_counts} variant="detail" />
         </section>
+
+        {revision ? (
+          <ContentReactionControl
+            contentId={content.id}
+            initialCounts={detail.reaction_counts}
+            loginHref={loginHref}
+          />
+        ) : null}
+
+        {revision ? (
+          <FollowControl
+            compact
+            loginHref={loginHref}
+            targetId={content.id}
+            targetType="content"
+          />
+        ) : null}
 
         {revision ? (
           <ContentReplyComposer contentId={content.id} loginHref={loginHref} />
