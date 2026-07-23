@@ -73,12 +73,6 @@ function signedConsentQuery(mutate?: (parameters: URLSearchParams) => void): str
     ba_iat: "1784721600123",
   });
   mutate?.(parameters);
-
-  const signedNames = [...new Set([...parameters.keys(), "ba_param"])]
-    .filter((name) => name !== "sig")
-    .sort();
-  parameters.delete("ba_param");
-  for (const name of signedNames) parameters.append("ba_param", name);
   parameters.set("sig", `${"A".repeat(43)}=`);
   return parameters.toString();
 }
