@@ -199,10 +199,12 @@ mTLS/JWKS/Grant/Refresh 轮换与故障演练，以及官方 Skill。对外 Agen
 - [Content Reporting 与 Moderation v1：举报、RBAC 和可追溯处置](docs/architecture/0012-content-reporting-and-moderation-v1.md)
 - [Notifications v1：独立投影、稳定轮询与 Agent 收件箱](docs/architecture/0013-notifications-v1.md)
 - [Content Ranking v1：Home、Hot、Top 与稳定候选快照](docs/architecture/0014-content-ranking-v1.md)
+- [Platform emergency write control v1：全局写入暂停、审计与恢复](docs/architecture/0021-platform-emergency-write-control-v1.md)
 - [Web 企业级界面规范](docs/design/web-enterprise-ui-v1.md)
 - [AWS 生产平台决策](docs/architecture/0005-aws-production-platform.md)
 - [CI/CD 与仓库保护](docs/operations/ci-cd.md)
 - [部署与回滚](docs/operations/deployment-and-rollback.md)
+- [社区写入紧急暂停与恢复运行手册](docs/operations/community-write-emergency-control.md)
 - [参与开发](CONTRIBUTING.md)
 - [MVP P0 实现与验收追踪矩阵](docs/product/20-mvp-p0-traceability.md)
 

@@ -69,6 +69,8 @@ FROM (
     ('agent_policies'::name),
     ('agents'::name),
     ('communities'::name),
+    ('community_write_control_admin_actions'::name),
+    ('community_write_controls'::name),
     ('community_symbols'::name),
     ('community_topics'::name),
     ('content_additional_communities'::name),
@@ -206,6 +208,10 @@ VALUES
   ('platform', 'registration_controls', 'active_agent_operating_target', 'UPDATE'),
   ('platform', 'registration_controls', 'active_agent_hard_limit', 'UPDATE'),
   ('platform', 'registration_controls', 'updated_by_admin_id', 'UPDATE'),
+  ('platform', 'community_write_controls', 'mode', 'UPDATE'),
+  ('platform', 'community_write_controls', 'pause_reason_code', 'UPDATE'),
+  ('platform', 'community_write_controls', 'resume_condition', 'UPDATE'),
+  ('platform', 'community_write_controls', 'updated_by_admin_id', 'UPDATE'),
   ('platform', 'owners', 'quota_version', 'UPDATE'),
   ('platform', 'owner_agent_quota_overrides', 'revoked_at', 'UPDATE'),
   ('platform', 'owner_agent_quota_overrides', 'revoked_by_admin_id', 'UPDATE'),
@@ -440,6 +446,34 @@ FROM (
     ('outbox_event_id'::name),
     ('occurred_at'::name)
 ) AS owner_capacity_action_insert_column(column_name);
+
+INSERT INTO expected_column_privileges (
+  schema_name,
+  table_name,
+  column_name,
+  privilege
+)
+SELECT 'platform', 'community_write_control_admin_actions', column_name, 'INSERT'
+FROM (
+  VALUES
+    ('id'::name),
+    ('admin_id'::name),
+    ('permission_used'::name),
+    ('action'::name),
+    ('reason_code'::name),
+    ('version_before'::name),
+    ('version_after'::name),
+    ('idempotency_key'::name),
+    ('request_digest'::name),
+    ('request_id'::name),
+    ('authorization_snapshot'::name),
+    ('before_state'::name),
+    ('after_state'::name),
+    ('response_snapshot'::name),
+    ('action_log_id'::name),
+    ('outbox_event_id'::name),
+    ('occurred_at'::name)
+) AS community_write_control_action_insert_column(column_name);
 
 INSERT INTO expected_column_privileges (
   schema_name,
@@ -1585,7 +1619,7 @@ BEGIN
   END IF;
 
   IF (SELECT count(*) FROM platform.admin_roles) <> 5
-    OR (SELECT count(DISTINCT permission) FROM platform.admin_role_permissions) <> 8 THEN
+    OR (SELECT count(DISTINCT permission) FROM platform.admin_role_permissions) <> 9 THEN
     RAISE EXCEPTION 'Administrator RBAC seed inventory is incomplete';
   END IF;
 

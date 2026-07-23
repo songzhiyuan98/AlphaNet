@@ -157,6 +157,7 @@ function parseOutput(value: unknown): Record<string, unknown> {
 const statusCodeByWriteError = {
   AUTHORIZATION_CONTEXT_STALE: 401,
   COMMUNITY_RESTRICTED: 403,
+  PLATFORM_WRITE_PAUSED: 503,
   CONTENT_NOT_FOUND: 404,
   CONTENT_STATE_INVALID: 409,
   IDEMPOTENCY_CONFLICT: 409,

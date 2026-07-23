@@ -4,6 +4,7 @@ import { appendOutboxEvent, type PostgresClient } from "@alphanet/database";
 import type postgres from "postgres";
 
 import { evaluateAgentOperation, type AgentOperationEvaluation } from "./agent-policy.js";
+import { readCommunityWriteControl } from "./admin-platform-operations.js";
 import type {
   AgentCredentialContext,
   AgentPolicyTier,
@@ -59,6 +60,7 @@ import {
   CONTENT_REVISION_WRITE_MIGRATION_CHECKSUM,
   OWNER_WEB_SOCIAL_HARDENING_V1_MIGRATION_CHECKSUM,
   PENDING_ACTION_EXECUTION_MIGRATION_CHECKSUM,
+  PLATFORM_EMERGENCY_WRITE_CONTROL_MIGRATION_CHECKSUM,
 } from "./schema-migrations.js";
 import {
   evaluateOwnerDirectOperation,
@@ -116,6 +118,7 @@ const RESEARCH_WRITE_ERROR_CODE_SET = new Set<string>([
   "IDEMPOTENCY_IN_PROGRESS",
   "IDEMPOTENCY_RESULT_CORRUPT",
   "NOT_CONTENT_AUTHOR",
+  "PLATFORM_WRITE_PAUSED",
   "POLICY_DENIED",
   "RATE_LIMITED",
   "REPLIES_CLOSED",
@@ -163,6 +166,7 @@ export type ResearchWriteErrorCode =
   | "IDEMPOTENCY_IN_PROGRESS"
   | "IDEMPOTENCY_RESULT_CORRUPT"
   | "NOT_CONTENT_AUTHOR"
+  | "PLATFORM_WRITE_PAUSED"
   | "POLICY_DENIED"
   | "RATE_LIMITED"
   | "REPLIES_CLOSED"
@@ -355,22 +359,34 @@ export interface OwnerWebResearchWriteService {
 export type ApprovedResearchExecutionDisposition = "invalidate" | "retry";
 
 export class ApprovedResearchExecutionError extends Error {
-  readonly code: "APPROVED_ACTION_CONTEXT_INVALID" | "APPROVED_ACTION_RATE_LIMITED";
+  readonly code:
+    | "APPROVED_ACTION_CONTEXT_INVALID"
+    | "APPROVED_ACTION_PLATFORM_WRITE_PAUSED"
+    | "APPROVED_ACTION_RATE_LIMITED";
   readonly disposition: ApprovedResearchExecutionDisposition;
   readonly retryAfterMs: number | null;
 
   constructor(
-    code: "APPROVED_ACTION_CONTEXT_INVALID" | "APPROVED_ACTION_RATE_LIMITED",
+    code:
+      | "APPROVED_ACTION_CONTEXT_INVALID"
+      | "APPROVED_ACTION_PLATFORM_WRITE_PAUSED"
+      | "APPROVED_ACTION_RATE_LIMITED",
     options: { retryAfterMs?: number | null | undefined } = {},
   ) {
     super(
       code === "APPROVED_ACTION_RATE_LIMITED"
         ? "The approved action must be retried later."
-        : "The approved action is no longer valid.",
+        : code === "APPROVED_ACTION_PLATFORM_WRITE_PAUSED"
+          ? "The approved action is deferred while community writes are paused."
+          : "The approved action is no longer valid.",
     );
     this.name = "ApprovedResearchExecutionError";
     this.code = code;
-    this.disposition = code === "APPROVED_ACTION_RATE_LIMITED" ? "retry" : "invalidate";
+    this.disposition =
+      code === "APPROVED_ACTION_RATE_LIMITED" ||
+      code === "APPROVED_ACTION_PLATFORM_WRITE_PAUSED"
+        ? "retry"
+        : "invalidate";
     this.retryAfterMs = options.retryAfterMs ?? null;
   }
 }
@@ -802,10 +818,29 @@ function statusForError(code: ResearchWriteErrorCode): number {
       return 403;
     case "RATE_LIMITED":
       return 429;
+    case "PLATFORM_WRITE_PAUSED":
+      return 503;
     case "VALIDATION_ERROR":
       return 422;
     case "IDEMPOTENCY_RESULT_CORRUPT":
       return 503;
+  }
+}
+
+async function assertCommunityWritesOpen(transaction: TransactionSql): Promise<void> {
+  const control = await readCommunityWriteControl(transaction);
+  if (control.mode === "paused") {
+    throw new ResearchWriteError(
+      "PLATFORM_WRITE_PAUSED",
+      "Community writes are temporarily paused.",
+      {
+        details: {
+          control_version: control.version,
+          reason_code: control.pauseReasonCode!,
+        },
+        retryable: true,
+      },
+    );
   }
 }
 
@@ -1977,6 +2012,14 @@ export class PostgresResearchWriteService
           )
           and exists (
             select 1
+            from system.schema_migrations
+            where version = '000026'
+              and checksum =
+                ${PLATFORM_EMERGENCY_WRITE_CONTROL_MIGRATION_CHECKSUM}
+          )
+          and to_regclass('platform.community_write_controls') is not null
+          and exists (
+            select 1
             from pg_catalog.pg_attribute
             where attrelid = to_regclass('platform.credentials')
               and attname = 'policy_ceiling_rules'
@@ -2155,6 +2198,13 @@ export class PostgresResearchWriteService
           frozenAction.idempotencyKey,
           frozenAction.normalizedInput.keyVersion,
         );
+        const writeControl = await readCommunityWriteControl(transaction);
+        if (writeControl.mode === "paused") {
+          throw new ApprovedResearchExecutionError(
+            "APPROVED_ACTION_PLATFORM_WRITE_PAUSED",
+            { retryAfterMs: 60_000 },
+          );
+        }
 
         const clocks = await transaction<{ database_now: Date }[]>`
             select clock_timestamp() as database_now
@@ -2788,6 +2838,8 @@ export class PostgresResearchWriteService
       }
       return parsePersistedOutcome(existing.response_body, command.operation);
     }
+
+    await assertCommunityWritesOpen(transaction);
 
     const now = new Date(this.#clock().valueOf());
     if (Number.isNaN(now.valueOf())) {
@@ -3670,6 +3722,8 @@ export class PostgresResearchWriteService
         }
         return parsePersistedOutcome(existing.response_body, command.operation);
       }
+
+      await assertCommunityWritesOpen(transaction);
 
       const now = new Date(this.#clock().valueOf());
       if (Number.isNaN(now.valueOf())) {

@@ -137,6 +137,7 @@ const friendlyMessages: Record<string, string> = {
   AUTHORITY_NOT_FOUND: "所选公开身份已不可用，请重新加载后选择。",
   COMMUNITY_NOT_FOUND: "找不到目标社区，或该社区尚不能接受发布。",
   COMMUNITY_RESTRICTED: "目标社区当前不接受这类内容。",
+  PLATFORM_WRITE_PAUSED: "社区写入已暂时暂停，请稍后重试。",
   DUPLICATE_CONTENT: "近期已经发布过相同内容，请检查后再提交。",
   POLICY_DENIED: "所选 Agent 的当前策略不允许这项社区操作。",
   RATE_LIMITED: "社区操作过于频繁，请稍后重试。",

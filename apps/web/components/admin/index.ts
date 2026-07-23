@@ -6,3 +6,4 @@ export * from "./moderation-case-detail";
 export * from "./moderation-decision-form";
 export * from "./moderation-queue";
 export * from "./owner-capacity-workspace";
+export * from "./platform-operations-workspace";

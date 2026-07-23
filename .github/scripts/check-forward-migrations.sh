@@ -30,6 +30,7 @@ readonly owner_web_social_hardening_v1_checksum="96c121bf0c695bbe7a6765ac04288dc
 readonly admin_topic_community_v1_checksum="7b698baa08e37d30d039e55c323bcef091176da5e478b6f72306f3d6e4518f23"
 readonly admin_agent_enforcement_v1_checksum="770a2960415ed686dacbb554016897237f4f18b38d4490d7e5972eb1ce9facd0"
 readonly admin_owner_capacity_v1_checksum="c00d0f4ba2a774560d8fed4c5af1f7988791294da4ccfc717caa11f2028d4b4b"
+readonly platform_emergency_write_control_v1_checksum="41c4f20fa51c509ba21990f3cf3877770749acdab796579c9e3d7cb39f619003"
 readonly suffix="${GITHUB_RUN_ID:-local}_${RANDOM}_$$"
 readonly empty_database="alphanet_migration_empty_${suffix}"
 readonly owner_database="alphanet_migration_owner_${suffix}"
@@ -1045,9 +1046,10 @@ for database in \
       --set=owner_web_social_hardening_v1_checksum="${owner_web_social_hardening_v1_checksum}" \
       --set=admin_topic_community_v1_checksum="${admin_topic_community_v1_checksum}" \
       --set=admin_agent_enforcement_v1_checksum="${admin_agent_enforcement_v1_checksum}" \
-      --set=admin_owner_capacity_v1_checksum="${admin_owner_capacity_v1_checksum}" <<'SQL'
+      --set=admin_owner_capacity_v1_checksum="${admin_owner_capacity_v1_checksum}" \
+      --set=platform_emergency_write_control_v1_checksum="${platform_emergency_write_control_v1_checksum}" <<'SQL'
 SELECT
-  (SELECT count(*) FROM system.schema_migrations) = 25
+  (SELECT count(*) FROM system.schema_migrations) = 26
   AND EXISTS (
     SELECT 1
     FROM system.schema_migrations
@@ -1191,6 +1193,26 @@ SELECT
       AND name = 'admin_owner_capacity_v1'
       AND checksum = :'admin_owner_capacity_v1_checksum'
   )
+  AND EXISTS (
+    SELECT 1
+    FROM system.schema_migrations
+    WHERE version = '000026'
+      AND name = 'platform_emergency_write_control_v1'
+      AND checksum = :'platform_emergency_write_control_v1_checksum'
+  )
+  AND to_regclass('platform.community_write_controls') IS NOT NULL
+  AND to_regclass(
+    'platform.community_write_control_admin_actions'
+  ) IS NOT NULL
+  AND to_regprocedure(
+    'platform.validate_community_write_control_action_provenance()'
+  ) IS NOT NULL
+  AND to_regprocedure(
+    'platform.validate_community_write_control_log_provenance()'
+  ) IS NOT NULL
+  AND to_regprocedure(
+    'platform.validate_community_write_control_outbox_provenance()'
+  ) IS NOT NULL
   AND EXISTS (
     SELECT 1
     FROM information_schema.columns
@@ -1413,7 +1435,7 @@ SELECT
   )
   AND (SELECT count(*) = 5 FROM platform.admin_roles)
   AND (
-    SELECT count(DISTINCT permission) = 8
+    SELECT count(DISTINCT permission) = 9
     FROM platform.admin_role_permissions
   )
   AND NOT EXISTS (SELECT 1 FROM platform.admins)

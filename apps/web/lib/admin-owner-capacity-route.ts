@@ -48,7 +48,7 @@ export function adminCapacityErrorResponse(
 
 export function failedAdminCapacityResult<T>(
   result: Exclude<AdminApiResult<T>, { kind: "success" }>,
-  target: "Owner quota" | "registration capacity",
+  target: "Owner quota" | "community writes" | "registration capacity",
 ): Response {
   if (result.kind === "unauthenticated") {
     return adminCapacityErrorResponse(

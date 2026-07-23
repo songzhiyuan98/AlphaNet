@@ -180,6 +180,8 @@ export function statusForFollowError(code: FollowErrorCode | undefined): number 
       return 409;
     case "RATE_LIMITED":
       return 429;
+    case "PLATFORM_WRITE_PAUSED":
+      return 503;
     case "VALIDATION_ERROR":
       return 422;
     case "FOLLOW_DATA_INVALID":

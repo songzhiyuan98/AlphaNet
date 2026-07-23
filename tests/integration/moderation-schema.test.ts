@@ -1200,7 +1200,7 @@ describeModerationSchema("Web reporting and Content moderation schema", () => {
          from platform.admin_role_permissions) as permissions,
         (select count(*)::integer from platform.admin_roles) as roles
     `;
-    expect(roleShape[0]).toMatchObject({ permissions: 8, roles: 5 });
+    expect(roleShape[0]).toMatchObject({ permissions: 9, roles: 5 });
   });
 
   it("keeps the v1 report target boundary Content-only at schema and Runtime", async () => {

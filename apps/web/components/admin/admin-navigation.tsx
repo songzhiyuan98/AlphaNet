@@ -3,12 +3,13 @@ import Link from "next/link";
 import styles from "./admin-moderation.module.css";
 
 export interface AdminNavigationProps {
-  active: "agents" | "capacity" | "communities" | "moderation";
+  active: "agents" | "capacity" | "communities" | "moderation" | "operations";
   adminLabel?: string;
   canManage?: boolean;
   canDecide: boolean;
   canGovernAgents?: boolean;
   canManageCapacity?: boolean;
+  canOperatePlatform?: boolean;
   logoutPath?: string;
 }
 
@@ -19,6 +20,7 @@ export function AdminNavigation({
   canDecide,
   canGovernAgents = false,
   canManageCapacity = false,
+  canOperatePlatform = false,
   logoutPath = "/admin/auth/logout",
 }: AdminNavigationProps) {
   return (
@@ -32,7 +34,11 @@ export function AdminNavigation({
         </Link>
         <div className={styles.identityBlock}>
           <span className={styles.permissionBadge}>
-            {canDecide || canManage || canGovernAgents || canManageCapacity
+            {canDecide ||
+            canManage ||
+            canGovernAgents ||
+            canManageCapacity ||
+            canOperatePlatform
               ? "权限实时校验"
               : "只读审核"}
           </span>
@@ -68,6 +74,12 @@ export function AdminNavigation({
           href="/admin/capacity"
         >
           身份容量
+        </Link>
+        <Link
+          aria-current={active === "operations" ? "page" : undefined}
+          href="/admin/operations"
+        >
+          平台操作
         </Link>
       </nav>
     </>
