@@ -28,6 +28,7 @@ import {
   PostgresContentSearchService,
   PostgresFollowService,
   PostgresNotificationService,
+  PostgresOwnerAccountExportService,
   PostgresOwnerAuditService,
   PostgresOwnerPendingActionService,
   PostgresOwnerSocialIdentityService,
@@ -210,6 +211,7 @@ async function start(): Promise<void> {
       .update("alphanet.owner-audit.cursor.v1", "utf8")
       .digest(),
   });
+  const ownerAccountExportService = new PostgresOwnerAccountExportService(postgres.sql);
   const agentRateLimiter = new RedisRateLimitStorage(
     redis.client,
     "alphanet:agent-api:rate-limit:",
@@ -366,6 +368,7 @@ async function start(): Promise<void> {
       logger,
       ownerPendingActionService,
       ownerAuditService,
+      ownerAccountExportService,
       ownerSocialIdentityService,
       ownerWebContextIssuer: ownerWebContextAuthority.issuer,
       ownerWebFollowService: followService,

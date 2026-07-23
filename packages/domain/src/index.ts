@@ -11,6 +11,7 @@ export * from "./follow.js";
 export * from "./notification.js";
 export * from "./notification-projector.js";
 export * from "./owner-pending-action.js";
+export * from "./owner-account-export.js";
 export * from "./owner-audit.js";
 export * from "./owner-social-identity.js";
 export * from "./owner-web-session-context.js";

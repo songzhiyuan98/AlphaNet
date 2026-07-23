@@ -1,7 +1,4 @@
-import {
-  OWNER_SESSION_FRESH_AGE_SECONDS,
-  type AlphaNetAuthRuntime,
-} from "@alphanet/auth";
+import type { AlphaNetAuthRuntime } from "@alphanet/auth";
 import {
   AgentPermissionTierSchema,
   AgentPolicyRulesSchema,
@@ -26,6 +23,7 @@ import {
   createOwnerRequestAuthorizationBoundary,
   type OwnerRequestRateLimiter,
 } from "./owner-request.js";
+import { isFreshOwnerSession } from "./owner-session-freshness.js";
 
 export interface OwnerAgentPolicyRouteOptions {
   allowedOrigins: readonly string[];
@@ -57,15 +55,6 @@ function requiresFreshOwnerSession(request: OwnerAgentPolicyUpdateRequest): bool
     request.tier === "autonomous" ||
     (request.tier === "custom" &&
       autonomousContentRuleNames.some((ruleName) => request.rules[ruleName] === "allow"))
-  );
-}
-
-function isFreshOwnerSession(createdAt: Date, now: Date): boolean {
-  const ageMilliseconds = now.valueOf() - createdAt.valueOf();
-  return (
-    Number.isFinite(ageMilliseconds) &&
-    ageMilliseconds >= -60_000 &&
-    ageMilliseconds < OWNER_SESSION_FRESH_AGE_SECONDS * 1_000
   );
 }
 

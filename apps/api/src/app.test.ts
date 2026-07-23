@@ -13,6 +13,7 @@ import type {
   ContentReportService,
   ContentSearchService,
   FollowService,
+  OwnerAccountExportService,
   OwnerPendingActionService,
 } from "@alphanet/domain";
 import type { FastifyBaseLogger } from "fastify";
@@ -111,6 +112,20 @@ function createOwnerPendingActionService(options?: {
     getAction: vi.fn(() => Promise.reject(new Error("unexpected detail read"))),
     listActions: vi.fn(() => Promise.reject(new Error("unexpected list read"))),
     rejectAction: vi.fn(() => Promise.reject(new Error("unexpected rejection"))),
+  };
+}
+
+function createOwnerAccountExportService(options?: {
+  checkReady?: () => Promise<void>;
+}): OwnerAccountExportService & {
+  checkReady: ReturnType<typeof vi.fn>;
+  exportAccountData: ReturnType<typeof vi.fn>;
+} {
+  return {
+    checkReady: vi.fn(options?.checkReady ?? (() => Promise.resolve())),
+    exportAccountData: vi.fn(() =>
+      Promise.reject(new Error("unexpected Owner account export")),
+    ),
   };
 }
 
@@ -382,6 +397,22 @@ describe("API service", () => {
     expect(service.checkReady).toHaveBeenCalledOnce();
   });
 
+  it("checks the Owner account export service during readiness", async () => {
+    const service = createOwnerAccountExportService();
+    const app = await createApiApp({
+      allowedOrigins: ["https://app.alphanet.test"],
+      environment: "test",
+      ownerAccountExportService: service,
+      version: "test-version",
+    });
+    apps.push(app);
+
+    const response = await app.inject({ method: "GET", url: "/health/ready" });
+
+    expect(response.statusCode).toBe(200);
+    expect(service.checkReady).toHaveBeenCalledOnce();
+  });
+
   it("registers public Content reads and includes their schema in readiness", async () => {
     const service = createContentReadService();
     const app = await createApiApp({
@@ -554,6 +585,62 @@ describe("API service", () => {
     );
     expect(auth.getOwnerSession).toHaveBeenCalledOnce();
     expect(service.approveAction).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { includeAuth: false, includeService: true },
+    { includeAuth: true, includeService: false },
+  ])(
+    "does not register Owner account export without both dependencies: %o",
+    async ({ includeAuth, includeService }) => {
+      const auth = createAuthRuntime();
+      const service = createOwnerAccountExportService();
+      const app = await createApiApp({
+        allowedOrigins: ["https://app.alphanet.test"],
+        ...(includeAuth ? { authRuntime: auth.runtime } : {}),
+        environment: "test",
+        ...(includeService ? { ownerAccountExportService: service } : {}),
+        version: "test-version",
+      });
+      apps.push(app);
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/owner/account-data-export",
+      });
+
+      expect(response.statusCode).toBe(404);
+      expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
+        "ROUTE_NOT_FOUND",
+      );
+      expect(auth.getOwnerSession).not.toHaveBeenCalled();
+      expect(service.exportAccountData).not.toHaveBeenCalled();
+    },
+  );
+
+  it("registers Owner account export and authenticates before the service", async () => {
+    const auth = createAuthRuntime();
+    const service = createOwnerAccountExportService();
+    const app = await createApiApp({
+      allowedOrigins: ["https://app.alphanet.test"],
+      authRuntime: auth.runtime,
+      environment: "test",
+      ownerAccountExportService: service,
+      version: "test-version",
+    });
+    apps.push(app);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/owner/account-data-export",
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(V1ErrorResponseSchema.parse(response.json()).error.code).toBe(
+      "AUTHENTICATION_REQUIRED",
+    );
+    expect(auth.getOwnerSession).toHaveBeenCalledOnce();
+    expect(service.exportAccountData).not.toHaveBeenCalled();
   });
 
   it.each([

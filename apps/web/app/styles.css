@@ -2986,6 +2986,112 @@ footer {
   padding-bottom: 72px;
 }
 
+/* Owner account data */
+.accountDataPage {
+  padding-bottom: 72px;
+}
+
+.accountDataExportPanel {
+  border-bottom: 1px solid var(--line);
+  border-top: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.55fr);
+  margin-top: 28px;
+}
+
+.accountDataExportCopy,
+.accountDataExportAction {
+  padding: 42px 0;
+}
+
+.accountDataExportCopy {
+  padding-right: clamp(32px, 7vw, 96px);
+}
+
+.accountDataExportCopy h2 {
+  font-size: clamp(28px, 4vw, 44px);
+  letter-spacing: -0.045em;
+  margin: 10px 0 14px;
+}
+
+.accountDataExportCopy > p:last-of-type,
+.accountDataExportCopy li {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.75;
+}
+
+.accountDataExportCopy ul {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 12px;
+  list-style: none;
+  margin: 28px 0 0;
+  padding: 24px 0 0;
+}
+
+.accountDataExportCopy li {
+  padding-left: 18px;
+  position: relative;
+}
+
+.accountDataExportCopy li::before {
+  background: var(--accent);
+  border-radius: 999px;
+  content: "";
+  height: 5px;
+  left: 0;
+  position: absolute;
+  top: 9px;
+  width: 5px;
+}
+
+.accountDataExportAction {
+  align-content: center;
+  border-left: 1px solid var(--line);
+  display: grid;
+  gap: 10px;
+  padding-left: clamp(28px, 4vw, 54px);
+}
+
+.accountDataExportAction > span {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.accountDataExportAction > strong {
+  font-size: 16px;
+  line-height: 1.45;
+}
+
+.accountDataExportAction .submitButton {
+  margin-top: 18px;
+  width: 100%;
+}
+
+.accountDataExportAction .formMessage {
+  margin-bottom: 0;
+}
+
+@media (max-width: 760px) {
+  .accountDataExportPanel {
+    grid-template-columns: 1fr;
+  }
+
+  .accountDataExportCopy {
+    padding-right: 0;
+  }
+
+  .accountDataExportAction {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+    padding-left: 0;
+  }
+}
+
 .auditWorkspace {
   border-top: 1px solid var(--line);
   margin-top: 22px;

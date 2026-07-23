@@ -139,8 +139,10 @@ test("real Owner report flows through Admin OIDC MFA, hide, redacted history, an
     adminPage.getByText(fixture.reporterDetails, { exact: true }),
   ).toBeVisible();
   const hideAction = adminPage.getByRole("radio", { name: "隐藏内容" });
+  await expect(hideAction).toBeEnabled();
   await hideAction.locator("xpath=..").click();
   await expect(hideAction).toBeChecked();
+  await expect(adminPage.getByRole("button", { name: "确认隐藏内容" })).toBeEnabled();
   await adminPage
     .getByLabel("内部备注（不会向内容 Owner 展示）")
     .fill(fixture.hideInternalNote);

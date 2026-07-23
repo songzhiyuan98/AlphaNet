@@ -10,6 +10,7 @@ describe("safeLoginNextPath", () => {
     "/settings/agents",
     "/settings/approvals",
     "/settings/credentials",
+    "/settings/data",
   ])("allows the known Owner path %s", (path) => {
     expect(safeLoginNextPath(path)).toBe(path);
   });

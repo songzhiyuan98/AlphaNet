@@ -10,6 +10,7 @@ export * from "./moderation.ts";
 export * from "./notification.ts";
 export * from "./owner.ts";
 export * from "./owner-action.ts";
+export * from "./owner-account-export.ts";
 export * from "./owner-audit.ts";
 export * from "./owner-policy.ts";
 export * from "./remote-mcp-oauth-consent.ts";

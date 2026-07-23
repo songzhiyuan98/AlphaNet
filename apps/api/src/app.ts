@@ -24,6 +24,7 @@ import type {
   ContentSearchService,
   FollowService,
   NotificationService,
+  OwnerAccountExportService,
   OwnerAuditService,
   OwnerSocialIdentityService,
   OwnerWebFollowService,
@@ -62,6 +63,7 @@ import {
   registerPublicContentSearchRoutes,
 } from "./content-search-routes.js";
 import { registerOwnerActionRoutes } from "./owner-action-routes.js";
+import { registerOwnerAccountExportRoutes } from "./owner-account-export-routes.js";
 import { registerOwnerAuditRoutes } from "./owner-audit-routes.js";
 import { registerOwnerRemoteMcpOAuthConsentRoutes } from "./owner-oauth-consent-routes.js";
 import { registerOwnerAgentPolicyRoutes } from "./owner-policy-routes.js";
@@ -97,6 +99,7 @@ export interface ApiAppOptions {
   internalSsrRequestSecret?: string;
   logger?: FastifyBaseLogger;
   ownerPendingActionService?: OwnerPendingActionService;
+  ownerAccountExportService?: OwnerAccountExportService;
   ownerAuditService?: OwnerAuditService;
   ownerSocialIdentityService?: OwnerSocialIdentityService;
   ownerWebContextIssuer?: OwnerWebContextIssuer;
@@ -478,6 +481,7 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
       options.contentSearchService ||
       options.followService ||
       options.notificationService ||
+      options.ownerAccountExportService ||
       options.ownerAuditService ||
       options.ownerPendingActionService ||
       options.ownerSocialIdentityService ||
@@ -589,6 +593,15 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
             critical: true,
             name: "owner-pending-action-schema",
             check: () => options.ownerPendingActionService!.checkReady(),
+          },
+        ]
+      : []),
+    ...(options.ownerAccountExportService
+      ? [
+          {
+            critical: true,
+            name: "owner-account-export-schema",
+            check: () => options.ownerAccountExportService!.checkReady(),
           },
         ]
       : []),
@@ -979,6 +992,16 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
         ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
         resolveClientIp,
         service: options.ownerPendingActionService,
+      });
+    }
+
+    if (options.ownerAccountExportService) {
+      registerOwnerAccountExportRoutes(app, {
+        allowedOrigins: options.allowedOrigins,
+        authRuntime,
+        ...(options.agentRateLimiter ? { rateLimiter: options.agentRateLimiter } : {}),
+        resolveClientIp,
+        service: options.ownerAccountExportService,
       });
     }
 
