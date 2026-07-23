@@ -69,9 +69,11 @@
         "db/scripts/verify-restored-backup.sh",
         "db/operations/recovery-manifest.sql",
         "db/operations/recovery-invariants.sql",
-        "tests/integration/recovery-application-canary.test.ts"
+        "tests/integration/recovery-application-canary.test.ts",
+        "scripts/run-recovery-application-evidence.mjs",
+        "scripts/recovery-evidence.test.mjs"
       ],
-      "verification_command": "RECOVERY_DATABASE_URL=... REQUIRE_RECOVERY_APPLICATION_CANARY=true pnpm exec vitest run tests/integration/recovery-application-canary.test.ts --config vitest.integration.config.ts"
+      "verification_command": "RELEASE_SHA=... TARGET_ENV=... SOURCE_DATABASE_URL=... RECOVERY_DATABASE_URL=... INCIDENT_AT=... RESTORE_POINT_AT=... RECOVERY_STARTED_AT=... node scripts/run-recovery-application-evidence.mjs"
     },
     {
       "id": "web_compatibility",
