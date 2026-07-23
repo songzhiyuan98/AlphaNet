@@ -232,6 +232,16 @@ export async function checkRemoteMcpOAuthSchemaReady(
        and to_regclass('auth.oauth_refresh_tokens') is not null
        and to_regclass('auth.oauth_access_tokens') is not null
        and to_regclass('auth.oauth_consents') is not null
+       and to_regprocedure('platform.validate_oauth_provider_grant_reference()') is not null
+       and exists (
+         select 1
+         from information_schema.columns
+         where table_schema = 'auth'
+           and table_name = 'oauth_access_tokens'
+           and column_name = 'resources'
+           and data_type = 'jsonb'
+           and is_nullable = 'NO'
+       )
        and to_regclass('platform.oauth_resource_configuration') is not null
        and to_regclass('platform.oauth_authorization_requests') is not null
        and to_regclass('platform.oauth_grants') is not null
@@ -245,12 +255,13 @@ export async function checkRemoteMcpOAuthSchemaReady(
        and to_regprocedure('system.reconcile_remote_mcp_oauth_grant_bootstraps(integer,integer)') is not null
        and to_regprocedure('system.purge_terminal_remote_mcp_oauth_authorization_requests(integer,integer)') is not null
        and (
-         select count(*) = 3
+         select count(*) = 4
          from system.schema_migrations
          where (version, name) in (
            ('000018', 'remote_mcp_oauth_v1'),
            ('000019', 'remote_mcp_oauth_hardening_v1'),
-           ('000020', 'remote_mcp_oauth_lifecycle_maintenance_v1')
+           ('000020', 'remote_mcp_oauth_lifecycle_maintenance_v1'),
+           ('000027', 'remote_mcp_oauth_resource_binding_v1')
          )
        ) as ready`,
   );

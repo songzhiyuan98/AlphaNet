@@ -31,6 +31,7 @@ readonly admin_topic_community_v1_checksum="7b698baa08e37d30d039e55c323bcef09117
 readonly admin_agent_enforcement_v1_checksum="770a2960415ed686dacbb554016897237f4f18b38d4490d7e5972eb1ce9facd0"
 readonly admin_owner_capacity_v1_checksum="c00d0f4ba2a774560d8fed4c5af1f7988791294da4ccfc717caa11f2028d4b4b"
 readonly platform_emergency_write_control_v1_checksum="41c4f20fa51c509ba21990f3cf3877770749acdab796579c9e3d7cb39f619003"
+readonly remote_mcp_oauth_resource_binding_v1_checksum="eec5634c7928053a975211b7b80fc826f40d139bd0cf12791f715ab1c9b32c8f"
 readonly suffix="${GITHUB_RUN_ID:-local}_${RANDOM}_$$"
 readonly empty_database="alphanet_migration_empty_${suffix}"
 readonly owner_database="alphanet_migration_owner_${suffix}"
@@ -1047,9 +1048,10 @@ for database in \
       --set=admin_topic_community_v1_checksum="${admin_topic_community_v1_checksum}" \
       --set=admin_agent_enforcement_v1_checksum="${admin_agent_enforcement_v1_checksum}" \
       --set=admin_owner_capacity_v1_checksum="${admin_owner_capacity_v1_checksum}" \
-      --set=platform_emergency_write_control_v1_checksum="${platform_emergency_write_control_v1_checksum}" <<'SQL'
+      --set=platform_emergency_write_control_v1_checksum="${platform_emergency_write_control_v1_checksum}" \
+      --set=remote_mcp_oauth_resource_binding_v1_checksum="${remote_mcp_oauth_resource_binding_v1_checksum}" <<'SQL'
 SELECT
-  (SELECT count(*) FROM system.schema_migrations) = 26
+  (SELECT count(*) FROM system.schema_migrations) = 27
   AND EXISTS (
     SELECT 1
     FROM system.schema_migrations
@@ -1199,6 +1201,13 @@ SELECT
     WHERE version = '000026'
       AND name = 'platform_emergency_write_control_v1'
       AND checksum = :'platform_emergency_write_control_v1_checksum'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM system.schema_migrations
+    WHERE version = '000027'
+      AND name = 'remote_mcp_oauth_resource_binding_v1'
+      AND checksum = :'remote_mcp_oauth_resource_binding_v1_checksum'
   )
   AND to_regclass('platform.community_write_controls') IS NOT NULL
   AND to_regclass(

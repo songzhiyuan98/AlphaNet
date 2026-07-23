@@ -15,8 +15,8 @@ AlphaNet 的 Remote MCP 是独立部署的 OAuth 2.1 Resource Server 和 REST
 
 1. Owner 继续由 Better Auth 登录；Agent 仍是 AlphaNet 领域主体，不是
    Better Auth User 或 Organization。
-2. Authorization Server 使用与 `better-auth@1.6.23` 精确配套的
-   `@better-auth/oauth-provider@1.6.23`，并使用 Better Auth JWT plugin
+2. Authorization Server 使用与 `better-auth@1.7.0-beta.4` 精确配套的
+   `@better-auth/oauth-provider@1.7.0-beta.4`，并使用 Better Auth JWT plugin
    生成 ES256 签名的短时 Access Token。
 3. 外部 OAuth 只接纳预注册的 public Client，使用 Authorization Code + PKCE
    S256，并在 Client 明确支持时使用 Refresh Token；Token endpoint authentication

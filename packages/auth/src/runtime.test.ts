@@ -38,7 +38,9 @@ describe("Remote MCP OAuth runtime readiness", () => {
       expect(sql).toContain("reconcile_remote_mcp_oauth_grant_bootstraps");
       expect(sql).toContain("purge_terminal_remote_mcp_oauth_authorization_requests");
       expect(sql).toContain("('000020', 'remote_mcp_oauth_lifecycle_maintenance_v1')");
-      expect(sql).toContain("select count(*) = 3");
+      expect(sql).toContain("('000027', 'remote_mcp_oauth_resource_binding_v1')");
+      expect(sql).toContain("column_name = 'resources'");
+      expect(sql).toContain("select count(*) = 4");
       return Promise.resolve({ rows: [{ ready: true }] });
     });
     const pool = { query } as unknown as Pick<Pool, "query">;
