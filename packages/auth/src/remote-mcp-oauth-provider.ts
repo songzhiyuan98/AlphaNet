@@ -605,7 +605,8 @@ function createLiveAccessTokenClaims(
         !context.user ||
         !isUuid(context.user.id) ||
         !isUuid(context.referenceId) ||
-        context.resource !== options.resource
+        context.resources?.length !== 1 ||
+        context.resources[0] !== options.resource
       ) {
         throw new Error("Remote MCP OAuth token authority is unavailable");
       }
@@ -1507,26 +1508,34 @@ function createProviderPlugin(
         : "hashed",
     validAudiences: [options.resource],
   });
+  // oauth-provider 1.7.0-beta.4 ships endpoint OpenAPI declarations that are
+  // structurally valid at runtime but narrower than BetterAuthPlugin's public
+  // endpoint index signature. Keep the compatibility assertion at this single
+  // reviewed package boundary instead of weakening AlphaNet's plugin types.
+  if (typeof provider.id !== "string" || provider.id.length === 0) {
+    throw new Error("Remote MCP OAuth Provider plugin is invalid");
+  }
+  const compatibleProvider = provider as unknown as BetterAuthPlugin;
   const disabledNativeEndpoints = new Set([
     "getOAuthServerConfig",
     "getOpenIdConfig",
     "oauth2Introspect",
     ...(live ? ["deleteOAuthConsent", "oauth2Revoke", "updateOAuthConsent"] : []),
   ]);
-  const endpoints = provider.endpoints
+  const endpoints = compatibleProvider.endpoints
     ? Object.fromEntries(
-        Object.entries(provider.endpoints).filter(
+        Object.entries(compatibleProvider.endpoints).filter(
           ([name]) => !disabledNativeEndpoints.has(name),
         ),
       )
     : undefined;
-  const providerOnRequest = provider.onRequest;
+  const providerOnRequest = compatibleProvider.onRequest;
   if (!providerOnRequest) {
-    return { ...provider, ...(endpoints ? { endpoints } : {}) };
+    return { ...compatibleProvider, ...(endpoints ? { endpoints } : {}) };
   }
   const metadataPathnames = oauthMetadataPathnames(options.issuer);
   return {
-    ...provider,
+    ...compatibleProvider,
     ...(endpoints ? { endpoints } : {}),
     async onRequest(request, context) {
       const result = await providerOnRequest(request, context);

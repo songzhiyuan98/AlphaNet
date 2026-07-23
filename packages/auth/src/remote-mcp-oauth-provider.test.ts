@@ -1365,7 +1365,7 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
     const providerOptions = provider?.options as {
       customAccessTokenClaims(input: {
         referenceId?: string;
-        resource?: string;
+        resources?: string[];
         scopes: string[];
         user?: { id: string } | null;
       }): Promise<Record<string, unknown>>;
@@ -1376,10 +1376,18 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
 
     const claims = await providerOptions.customAccessTokenClaims({
       referenceId: GRANT_ID,
-      resource: "https://mcp.alphanet.example/mcp",
+      resources: ["https://mcp.alphanet.example/mcp"],
       scopes: ["community:read", "offline_access"],
       user: { id: AUTH_USER_ID },
     });
+    await expect(
+      providerOptions.customAccessTokenClaims({
+        referenceId: GRANT_ID,
+        resources: ["https://mcp.alphanet.example/mcp", "https://untrusted.example/mcp"],
+        scopes: ["community:read"],
+        user: { id: AUTH_USER_ID },
+      }),
+    ).rejects.toThrow("token authority is unavailable");
     expect(claims).toMatchObject({
       grant_id: GRANT_ID,
     });
@@ -1425,7 +1433,7 @@ describe("createAlphaNetRemoteMcpOAuthLiveBoundary", () => {
 
     await expect(
       providerOptions.customAccessTokenClaims({
-        resource: "https://mcp.alphanet.example/mcp",
+        resources: ["https://mcp.alphanet.example/mcp"],
         scopes: ["community:read"],
         user: { id: AUTH_USER_ID },
       }),
