@@ -1,10 +1,15 @@
 import type { AlphaNetAuthRuntime, OwnerSession } from "@alphanet/auth";
 import { V1ErrorResponseSchema } from "@alphanet/contracts";
+import {
+  createOwnerWebContextAuthority,
+  type OwnerWebContextAuthority,
+} from "@alphanet/domain";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   createOwnerRequestAuthorizationBoundary,
+  createOwnerWebSocialRequestAuthorizationBoundary,
   type OwnerRequestMode,
   type OwnerRequestRateLimiter,
 } from "./owner-request.js";
@@ -42,6 +47,7 @@ function allowAllLimiter(): OwnerRequestRateLimiter & {
 
 function createBoundaryApp(options?: {
   bodyLimit?: number;
+  contextAuthority?: OwnerWebContextAuthority;
   mode?: OwnerRequestMode;
   rateLimiter?: OwnerRequestRateLimiter;
   resolveClientIp?: () => string;
@@ -52,6 +58,15 @@ function createBoundaryApp(options?: {
     ...(options?.bodyLimit ? { bodyLimit: options.bodyLimit } : {}),
     logger: false,
   });
+  let observedRequest:
+    | Parameters<
+        ReturnType<typeof createOwnerRequestAuthorizationBoundary>["getAuthorization"]
+      >[0]
+    | null = null;
+  app.addHook("onRequest", (request, _reply, done) => {
+    observedRequest = request;
+    done();
+  });
   const getOwnerSession = vi.fn<AlphaNetAuthRuntime["getOwnerSession"]>(
     options?.sessionLookup ??
       (() =>
@@ -59,23 +74,51 @@ function createBoundaryApp(options?: {
           options && "session" in options ? options.session! : ownerSession,
         )),
   );
-  const boundary = createOwnerRequestAuthorizationBoundary({
+  const contextAuthority = options?.contextAuthority ?? createOwnerWebContextAuthority();
+  const contextIssuer = {
+    issueMutationContext: vi.fn(contextAuthority.issuer.issueMutationContext),
+    issueSessionContext: vi.fn(contextAuthority.issuer.issueSessionContext),
+  };
+  const boundary = createOwnerWebSocialRequestAuthorizationBoundary({
     allowedOrigins: [allowedOrigin],
     authRuntime: { getOwnerSession },
+    contextIssuer,
     mode: options?.mode ?? "mutation",
     ...(options?.rateLimiter ? { rateLimiter: options.rateLimiter } : {}),
     ...(options?.resolveClientIp ? { resolveClientIp: options.resolveClientIp } : {}),
   });
   const handler = vi.fn((request: Parameters<typeof boundary.getAuthorization>[0]) => {
     const authorization = boundary.getAuthorization(request);
+    const databaseCheckedAt = new Date("2026-07-21T18:00:00.000Z");
+    const context =
+      (options?.mode ?? "mutation") === "mutation"
+        ? contextAuthority.verifier.normalizeMutationContext(
+            authorization.context,
+            databaseCheckedAt,
+          )
+        : contextAuthority.verifier.normalizeSessionContext(
+            authorization.context,
+            databaseCheckedAt,
+          );
     return {
+      context_csrf_validated: "csrfValidated" in context ? context.csrfValidated : false,
+      context_owner_id: context.ownerId,
+      context_session_id: context.sessionId,
       owner_id: authorization.owner.id,
       request_body: request.body,
     };
   });
   app.post("/owner-test", { onRequest: boundary.onRequest }, handler);
   apps.push(app);
-  return { app, boundary, getOwnerSession, handler };
+  return {
+    app,
+    boundary,
+    contextAuthority,
+    contextIssuer,
+    getObservedRequest: () => observedRequest,
+    getOwnerSession,
+    handler,
+  };
 }
 
 function mutationHeaders(contentType = "application/json") {
@@ -153,6 +196,13 @@ describe("Owner request parse-before boundary", () => {
       );
       expect(csrfLimiter.consume).toHaveBeenCalledOnce();
       expect(csrf.handler).not.toHaveBeenCalled();
+      expect(csrf.contextIssuer.issueSessionContext).not.toHaveBeenCalled();
+      expect(csrf.contextIssuer.issueMutationContext).not.toHaveBeenCalled();
+      const csrfRequest = csrf.getObservedRequest();
+      expect(csrfRequest).not.toBeNull();
+      expect(() => csrf.boundary.getAuthorization(csrfRequest!)).toThrow(
+        "without authorization",
+      );
 
       const authorizedLimiter = allowAllLimiter();
       const authorized = createBoundaryApp({
@@ -176,7 +226,14 @@ describe("Owner request parse-before boundary", () => {
 
   it("uses only the session Owner identity and does not re-consume limits in the handler", async () => {
     const limiter = allowAllLimiter();
-    const { app, getOwnerSession, handler } = createBoundaryApp({
+    const {
+      app,
+      boundary,
+      contextAuthority,
+      getObservedRequest,
+      getOwnerSession,
+      handler,
+    } = createBoundaryApp({
       rateLimiter: limiter,
     });
     const response = await app.inject({
@@ -190,7 +247,12 @@ describe("Owner request parse-before boundary", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({ owner_id: ownerId });
+    expect(response.json()).toMatchObject({
+      context_csrf_validated: true,
+      context_owner_id: ownerId,
+      context_session_id: ownerSession.session.id,
+      owner_id: ownerId,
+    });
     expect(handler).toHaveBeenCalledOnce();
     expect(limiter.consume).toHaveBeenCalledTimes(2);
     expect(getOwnerSession).toHaveBeenCalledOnce();
@@ -198,6 +260,21 @@ describe("Owner request parse-before boundary", () => {
     expect(sessionHeaders?.get("cookie")).toBe("alphanet.session=test-session");
     expect(sessionHeaders?.get("user-agent")).toBe("owner-request-test");
     expect(sessionHeaders?.has("authorization")).toBe(false);
+    const boundaryRequest = getObservedRequest();
+    expect(boundaryRequest).not.toBeNull();
+    const issuedContext = boundary.getAuthorization(boundaryRequest!).context;
+    expect(
+      contextAuthority.verifier.normalizeMutationContext(
+        issuedContext,
+        new Date("2026-07-21T18:00:00.000Z"),
+      ),
+    ).toMatchObject({ ownerId, sessionId: ownerSession.session.id });
+    expect(() =>
+      contextAuthority.verifier.normalizeMutationContext(
+        { ...issuedContext, csrfValidated: true },
+        new Date("2026-07-21T18:00:00.000Z"),
+      ),
+    ).toThrow(expect.objectContaining({ code: "INVALID_OWNER_WEB_SESSION_CONTEXT" }));
   });
 
   it("keeps concurrent Owner authorizations isolated by request", async () => {
@@ -233,7 +310,10 @@ describe("Owner request parse-before boundary", () => {
 
   it("allows reads without an Origin while retaining both limits", async () => {
     const limiter = allowAllLimiter();
-    const { app } = createBoundaryApp({ mode: "read", rateLimiter: limiter });
+    const { app, boundary, contextAuthority, getObservedRequest } = createBoundaryApp({
+      mode: "read",
+      rateLimiter: limiter,
+    });
     const response = await app.inject({
       headers: { "content-type": "application/json" },
       method: "POST",
@@ -242,6 +322,11 @@ describe("Owner request parse-before boundary", () => {
     });
 
     expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      context_csrf_validated: false,
+      context_owner_id: ownerId,
+      context_session_id: ownerSession.session.id,
+    });
     expect(limiter.consume).toHaveBeenNthCalledWith(1, expect.any(String), {
       max: 240,
       window: 60,
@@ -250,6 +335,38 @@ describe("Owner request parse-before boundary", () => {
       max: 120,
       window: 60,
     });
+    const readRequest = getObservedRequest();
+    expect(readRequest).not.toBeNull();
+    expect(() =>
+      contextAuthority.verifier.normalizeMutationContext(
+        boundary.getAuthorization(readRequest!).context,
+        new Date("2026-07-21T18:00:00.000Z"),
+      ),
+    ).toThrow(expect.objectContaining({ code: "OWNER_WEB_CSRF_REQUIRED" }));
+  });
+
+  it("keeps legacy Owner authorization free of social context authority", async () => {
+    const app = Fastify({ logger: false });
+    const boundary = createOwnerRequestAuthorizationBoundary({
+      allowedOrigins: [allowedOrigin],
+      authRuntime: { getOwnerSession: () => Promise.resolve(ownerSession) },
+      mode: "mutation",
+    });
+    app.post("/legacy-owner-test", { onRequest: boundary.onRequest }, (request) =>
+      boundary.getAuthorization(request),
+    );
+    apps.push(app);
+
+    const response = await app.inject({
+      headers: mutationHeaders(),
+      method: "POST",
+      payload: {},
+      url: "/legacy-owner-test",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ owner: { id: ownerId } });
+    expect(response.json()).not.toHaveProperty("context");
   });
 });
 

@@ -1,5 +1,10 @@
 import type { AlphaNetAuthRuntime, OwnerSession } from "@alphanet/auth";
 import type { V1ErrorResponse } from "@alphanet/contracts";
+import type {
+  OwnerWebContextIssuer,
+  OwnerWebMutationContext,
+  OwnerWebSessionContext,
+} from "@alphanet/domain";
 import type { FastifyReply, FastifyRequest } from "fastify";
 
 export interface OwnerRequestLimitRule {
@@ -16,7 +21,9 @@ export interface OwnerRequestRateLimiter {
 
 export type OwnerRequestMode = "read" | "mutation";
 
-export interface OwnerRequestBoundaryOptions {
+export interface OwnerRequestBoundaryOptions<
+  Mode extends OwnerRequestMode = OwnerRequestMode,
+> {
   allowedOrigins: readonly string[];
   authRuntime: Pick<AlphaNetAuthRuntime, "getOwnerSession">;
   limits?:
@@ -26,18 +33,46 @@ export interface OwnerRequestBoundaryOptions {
         read?: OwnerRequestLimitRule | undefined;
       }
     | undefined;
-  mode: OwnerRequestMode;
+  mode: Mode;
   rateLimiter?: OwnerRequestRateLimiter | undefined;
   resolveClientIp?: ((request: FastifyRequest) => string) | undefined;
 }
+
+export interface OwnerWebSocialRequestBoundaryOptions<
+  Mode extends OwnerRequestMode = OwnerRequestMode,
+> extends OwnerRequestBoundaryOptions<Mode> {
+  contextIssuer: OwnerWebContextIssuer;
+}
+
+type OwnerWebContextForMode<Mode extends OwnerRequestMode> = Mode extends "mutation"
+  ? OwnerWebMutationContext
+  : OwnerWebSessionContext;
 
 export interface AuthorizedOwnerRequest {
   owner: OwnerSession["owner"];
   session: OwnerSession["session"];
 }
 
+export interface AuthorizedOwnerWebSocialRequest<
+  Mode extends OwnerRequestMode = OwnerRequestMode,
+> extends AuthorizedOwnerRequest {
+  context: OwnerWebContextForMode<Mode>;
+}
+
 export interface OwnerRequestAuthorizationBoundary {
   readonly getAuthorization: (request: FastifyRequest) => AuthorizedOwnerRequest;
+  readonly onRequest: (
+    request: FastifyRequest,
+    reply: FastifyReply,
+  ) => Promise<FastifyReply | undefined>;
+}
+
+export interface OwnerWebSocialRequestAuthorizationBoundary<
+  Mode extends OwnerRequestMode = OwnerRequestMode,
+> {
+  readonly getAuthorization: (
+    request: FastifyRequest,
+  ) => AuthorizedOwnerWebSocialRequest<Mode>;
   readonly onRequest: (
     request: FastifyRequest,
     reply: FastifyReply,
@@ -154,10 +189,10 @@ function mutationOriginAllowed(
   );
 }
 
-async function authorizeOwnerRequest(
+async function authorizeOwnerRequest<Mode extends OwnerRequestMode>(
   request: FastifyRequest,
   reply: FastifyReply,
-  options: OwnerRequestBoundaryOptions,
+  options: OwnerRequestBoundaryOptions<Mode>,
 ): Promise<AuthorizedOwnerRequest | null> {
   let clientIp: string;
   try {
@@ -258,14 +293,47 @@ async function authorizeOwnerRequest(
   return { owner: session.owner, session: session.session };
 }
 
+function issueOwnerWebSocialAuthorization<Mode extends OwnerRequestMode>(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  options: OwnerWebSocialRequestBoundaryOptions<Mode>,
+  authorization: AuthorizedOwnerRequest,
+): AuthorizedOwnerWebSocialRequest<Mode> | null {
+  try {
+    const facts = {
+      authenticatedAt: authorization.session.createdAt,
+      authenticationAssurance: "owner_session" as const,
+      ownerId: authorization.owner.id,
+      requestId: request.id,
+      sessionId: authorization.session.id,
+    };
+    const context =
+      options.mode === "mutation"
+        ? options.contextIssuer.issueMutationContext(facts)
+        : options.contextIssuer.issueSessionContext(facts);
+    return { ...authorization, context: context as OwnerWebContextForMode<Mode> };
+  } catch (error) {
+    request.log.error(
+      { errorName: errorName(error) },
+      "Owner session context issuance failed",
+    );
+    sendDependencyUnavailable(
+      request,
+      reply,
+      "Owner authentication is temporarily unavailable.",
+    );
+    return null;
+  }
+}
+
 /**
  * Creates a parse-before Owner boundary for one route access mode. Session
  * identity is held only in a request-keyed WeakMap, never in client-controlled
  * request fields or a mutable cross-request slot.
  */
-export function createOwnerRequestAuthorizationBoundary(
-  options: OwnerRequestBoundaryOptions,
-): OwnerRequestAuthorizationBoundary {
+export function createOwnerRequestAuthorizationBoundary<
+  const Mode extends OwnerRequestMode,
+>(options: OwnerRequestBoundaryOptions<Mode>): OwnerRequestAuthorizationBoundary {
   const authorizations = new WeakMap<FastifyRequest, AuthorizedOwnerRequest>();
 
   return {
@@ -280,6 +348,46 @@ export function createOwnerRequestAuthorizationBoundary(
       void reply.header("cache-control", "no-store, private");
       void reply.header("pragma", "no-cache");
       const authorization = await authorizeOwnerRequest(request, reply, options);
+      if (!authorization) return reply;
+      authorizations.set(request, authorization);
+    },
+  };
+}
+
+/**
+ * Adds instance-scoped Owner Web social context issuance to the legacy Owner
+ * request checks. The issuer is invoked only after authentication, Owner
+ * eligibility, rate limiting, and (for mutations) Origin/CSRF validation.
+ */
+export function createOwnerWebSocialRequestAuthorizationBoundary<
+  const Mode extends OwnerRequestMode,
+>(
+  options: OwnerWebSocialRequestBoundaryOptions<Mode>,
+): OwnerWebSocialRequestAuthorizationBoundary<Mode> {
+  const authorizations = new WeakMap<
+    FastifyRequest,
+    AuthorizedOwnerWebSocialRequest<Mode>
+  >();
+
+  return {
+    getAuthorization: (request) => {
+      const authorization = authorizations.get(request);
+      if (!authorization) {
+        throw new Error("Owner request reached its handler without authorization");
+      }
+      return authorization;
+    },
+    onRequest: async (request, reply) => {
+      void reply.header("cache-control", "no-store, private");
+      void reply.header("pragma", "no-cache");
+      const ownerAuthorization = await authorizeOwnerRequest(request, reply, options);
+      if (!ownerAuthorization) return reply;
+      const authorization = issueOwnerWebSocialAuthorization(
+        request,
+        reply,
+        options,
+        ownerAuthorization,
+      );
       if (!authorization) return reply;
       authorizations.set(request, authorization);
     },

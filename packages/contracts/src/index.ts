@@ -13,3 +13,4 @@ export * from "./owner-action.ts";
 export * from "./owner-policy.ts";
 export * from "./remote-mcp-oauth-consent.ts";
 export * from "./v1-error.ts";
+export * from "./web-social.ts";
