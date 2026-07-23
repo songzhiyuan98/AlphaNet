@@ -98,6 +98,7 @@ FROM (
     ('reports'::name),
     ('source_links'::name),
     ('symbols'::name),
+    ('topic_community_admin_actions'::name),
     ('topics'::name)
 ) AS platform_table(table_name);
 
@@ -326,6 +327,55 @@ FROM (
     ('action_log_id'::name),
     ('outbox_event_id'::name)
 ) AS moderation_action_insert_column(column_name);
+
+INSERT INTO expected_column_privileges (
+  schema_name,
+  table_name,
+  column_name,
+  privilege
+)
+VALUES
+  ('platform', 'community_topics', 'community_id', 'INSERT'),
+  ('platform', 'community_topics', 'topic_id', 'INSERT'),
+  ('platform', 'topics', 'id', 'INSERT'),
+  ('platform', 'topics', 'slug', 'INSERT'),
+  ('platform', 'topics', 'name', 'INSERT'),
+  ('platform', 'topics', 'description', 'INSERT'),
+  ('platform', 'communities', 'name', 'UPDATE'),
+  ('platform', 'communities', 'description', 'UPDATE'),
+  ('platform', 'communities', 'status', 'UPDATE'),
+  ('platform', 'communities', 'version', 'UPDATE'),
+  ('platform', 'topics', 'name', 'UPDATE'),
+  ('platform', 'topics', 'description', 'UPDATE'),
+  ('platform', 'topics', 'updated_at', 'UPDATE');
+
+INSERT INTO expected_column_privileges (
+  schema_name,
+  table_name,
+  column_name,
+  privilege
+)
+SELECT 'platform', 'topic_community_admin_actions', column_name, 'INSERT'
+FROM (
+  VALUES
+    ('id'::name),
+    ('admin_id'::name),
+    ('permission_used'::name),
+    ('action'::name),
+    ('community_id'::name),
+    ('community_version_before'::name),
+    ('community_version_after'::name),
+    ('idempotency_key'::name),
+    ('request_digest'::name),
+    ('request_id'::name),
+    ('authorization_snapshot'::name),
+    ('before_state'::name),
+    ('after_state'::name),
+    ('response_snapshot'::name),
+    ('action_log_id'::name),
+    ('outbox_event_id'::name),
+    ('occurred_at'::name)
+) AS topic_community_action_insert_column(column_name);
 
 INSERT INTO expected_column_privileges (
   schema_name,

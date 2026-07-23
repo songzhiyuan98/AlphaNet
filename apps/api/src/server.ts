@@ -36,6 +36,7 @@ import {
   PostgresReactionWriteService,
   PostgresRemoteMcpAuthorityService,
   PostgresResearchWriteService,
+  PostgresTopicCommunityManagementService,
   PostgresWebSocialAuthorityResolver,
   createOwnerWebContextAuthority,
 } from "@alphanet/domain";
@@ -125,6 +126,9 @@ async function start(): Promise<void> {
       .update("alphanet.content-moderation.cursor.v1", "utf8")
       .digest(),
   });
+  const topicCommunityManagementService = new PostgresTopicCommunityManagementService(
+    postgres.sql,
+  );
   const contentSearchService = new PostgresContentSearchService(postgres.sql, {
     activityDigestKey: createHmac(
       "sha256",
@@ -379,6 +383,7 @@ async function start(): Promise<void> {
       reactionWriteService,
       ...(remoteMcpOAuthConsent ? { remoteMcpOAuthConsent } : {}),
       researchWriteService,
+      topicCommunityManagementService,
       trustedProxyCidrs: environment.API_TRUSTED_PROXY_CIDRS,
       version: environment.APP_VERSION,
     });

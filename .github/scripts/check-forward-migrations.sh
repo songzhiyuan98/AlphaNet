@@ -27,6 +27,7 @@ readonly remote_mcp_oauth_hardening_v1_checksum="3e9fa98b188a79866db57d989bcb1b1
 readonly remote_mcp_oauth_lifecycle_maintenance_v1_checksum="0361f188331c627cbbce6050311f70ece5e1b767e2543573629d6277610643f4"
 readonly owner_web_social_v1_checksum="77b07de89c8b44de4e933a408408e191b8fdae16476f320fe7a1adb2e61b0e01"
 readonly owner_web_social_hardening_v1_checksum="96c121bf0c695bbe7a6765ac04288dc17a4552880294835977d861968531844e"
+readonly admin_topic_community_v1_checksum="7b698baa08e37d30d039e55c323bcef091176da5e478b6f72306f3d6e4518f23"
 readonly suffix="${GITHUB_RUN_ID:-local}_${RANDOM}_$$"
 readonly empty_database="alphanet_migration_empty_${suffix}"
 readonly owner_database="alphanet_migration_owner_${suffix}"
@@ -1039,9 +1040,10 @@ for database in \
       --set=remote_mcp_oauth_hardening_v1_checksum="${remote_mcp_oauth_hardening_v1_checksum}" \
       --set=remote_mcp_oauth_lifecycle_maintenance_v1_checksum="${remote_mcp_oauth_lifecycle_maintenance_v1_checksum}" \
       --set=owner_web_social_v1_checksum="${owner_web_social_v1_checksum}" \
-      --set=owner_web_social_hardening_v1_checksum="${owner_web_social_hardening_v1_checksum}" <<'SQL'
+      --set=owner_web_social_hardening_v1_checksum="${owner_web_social_hardening_v1_checksum}" \
+      --set=admin_topic_community_v1_checksum="${admin_topic_community_v1_checksum}" <<'SQL'
 SELECT
-  (SELECT count(*) FROM system.schema_migrations) = 22
+  (SELECT count(*) FROM system.schema_migrations) = 23
   AND EXISTS (
     SELECT 1
     FROM system.schema_migrations
@@ -1164,6 +1166,23 @@ SELECT
       AND name = 'owner_web_social_hardening_v1'
       AND checksum = :'owner_web_social_hardening_v1_checksum'
   )
+  AND EXISTS (
+    SELECT 1
+    FROM system.schema_migrations
+    WHERE version = '000023'
+      AND name = 'admin_topic_community_v1'
+      AND checksum = :'admin_topic_community_v1_checksum'
+  )
+  AND to_regclass('platform.topic_community_admin_actions') IS NOT NULL
+  AND to_regprocedure(
+    'platform.validate_topic_community_admin_action_provenance()'
+  ) IS NOT NULL
+  AND to_regprocedure(
+    'platform.validate_topic_community_governance_log_provenance()'
+  ) IS NOT NULL
+  AND to_regprocedure(
+    'platform.validate_topic_community_governance_outbox_provenance()'
+  ) IS NOT NULL
   AND (
     SELECT count(*) = 5
     FROM pg_class AS relation

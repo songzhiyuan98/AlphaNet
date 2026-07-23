@@ -35,6 +35,7 @@ import type {
   PendingActionStatusService,
   ReactionWriteService,
   ResearchWriteService,
+  TopicCommunityManagementService,
   WebSocialAuthorityResolver,
 } from "@alphanet/domain";
 import Fastify, {
@@ -46,6 +47,7 @@ import Fastify, {
 } from "fastify";
 
 import { registerAgentConnectionRoutes, v1Error } from "./agent-routes.js";
+import { registerAdminTopicCommunityRoutes } from "./admin-topic-community-routes.js";
 import {
   registerCommunityRoutes,
   registerPublicCommunityRoutes,
@@ -118,6 +120,7 @@ export interface ApiAppOptions {
     >;
   };
   researchWriteService?: ResearchWriteService;
+  topicCommunityManagementService?: TopicCommunityManagementService;
   trustedProxyCidrs?: readonly string[];
   version: string;
 }
@@ -491,7 +494,8 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
       options.pendingActionStatusService ||
       options.reactionWriteService ||
       options.remoteMcpOAuthConsent ||
-      options.researchWriteService) &&
+      options.researchWriteService ||
+      options.topicCommunityManagementService) &&
     !options.agentRateLimiter
   ) {
     throw new Error(
@@ -558,6 +562,15 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
             critical: true,
             name: "content-report-schema",
             check: () => options.contentReportService!.checkReady(),
+          },
+        ]
+      : []),
+    ...(options.topicCommunityManagementService
+      ? [
+          {
+            critical: true,
+            name: "topic-community-management-schema",
+            check: () => options.topicCommunityManagementService!.checkReady(),
           },
         ]
       : []),
@@ -1084,6 +1097,13 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
     registerAdminContentModerationRoutes(app, {
       adminRuntime: options.adminRequestRuntime,
       service: options.contentModerationService,
+    });
+  }
+
+  if (options.adminRequestRuntime && options.topicCommunityManagementService) {
+    registerAdminTopicCommunityRoutes(app, {
+      adminRuntime: options.adminRequestRuntime,
+      service: options.topicCommunityManagementService,
     });
   }
 

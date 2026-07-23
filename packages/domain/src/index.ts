@@ -24,4 +24,5 @@ export * from "./reaction-write.js";
 export * from "./remote-mcp-authority.js";
 export * from "./schema-migrations.js";
 export * from "./search-indexer.js";
+export * from "./topic-community-management.js";
 export * from "./web-social-authority.js";
