@@ -14,6 +14,7 @@ const baseUrl = (__ENV.BASE_URL || "http://host.docker.internal:4000").replace(
   "",
 );
 const allowSmallDataset = __ENV.ALLOW_SMALL_DATASET === "1";
+const releaseSha = __ENV.RELEASE_SHA || null;
 
 const catalog = JSON.parse(open(catalogFile));
 const principals = new SharedArray("capacity principals", () =>
@@ -202,6 +203,9 @@ function assertPrincipal(principal, index) {
 }
 
 export function setup() {
+  if (profile === "full" && !/^[0-9a-f]{40}$/u.test(releaseSha || "")) {
+    throw new Error("full capacity evidence requires a full lowercase RELEASE_SHA");
+  }
   if (catalog.schema_version !== 1) {
     throw new Error("catalog.schema_version must equal 1");
   }
@@ -528,15 +532,19 @@ function allThresholdsPassed(data) {
 }
 
 export function handleSummary(data) {
+  const passed = allThresholdsPassed(data);
   const report = {
-    schema_version: 1,
-    gate: "alphanet-mvp-capacity",
+    schema_version: "1",
+    gate: profile === "full" ? "capacity_full" : "capacity_smoke",
+    release_sha: releaseSha,
+    result: passed ? "pass" : "fail",
+    observed_at: new Date().toISOString(),
     profile,
     target_environment: __ENV.TARGET_ENV || "unspecified",
     base_url: baseUrl,
     dataset: catalog.dataset || null,
     generated_at: new Date().toISOString(),
-    passed: allThresholdsPassed(data),
+    passed,
     metrics: {
       request_success: metricValues(data, "alphanet_request_success"),
       capacity_429: metricValues(data, "alphanet_capacity_429"),

@@ -765,6 +765,39 @@ jobs:
             exit 1
           fi
 
+      - name: Check out exact release evidence writer
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Write exact-SHA repository CI evidence
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          CONTAINER_CHECK_RESULT: ${{ needs.container-check.result }}
+          ECR_PUBLISH_ENABLED: ${{ vars.AWS_ECR_PUBLISH_ENABLED }}
+          EVENT_NAME: ${{ github.event_name }}
+          INFRASTRUCTURE_RESULT: ${{ needs.infrastructure.result }}
+          INTEGRATION_RESULT: ${{ needs.integration.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          RELEASE_SHA: ${{ github.sha }}
+          SECURITY_RESULT: ${{ needs.security.result }}
+          SOURCE_RUN_ID: ${{ github.run_id }}
+          WEB_E2E_RESULT: ${{ needs.web-e2e.result }}
+        run: node .github/scripts/write-repository-ci-evidence.mjs
+
+      - name: Upload repository CI evidence
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: repository-ci-${{ github.sha }}
+          overwrite: true
+          path: artifacts/release/repository-ci.json
+          if-no-files-found: error
+          retention-days: 90
+
   release-manifest:
     name: Release manifest
     if: >-

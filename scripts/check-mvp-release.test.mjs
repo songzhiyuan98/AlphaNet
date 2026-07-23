@@ -1,0 +1,109 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+
+import {
+  buildReleaseReport,
+  evidenceFileName,
+  validateGateEvidence,
+} from "./check-mvp-release.mjs";
+
+const releaseSha = "a".repeat(40);
+const observedAt = new Date().toISOString();
+const manifest = {
+  source_acceptance_count: 1,
+  global_release_gates: [
+    { id: "product_spec_alignment", class: "repository" },
+    { id: "search_degradation", class: "release_candidate" },
+  ],
+};
+const acceptanceReport = {
+  source_acceptance_count: 1,
+  counts: { approved_difference: 0 },
+  requirements: [
+    {
+      id: "AC-SR-07",
+      release_gates: ["search_degradation"],
+    },
+  ],
+};
+const searchEvidence = {
+  schema_version: "1",
+  gate: "search_degradation",
+  release_sha: releaseSha,
+  result: "pass",
+  observed_at: observedAt,
+  query_fingerprint: { result_count: 2 },
+  checks: {
+    lexical_usable: true,
+    hybrid_degraded_to_lexical: true,
+    degraded_results_equal_lexical_results: true,
+    semantic_failure_explicit: true,
+  },
+  contains_credentials_or_content: false,
+};
+
+test("uses stable evidence file names", () => {
+  assert.equal(evidenceFileName("notification_slo"), "notification-slo.json");
+});
+
+test("returns GO only when every global and mapped acceptance gate passes", () => {
+  const report = buildReleaseReport({
+    acceptanceReport,
+    evidenceByGate: new Map([["search_degradation", searchEvidence]]),
+    manifest,
+    releaseSha,
+  });
+  assert.equal(report.decision, "GO");
+  assert.deepEqual(report.summary, {
+    pass: 2,
+    missing: 0,
+    invalid: 0,
+    blocked_requirements: 0,
+  });
+});
+
+test("fails closed when exact-SHA evidence is missing or stale", () => {
+  const missing = buildReleaseReport({
+    acceptanceReport,
+    evidenceByGate: new Map(),
+    manifest,
+    releaseSha,
+  });
+  assert.equal(missing.decision, "NO_GO");
+  assert.equal(missing.summary.missing, 1);
+  assert.equal(missing.summary.blocked_requirements, 1);
+
+  const stale = buildReleaseReport({
+    acceptanceReport,
+    evidenceByGate: new Map([
+      ["search_degradation", { ...searchEvidence, release_sha: "b".repeat(40) }],
+    ]),
+    manifest,
+    releaseSha,
+  });
+  assert.equal(stale.decision, "NO_GO");
+  assert.match(stale.gates[1].error, /release_sha must match/u);
+});
+
+test("rejects notification evidence that weakens the agreed SLO", () => {
+  assert.throws(
+    () =>
+      validateGateEvidence({
+        evidence: {
+          schema_version: "1",
+          gate: "notification_slo",
+          release_sha: releaseSha,
+          result: "pass",
+          observed_at: observedAt,
+          sample_count: 99,
+          threshold_ms: 60_000,
+          readable_within_threshold_rate: 1,
+          latency_ms: { p99: 1 },
+          contains_credentials_or_content: false,
+        },
+        gate: { id: "notification_slo" },
+        releaseSha,
+      }),
+    /at least 100 samples/u,
+  );
+});

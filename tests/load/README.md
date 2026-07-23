@@ -89,7 +89,9 @@ psql "$DATABASE_URL" \
 ```
 
 The only persisted output is
-`artifacts/load/mvp-capacity-<profile>.json`; it contains aggregate metrics and
+Non-release profiles write `artifacts/load/mvp-capacity-<profile>.json`. The
+exact-SHA `full` release profile requires `RELEASE_SHA` and writes
+`artifacts/release/capacity-full.json`; reports contain aggregate metrics and
 dataset metadata, never API keys. A production-candidate release report must
 pair it with the dataset manifest, post-run consistency checks, search and
 notification freshness, queue peak, database/Valkey telemetry, and the recovery

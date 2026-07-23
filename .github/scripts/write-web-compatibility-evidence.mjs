@@ -90,6 +90,7 @@ const evidence = {
     run_id: sourceRunId,
   },
   result: "pass",
+  observed_at: new Date().toISOString(),
   projects,
   automated_scope: [
     "public discovery",
