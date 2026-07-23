@@ -19,6 +19,7 @@ import {
   type HealthDependency,
 } from "@alphanet/database";
 import {
+  PostgresAdminAgentEnforcementService,
   PostgresAgentConnectionService,
   BedrockTitanV2EmbeddingProvider,
   PostgresCommunityDirectoryService,
@@ -134,6 +135,17 @@ async function start(): Promise<void> {
         Buffer.from(environment.COMMUNITY_CURSOR_SIGNING_KEY, "utf8"),
       )
         .update("alphanet.topic-community-management.cursor.v1", "utf8")
+        .digest(),
+    },
+  );
+  const adminAgentEnforcementService = new PostgresAdminAgentEnforcementService(
+    postgres.sql,
+    {
+      cursorSigningKey: createHmac(
+        "sha256",
+        Buffer.from(environment.COMMUNITY_CURSOR_SIGNING_KEY, "utf8"),
+      )
+        .update("alphanet.admin-agent-enforcement.cursor.v1", "utf8")
         .digest(),
     },
   );
@@ -362,6 +374,7 @@ async function start(): Promise<void> {
         })()
       : undefined;
     app = await createApiApp({
+      adminAgentEnforcementService,
       ...(adminRequestRuntime ? { adminRequestRuntime } : {}),
       allowedOrigins: parseCorsOrigins(environment.CORS_ORIGINS),
       agentConnectionService,

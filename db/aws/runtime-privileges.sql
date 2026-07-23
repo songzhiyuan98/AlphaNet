@@ -168,6 +168,7 @@ GRANT SELECT ON TABLE
   platform.admin_role_permissions,
   platform.admin_roles,
   platform.admins,
+  platform.agent_admin_actions,
   platform.agent_search_activity_events,
   platform.actors,
   platform.agent_policies,
@@ -210,6 +211,31 @@ TO :"runtime_role";
 -- Owner Web report creation and administrator decisions use narrow columns.
 -- Database-owned state/version/timestamps are populated by defaults and
 -- triggers; the Runtime has no delete or RBAC grant path.
+GRANT INSERT (
+  id,
+  admin_id,
+  permission_used,
+  action,
+  reason_code,
+  internal_note,
+  agent_id,
+  owner_id,
+  governance_version_before,
+  governance_version_after,
+  revoked_credential_count,
+  idempotency_key,
+  request_digest,
+  request_id,
+  authorization_snapshot,
+  before_state,
+  after_state,
+  response_snapshot,
+  action_log_id,
+  outbox_event_id,
+  occurred_at
+) ON TABLE platform.agent_admin_actions
+TO :"runtime_role";
+
 GRANT INSERT (
   id,
   reporter_owner_id,

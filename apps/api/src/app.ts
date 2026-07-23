@@ -16,6 +16,7 @@ import {
 } from "@alphanet/contracts";
 import { closeDependencies, type HealthDependency } from "@alphanet/database";
 import type {
+  AdminAgentEnforcementService,
   AgentConnectionService,
   CommunityDirectoryService,
   ContentModerationService,
@@ -47,6 +48,7 @@ import Fastify, {
 } from "fastify";
 
 import { registerAgentConnectionRoutes, v1Error } from "./agent-routes.js";
+import { registerAdminAgentEnforcementRoutes } from "./admin-agent-enforcement-routes.js";
 import { registerAdminTopicCommunityRoutes } from "./admin-topic-community-routes.js";
 import {
   registerCommunityRoutes,
@@ -86,6 +88,7 @@ import { createRequestClientIpResolver, ssrClientIpHeaders } from "./ssr-client-
 
 export interface ApiAppOptions {
   allowedOrigins: string[];
+  adminAgentEnforcementService?: AdminAgentEnforcementService;
   adminRequestRuntime?: AdminRequestRuntime;
   agentConnectionService?: AgentConnectionService;
   agentRateLimiter?: Pick<RedisRateLimitStorage, "consume">;
@@ -477,6 +480,7 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
   if (
     options.environment === "production" &&
     (options.authRuntime ||
+      options.adminAgentEnforcementService ||
       options.agentConnectionService ||
       options.communityDirectoryService ||
       options.contentModerationService ||
@@ -526,6 +530,15 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
             critical: true,
             name: "agent-schema",
             check: () => options.agentConnectionService!.checkReady(),
+          },
+        ]
+      : []),
+    ...(options.adminAgentEnforcementService
+      ? [
+          {
+            critical: true,
+            name: "admin-agent-enforcement-schema",
+            check: () => options.adminAgentEnforcementService!.checkReady(),
           },
         ]
       : []),
@@ -1097,6 +1110,13 @@ export async function createApiApp(options: ApiAppOptions): Promise<FastifyInsta
     registerAdminContentModerationRoutes(app, {
       adminRuntime: options.adminRequestRuntime,
       service: options.contentModerationService,
+    });
+  }
+
+  if (options.adminRequestRuntime && options.adminAgentEnforcementService) {
+    registerAdminAgentEnforcementRoutes(app, {
+      adminRuntime: options.adminRequestRuntime,
+      service: options.adminAgentEnforcementService,
     });
   }
 
