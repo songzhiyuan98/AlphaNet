@@ -364,3 +364,59 @@ test("requires public MCP rotation, revocation, and negative-security drills", (
     /refresh_reuse drill must pass/u,
   );
 });
+
+test("requires approved, versioned, publicly available legal policies", () => {
+  const effectivePolicy = { version: "2026-07-24", effective_at: observedAt };
+  const evidence = {
+    schema_version: "1",
+    gate: "legal_policy",
+    release_sha: releaseSha,
+    result: "pass",
+    observed_at: observedAt,
+    terms_url: "https://alphanet.example/legal/terms",
+    privacy_url: "https://alphanet.example/legal/privacy",
+    notice_at_collection_url: "https://alphanet.example/legal/collection-notice",
+    community_policy_url: "https://alphanet.example/legal/community",
+    copyright_policy_url: "https://alphanet.example/legal/copyright",
+    data_request_url: "https://alphanet.example/legal/data-requests",
+    developer_terms_url: "https://alphanet.example/legal/developer-terms",
+    legal_review: {
+      approved: true,
+      approver: "External counsel",
+      reviewed_at: observedAt,
+      memo_reference: "private-legal-review-2026-07",
+      scopes: ["copyright", "investment_and_marketing", "privacy", "terms_and_ugc"],
+    },
+    policy_versions: {
+      community: effectivePolicy,
+      copyright: effectivePolicy,
+      data_request: effectivePolicy,
+      developer_terms: effectivePolicy,
+      notice_at_collection: effectivePolicy,
+      privacy: effectivePolicy,
+      terms: effectivePolicy,
+    },
+    contains_privileged_or_personal_data: false,
+  };
+
+  assert.doesNotThrow(() =>
+    validateGateEvidence({
+      evidence,
+      gate: { id: "legal_policy" },
+      releaseSha,
+    }),
+  );
+
+  assert.throws(
+    () =>
+      validateGateEvidence({
+        evidence: {
+          ...evidence,
+          legal_review: { ...evidence.legal_review, approved: false },
+        },
+        gate: { id: "legal_policy" },
+        releaseSha,
+      }),
+    /legal review must be approved/u,
+  );
+});
