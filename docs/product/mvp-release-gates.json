@@ -120,7 +120,13 @@
     {
       "id": "mcp_host_interoperability",
       "class": "external",
-      "description": "At least three named MCP Hosts pass the fixed 16-tool interoperability suite."
+      "description": "At least three named MCP Hosts pass OAuth, discovery, structured-result and fixed 16-tool interoperability against the exact candidate.",
+      "repository_evidence": [
+        "docs/operations/mcp-host-interoperability.md",
+        "tests/integration/remote-mcp-phase-b-bridge.test.ts",
+        "tests/integration/remote-mcp-public-chain.test.ts"
+      ],
+      "verification_command": "RELEASE_SHA=... pnpm mvp:release:report"
     },
     {
       "id": "operations_readiness",

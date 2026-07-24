@@ -232,3 +232,77 @@ test("requires diverse, independently verified product-value evidence", () => {
     /missing scenario counter_thesis/u,
   );
 });
+
+const mcpToolNames = [
+  "browse_content",
+  "create_post",
+  "delete_content",
+  "find_communities",
+  "get_action_status",
+  "get_agent_context",
+  "get_community",
+  "get_content",
+  "get_discussion",
+  "list_follows",
+  "list_notifications",
+  "reply_to_content",
+  "search_content",
+  "set_follow",
+  "set_reaction",
+  "update_content",
+];
+
+function mcpHost(name) {
+  return {
+    name,
+    version: "1.0.0",
+    platform: "test-platform",
+    protocol_version: "2025-06-18",
+    transport: "streamable_http",
+    authorization: "oauth_2_1_pkce",
+    result: "pass",
+    checks: {
+      authorization_challenge: true,
+      owner_login: true,
+      agent_selection: true,
+      tool_discovery: true,
+      structured_results: true,
+    },
+    tools: mcpToolNames.map((toolName) => ({ name: toolName, result: "pass" })),
+  };
+}
+
+test("requires three named Hosts to run the exact MCP tool suite", () => {
+  const evidence = {
+    schema_version: "1",
+    gate: "mcp_host_interoperability",
+    release_sha: releaseSha,
+    result: "pass",
+    observed_at: observedAt,
+    hosts: [mcpHost("host-a"), mcpHost("host-b"), mcpHost("host-c")],
+    contains_credentials_or_content: false,
+  };
+
+  assert.doesNotThrow(() =>
+    validateGateEvidence({
+      evidence,
+      gate: { id: "mcp_host_interoperability" },
+      releaseSha,
+    }),
+  );
+
+  assert.throws(
+    () =>
+      validateGateEvidence({
+        evidence: {
+          ...evidence,
+          hosts: evidence.hosts.map((host, index) =>
+            index === 0 ? { ...host, tools: host.tools.slice(1) } : host,
+          ),
+        },
+        gate: { id: "mcp_host_interoperability" },
+        releaseSha,
+      }),
+    /must run the exact fixed 16-tool suite/u,
+  );
+});

@@ -40,6 +40,24 @@ const allowedProductValueOutcomes = new Set([
   "new_research_contribution",
   "new_research_question",
 ]);
+const requiredMcpToolNames = [
+  "browse_content",
+  "create_post",
+  "delete_content",
+  "find_communities",
+  "get_action_status",
+  "get_agent_context",
+  "get_community",
+  "get_content",
+  "get_discussion",
+  "list_follows",
+  "list_notifications",
+  "reply_to_content",
+  "search_content",
+  "set_follow",
+  "set_reaction",
+  "update_content",
+];
 
 function invariant(condition, message) {
   if (!condition) throw new Error(message);
@@ -255,12 +273,46 @@ function validateMcpHostInteroperability(evidence) {
     new Set(evidence.hosts.map((host) => host?.name)).size === evidence.hosts.length,
     "MCP Host names must be unique",
   );
+  for (const host of evidence.hosts) {
+    invariant(nonEmptyString(host?.name), "every MCP Host requires a name");
+    invariant(nonEmptyString(host?.version), "every MCP Host requires a version");
+    invariant(nonEmptyString(host?.platform), "every MCP Host requires a platform");
+    invariant(
+      nonEmptyString(host?.protocol_version),
+      "every MCP Host requires an MCP protocol version",
+    );
+    invariant(
+      host?.transport === "streamable_http",
+      "every MCP Host must use Streamable HTTP",
+    );
+    invariant(
+      host?.authorization === "oauth_2_1_pkce",
+      "every MCP Host must use OAuth 2.1 with PKCE",
+    );
+    invariant(host?.result === "pass", "every MCP Host result must pass");
+    for (const name of [
+      "authorization_challenge",
+      "owner_login",
+      "agent_selection",
+      "tool_discovery",
+      "structured_results",
+    ]) {
+      invariant(host.checks?.[name] === true, `${host.name} ${name} must pass`);
+    }
+    invariant(Array.isArray(host.tools), `${host.name} tools must be an array`);
+    const toolNames = host.tools.map((tool) => tool?.name);
+    invariant(
+      JSON.stringify(sortedStrings(toolNames)) === JSON.stringify(requiredMcpToolNames),
+      `${host.name} must run the exact fixed 16-tool suite`,
+    );
+    invariant(
+      host.tools.every((tool) => tool?.result === "pass"),
+      `${host.name} must pass every fixed MCP tool`,
+    );
+  }
   invariant(
-    evidence.hosts.every(
-      (host) =>
-        nonEmptyString(host?.name) && host.tool_count === 16 && host.result === "pass",
-    ),
-    "every MCP Host must pass all 16 fixed tools",
+    evidence.contains_credentials_or_content === false,
+    "MCP Host evidence must not contain credentials or research content",
   );
 }
 

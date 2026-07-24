@@ -17,6 +17,7 @@ This directory defines AlphaNet's delivery and recovery baseline.
 - [Community write emergency control](./community-write-emergency-control.md)
 - [Manual accessibility release review](./manual-accessibility-review.md)
 - [Operations readiness release review](./operations-readiness-review.md)
+- [MCP Host interoperability release review](./mcp-host-interoperability.md)
 - [AWS infrastructure bootstrap](../../infra/aws/README.md)
 
 ## Current delivery state
