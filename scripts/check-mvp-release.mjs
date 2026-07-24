@@ -26,6 +26,20 @@ const minimumCapacityDataset = {
   reactions: 5_000_000,
   notifications: 3_000_000,
 };
+const requiredProductValueScenarios = [
+  "blind_spot_discovery",
+  "counter_thesis",
+  "publish_and_discuss",
+  "research_follow_up",
+  "source_or_claim_validation",
+];
+const allowedProductValueOutcomes = new Set([
+  "hypothesis_changed",
+  "hypothesis_rejected",
+  "hypothesis_strengthened",
+  "new_research_contribution",
+  "new_research_question",
+]);
 
 function invariant(condition, message) {
   if (!condition) throw new Error(message);
@@ -316,6 +330,39 @@ function validateProductValue(evidence) {
   invariant(
     passingTasks.length >= 10,
     "at least ten non-developer market-research tasks must pass",
+  );
+  invariant(
+    new Set(passingTasks.map((task) => task?.task_id)).size === passingTasks.length &&
+      passingTasks.every((task) => nonEmptyString(task?.task_id)),
+    "passing product-value task IDs must be unique and non-empty",
+  );
+  invariant(
+    passingTasks.every((task) => nonEmptyString(task?.participant_key)),
+    "every passing product-value task requires a participant_key",
+  );
+  invariant(
+    new Set(passingTasks.map((task) => task.participant_key)).size >= 5,
+    "product-value evidence requires at least five non-developer participants",
+  );
+  for (const scenario of requiredProductValueScenarios) {
+    invariant(
+      passingTasks.some((task) => task?.scenario === scenario),
+      `product-value evidence is missing scenario ${scenario}`,
+    );
+  }
+  invariant(
+    passingTasks.every(
+      (task) =>
+        task.community_research_used === true &&
+        task.independent_verification_completed === true &&
+        task.materially_useful === true &&
+        allowedProductValueOutcomes.has(task.outcome),
+    ),
+    "every passing product-value task must use community research, independently verify it, and produce a material research outcome",
+  );
+  invariant(
+    evidence.contains_credentials_or_content === false,
+    "product-value evidence must not contain credentials or research content",
   );
 }
 

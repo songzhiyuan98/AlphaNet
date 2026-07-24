@@ -142,7 +142,13 @@
     {
       "id": "product_value",
       "class": "external",
-      "description": "At least ten non-developer market-research tasks meet the agreed product-value gate."
+      "description": "At least ten non-developer market-research tasks across five core social-research scenarios meet the agreed product-value gate.",
+      "repository_evidence": [
+        "docs/product/21-product-value-validation.md",
+        "docs/product/04-personas-and-scenarios.md",
+        "docs/product/14-metrics-and-experiments.md"
+      ],
+      "verification_command": "RELEASE_SHA=... pnpm mvp:release:report"
     }
   ]
 }
