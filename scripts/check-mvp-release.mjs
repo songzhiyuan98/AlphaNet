@@ -254,6 +254,9 @@ function validateManualAccessibility(evidence) {
 }
 
 function validatePublicMcpEdge(evidence) {
+  for (const name of ["mcp_url", "issuer_url", "jwks_url"]) {
+    invariant(validHttpsUrl(evidence[name]), `${name} must be a public HTTPS URL`);
+  }
   for (const name of [
     "public_mtls",
     "jwks",
@@ -264,6 +267,33 @@ function validatePublicMcpEdge(evidence) {
   ]) {
     invariant(evidence.checks?.[name] === true, `${name} must pass`);
   }
+  for (const name of [
+    "wrong_resource_rejected",
+    "pkce_plain_rejected",
+    "invalid_redirect_rejected",
+    "untrusted_client_certificate_rejected",
+    "revoked_grant_rejected",
+    "refresh_reuse_rejected",
+  ]) {
+    invariant(evidence.negative_checks?.[name] === true, `${name} must pass`);
+  }
+  for (const name of [
+    "mtls_rotation",
+    "jwks_rotation",
+    "grant_revocation",
+    "refresh_reuse",
+  ]) {
+    const drill = evidence.drills?.[name];
+    invariant(drill?.result === "pass", `${name} drill must pass`);
+    invariant(
+      validObservedAt(drill?.observed_at),
+      `${name} drill observed_at is invalid`,
+    );
+  }
+  invariant(
+    evidence.contains_credentials_or_content === false,
+    "public MCP evidence must not contain credentials or research content",
+  );
 }
 
 function validateMcpHostInteroperability(evidence) {

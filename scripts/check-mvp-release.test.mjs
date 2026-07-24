@@ -306,3 +306,61 @@ test("requires three named Hosts to run the exact MCP tool suite", () => {
     /must run the exact fixed 16-tool suite/u,
   );
 });
+
+test("requires public MCP rotation, revocation, and negative-security drills", () => {
+  const drill = { result: "pass", observed_at: observedAt };
+  const evidence = {
+    schema_version: "1",
+    gate: "public_mcp_edge",
+    release_sha: releaseSha,
+    result: "pass",
+    observed_at: observedAt,
+    mcp_url: "https://mcp.alphanet.example/mcp",
+    issuer_url: "https://auth.alphanet.example",
+    jwks_url: "https://auth.alphanet.example/.well-known/jwks.json",
+    checks: {
+      public_mtls: true,
+      jwks: true,
+      authorization_code: true,
+      refresh: true,
+      revocation: true,
+      failure_drills: true,
+    },
+    negative_checks: {
+      wrong_resource_rejected: true,
+      pkce_plain_rejected: true,
+      invalid_redirect_rejected: true,
+      untrusted_client_certificate_rejected: true,
+      revoked_grant_rejected: true,
+      refresh_reuse_rejected: true,
+    },
+    drills: {
+      mtls_rotation: drill,
+      jwks_rotation: drill,
+      grant_revocation: drill,
+      refresh_reuse: drill,
+    },
+    contains_credentials_or_content: false,
+  };
+
+  assert.doesNotThrow(() =>
+    validateGateEvidence({
+      evidence,
+      gate: { id: "public_mcp_edge" },
+      releaseSha,
+    }),
+  );
+
+  assert.throws(
+    () =>
+      validateGateEvidence({
+        evidence: {
+          ...evidence,
+          drills: { ...evidence.drills, refresh_reuse: { result: "missing" } },
+        },
+        gate: { id: "public_mcp_edge" },
+        releaseSha,
+      }),
+    /refresh_reuse drill must pass/u,
+  );
+});
