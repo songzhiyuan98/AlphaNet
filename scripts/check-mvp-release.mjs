@@ -391,9 +391,11 @@ function validateLegalPolicy(evidence) {
   for (const name of [
     "terms_url",
     "privacy_url",
+    "notice_at_collection_url",
     "community_policy_url",
     "copyright_policy_url",
     "data_request_url",
+    "developer_terms_url",
   ]) {
     invariant(validHttpsUrl(evidence[name]), `${name} must be a public HTTPS URL`);
   }
@@ -401,6 +403,52 @@ function validateLegalPolicy(evidence) {
   invariant(
     nonEmptyString(evidence.legal_review?.approver),
     "legal review requires an accountable approver",
+  );
+  invariant(
+    validObservedAt(evidence.legal_review?.reviewed_at),
+    "legal review reviewed_at is invalid",
+  );
+  invariant(
+    nonEmptyString(evidence.legal_review?.memo_reference),
+    "legal review requires a private memo reference",
+  );
+  const requiredScopes = [
+    "copyright",
+    "investment_and_marketing",
+    "privacy",
+    "terms_and_ugc",
+  ];
+  invariant(
+    Array.isArray(evidence.legal_review?.scopes),
+    "legal review scopes are required",
+  );
+  invariant(
+    JSON.stringify(sortedStrings(evidence.legal_review.scopes)) ===
+      JSON.stringify(requiredScopes),
+    `legal review scopes must be exactly ${requiredScopes.join(", ")}`,
+  );
+  const requiredPolicies = [
+    "community",
+    "copyright",
+    "data_request",
+    "developer_terms",
+    "notice_at_collection",
+    "privacy",
+    "terms",
+  ];
+  invariant(isRecord(evidence.policy_versions), "policy_versions must be an object");
+  invariant(
+    JSON.stringify(sortedStrings(Object.keys(evidence.policy_versions))) ===
+      JSON.stringify(requiredPolicies),
+    `policy_versions must be exactly ${requiredPolicies.join(", ")}`,
+  );
+  for (const [name, policy] of Object.entries(evidence.policy_versions)) {
+    invariant(nonEmptyString(policy?.version), `${name} policy version is required`);
+    invariant(validObservedAt(policy?.effective_at), `${name} effective_at is invalid`);
+  }
+  invariant(
+    evidence.contains_privileged_or_personal_data === false,
+    "legal evidence must not contain privileged material or personal data",
   );
 }
 

@@ -151,7 +151,14 @@
     {
       "id": "legal_policy",
       "class": "external",
-      "description": "Terms, privacy, community, copyright, data-request and legal-review deliverables are approved and published."
+      "description": "Terms, privacy, Notice at Collection, community, copyright, data-request and developer terms are externally reviewed, versioned and published.",
+      "repository_evidence": [
+        "docs/operations/legal-policy-publication.md",
+        "docs/product/22-legal-review-brief.md",
+        "docs/product/17-risk-register-and-compliance.md",
+        "SECURITY.md"
+      ],
+      "verification_command": "RELEASE_SHA=... pnpm mvp:release:report"
     },
     {
       "id": "product_value",
