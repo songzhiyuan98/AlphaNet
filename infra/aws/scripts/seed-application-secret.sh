@@ -363,9 +363,14 @@ valkey_host="$4"
 valkey_auth_secret_arn="$5"
 api_internal_dns_name="$6"
 aws_region="${7:-${AWS_REGION:-us-west-2}}"
+valkey_url_scheme="${VALKEY_URL_SCHEME:-rediss}"
 
 if [[ ! "${api_internal_dns_name}" =~ ^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$ ]]; then
   printf '%s\n' "API_INTERNAL_DNS_NAME must be a lowercase DNS hostname." >&2
+  exit 2
+fi
+if [[ "${valkey_url_scheme}" != "redis" && "${valkey_url_scheme}" != "rediss" ]]; then
+  printf '%s\n' "VALKEY_URL_SCHEME must be redis or rediss." >&2
   exit 2
 fi
 
@@ -494,7 +499,7 @@ oauth_token_storage_key_base64="$(openssl rand 32 | openssl base64 -A)"
 oauth_jwk_encryption_key_base64="$(openssl rand 32 | openssl base64 -A)"
 
 database_url="postgresql://alphanet_runtime:${runtime_password}@${database_host}:5432/alphanet?sslmode=verify-full"
-redis_url="rediss://default:${valkey_auth_token}@${valkey_host}:6379/0"
+redis_url="${valkey_url_scheme}://default:${valkey_auth_token}@${valkey_host}:6379/0"
 
 printf '%s\0' \
   "${database_url}" \
@@ -603,6 +608,7 @@ unset \
   oauth_continuation_key_base64 \
   oauth_token_storage_key_base64 \
   oauth_jwk_encryption_key_base64 \
+  valkey_url_scheme \
   database_url \
   redis_url \
   existing_version_count

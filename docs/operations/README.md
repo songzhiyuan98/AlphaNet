@@ -20,6 +20,7 @@ This directory defines AlphaNet's delivery and recovery baseline.
 - [MCP Host interoperability release review](./mcp-host-interoperability.md)
 - [Public MCP and OAuth edge release review](./public-mcp-edge-review.md)
 - [Legal policy publication release review](./legal-policy-publication.md)
+- [Paused lean AWS deployment handoff](./aws-deployment-pause-handoff.md)
 - [AWS infrastructure bootstrap](../../infra/aws/README.md)
 
 ## Current delivery state

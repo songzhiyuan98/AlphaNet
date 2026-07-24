@@ -1,0 +1,179 @@
+name: alphanet-lean
+
+x-runtime: &runtime
+  restart: unless-stopped
+  init: true
+  env_file:
+    - ${RUNTIME_ENV_FILE:-runtime.env}
+  networks:
+    - alphanet
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "5"
+
+x-app-health: &app-health
+  interval: 30s
+  timeout: 5s
+  retries: 3
+  start_period: 30s
+
+services:
+  redis:
+    image: ${REDIS_IMAGE:?REDIS_IMAGE is required}
+    restart: unless-stopped
+    init: true
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --maxmemory
+      - 192mb
+      - --maxmemory-policy
+      - volatile-lru
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - redis-cli --no-auth-warning -a "$$REDIS_PASSWORD" ping | grep -q PONG
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    mem_limit: 256m
+    volumes:
+      - redis-data:/data
+    networks:
+      - alphanet
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+  api:
+    <<: *runtime
+    image: ${API_IMAGE:?API_IMAGE is required}
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      HOST: 0.0.0.0
+      PORT: "4000"
+    healthcheck:
+      <<: *app-health
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null http://127.0.0.1:4000/health/ready || exit 1
+    mem_limit: 768m
+    ports:
+      - 127.0.0.1:4000:4000
+    networks:
+      alphanet:
+        aliases:
+          - api.alphanet.internal
+
+  web:
+    <<: *runtime
+    image: ${WEB_IMAGE:?WEB_IMAGE is required}
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      API_INTERNAL_URL: http://api:4000
+      HOSTNAME: 0.0.0.0
+      PORT: "3000"
+    healthcheck:
+      <<: *app-health
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null http://127.0.0.1:3000/health || exit 1
+    mem_limit: 640m
+    ports:
+      - 127.0.0.1:3000:3000
+
+  mcp:
+    <<: *runtime
+    image: ${MCP_IMAGE:?MCP_IMAGE is required}
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      HOST: 0.0.0.0
+      MCP_INTERNAL_API_URL: https://api.alphanet.internal:4443
+      PORT: "4100"
+    healthcheck:
+      <<: *app-health
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null http://127.0.0.1:4100/health/ready || exit 1
+    mem_limit: 512m
+    ports:
+      - 127.0.0.1:4100:4100
+
+  worker:
+    <<: *runtime
+    image: ${WORKER_IMAGE:?WORKER_IMAGE is required}
+    depends_on:
+      api:
+        condition: service_healthy
+    mem_limit: 640m
+
+  bootstrap:
+    image: ${MIGRATE_IMAGE:?MIGRATE_IMAGE is required}
+    profiles:
+      - database-bootstrap
+    env_file:
+      - ${RUNTIME_ENV_FILE:-runtime.env}
+    entrypoint:
+      - /bin/bash
+      - /opt/alphanet/db/scripts/aws-bootstrap-database.sh
+    networks:
+      - alphanet
+    restart: "no"
+
+  migrate:
+    image: ${MIGRATE_IMAGE:?MIGRATE_IMAGE is required}
+    profiles:
+      - release
+    env_file:
+      - ${RUNTIME_ENV_FILE:-runtime.env}
+    entrypoint:
+      - /bin/bash
+      - /opt/alphanet/db/scripts/aws-migrate-release.sh
+    networks:
+      - alphanet
+    restart: "no"
+
+  runtime-smoke:
+    image: ${MIGRATE_IMAGE:?MIGRATE_IMAGE is required}
+    profiles:
+      - release
+    env_file:
+      - ${RUNTIME_ENV_FILE:-runtime.env}
+    entrypoint:
+      - /bin/bash
+      - /opt/alphanet/db/scripts/aws-smoke-runtime.sh
+    networks:
+      - alphanet
+    restart: "no"
+
+volumes:
+  redis-data:
+    name: alphanet-lean-redis-data
+
+networks:
+  alphanet:
+    name: alphanet-lean
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24

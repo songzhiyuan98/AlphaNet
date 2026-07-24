@@ -324,7 +324,11 @@ The resulting Secret JSON contains:
 
 - runtime `DATABASE_URL` using `alphanet_runtime` and
   `sslmode=verify-full`;
-- `REDIS_URL` using `rediss://`, the Valkey default user, and its AUTH token;
+- `REDIS_URL` using `rediss://`, the Valkey default user, and its AUTH token.
+  The lean single-node runtime is the only reviewed exception: set
+  `VALKEY_URL_SCHEME=redis` while seeding because its authenticated Redis
+  container is reachable only on the same private Docker bridge. The default
+  remains TLS and every managed Valkey environment must retain it;
 - independent migration/runtime database passwords;
 - Better Auth, SSR signing, Agent API pepper, PendingAction encryption, and
   Community cursor keys;
