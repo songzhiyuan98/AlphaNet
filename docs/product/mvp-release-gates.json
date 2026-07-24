@@ -115,7 +115,15 @@
     {
       "id": "public_mcp_edge",
       "class": "external",
-      "description": "The AWS public MCP and OAuth edge passes public mTLS, JWKS, Grant, refresh, revocation and failure drills."
+      "description": "The AWS public MCP and OAuth edge passes public mTLS, JWKS, Grant, refresh, revocation, negative-security and rotation drills.",
+      "repository_evidence": [
+        "docs/operations/public-mcp-edge-review.md",
+        "docs/operations/remote-mcp-oauth-client-provisioning.md",
+        "tests/integration/remote-mcp-public-chain.test.ts",
+        "tests/integration/remote-mcp-oauth-live-http.test.ts",
+        "tests/integration/remote-mcp-oauth-live-refresh.test.ts"
+      ],
+      "verification_command": "RELEASE_SHA=... pnpm mvp:release:report"
     },
     {
       "id": "mcp_host_interoperability",
