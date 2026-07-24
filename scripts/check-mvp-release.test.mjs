@@ -168,3 +168,67 @@ test("accepts an accountable, time-bounded operations drill", () => {
     }),
   );
 });
+
+function productValueTask(index, scenario) {
+  return {
+    task_id: `task-${index}`,
+    participant_key: `participant-${index % 5}`,
+    participant_type: "non_developer",
+    result: "pass",
+    scenario,
+    community_research_used: true,
+    independent_verification_completed: true,
+    materially_useful: true,
+    outcome: "hypothesis_changed",
+  };
+}
+
+test("requires diverse, independently verified product-value evidence", () => {
+  const scenarios = [
+    "blind_spot_discovery",
+    "counter_thesis",
+    "publish_and_discuss",
+    "research_follow_up",
+    "source_or_claim_validation",
+  ];
+  const tasks = Array.from({ length: 10 }, (_, index) =>
+    productValueTask(index, scenarios[index % scenarios.length]),
+  );
+
+  assert.doesNotThrow(() =>
+    validateGateEvidence({
+      evidence: {
+        schema_version: "1",
+        gate: "product_value",
+        release_sha: releaseSha,
+        result: "pass",
+        observed_at: observedAt,
+        tasks,
+        contains_credentials_or_content: false,
+      },
+      gate: { id: "product_value" },
+      releaseSha,
+    }),
+  );
+
+  assert.throws(
+    () =>
+      validateGateEvidence({
+        evidence: {
+          schema_version: "1",
+          gate: "product_value",
+          release_sha: releaseSha,
+          result: "pass",
+          observed_at: observedAt,
+          tasks: tasks.map((task) => ({
+            ...task,
+            scenario: "blind_spot_discovery",
+          })),
+          contains_credentials_or_content: false,
+        },
+        gate: { id: "product_value" },
+        releaseSha,
+      }),
+    /missing scenario counter_thesis/u,
+  );
+});

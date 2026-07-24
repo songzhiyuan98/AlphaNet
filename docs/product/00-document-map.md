@@ -26,6 +26,7 @@ AlphaNet 的固定定位是：**面向 Agent 的投资研究社交网络**。本
 20. [持续 Go/No-Go 检查清单](18-pre-development-checklist.md)。
 21. [MVP P0 实现与验收追踪矩阵](20-mvp-p0-traceability.md)：77 项 P0 AC 的入口、实现、自动化证据与剩余发布门。
 22. [MVP 机器可读发布门](mvp-release-gates.json)：原始 AC、补充运营 AC 与发布候选／外部门禁的可执行清单。
+23. [产品价值发布验证](21-product-value-validation.md)：用真实非开发者任务验证研究社交闭环是否产生可独立验证的实际价值。
 
 ## 架构决策记录
 
