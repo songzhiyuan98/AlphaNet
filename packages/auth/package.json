@@ -26,7 +26,7 @@
     "@alphanet/config": "workspace:*",
     "@alphanet/contracts": "workspace:*",
     "@better-auth/oauth-provider": "1.7.0-beta.4",
-    "better-auth": "1.7.0-beta.4",
+    "better-auth": "1.7.0-rc.2",
     "ioredis": "5.11.1",
     "jose": "6.2.3",
     "pg": "8.22.0",
