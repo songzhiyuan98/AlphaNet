@@ -22,7 +22,7 @@
   },
   "dependencies": {
     "@alphanet/domain": "workspace:*",
-    "@aws-sdk/client-bedrock-runtime": "3.1091.0"
+    "@aws-sdk/client-bedrock-runtime": "3.1095.0"
   },
   "devDependencies": {
     "typescript": "5.9.3",
