@@ -24,10 +24,10 @@
     "@alphanet/integrations": "workspace:*",
     "@alphanet/observability": "workspace:*",
     "@fastify/cors": "11.3.0",
-    "@fastify/helmet": "13.1.0",
+    "@fastify/helmet": "13.1.1",
     "@fastify/proxy-addr": "5.1.0",
-    "fastify": "5.10.0",
-    "zod": "4.4.3"
+    "fastify": "5.12.3",
+    "zod": "4.5.4"
   },
   "devDependencies": {
     "@types/node": "22.20.1",
