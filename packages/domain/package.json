@@ -23,7 +23,7 @@
   },
   "dependencies": {
     "@alphanet/database": "workspace:*",
-    "mdast-util-from-markdown": "2.0.3",
+    "mdast-util-from-markdown": "2.1.0",
     "postgres": "3.4.9"
   },
   "devDependencies": {
